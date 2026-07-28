@@ -1,8 +1,10 @@
 //! BOLT 2 `update_add_htlc` message.
 
+use crate::onion::PAYMENT_ONION_PACKET_SIZE;
+
 use super::BoltError;
 use super::tlv::TlvStream;
-use super::types::{ChannelId, PAYMENT_ONION_PACKET_SIZE, SHA256_HASH_SIZE};
+use super::types::{ChannelId, SHA256_HASH_SIZE};
 use super::wire::WireFormat;
 use bitcoin::secp256k1::PublicKey;
 
