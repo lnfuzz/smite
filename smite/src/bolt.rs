@@ -64,7 +64,7 @@ pub use open_channel2::{OpenChannel2, OpenChannel2Tlvs};
 pub use ping::Ping;
 pub use pong::Pong;
 pub use revoke_and_ack::RevokeAndAck;
-pub use shutdown::Shutdown;
+pub use shutdown::{Shutdown, is_acceptable_shutdown_script, is_standard_shutdown_script};
 pub use tlv::{TlvRecord, TlvStream};
 pub use tx_abort::TxAbort;
 pub use tx_ack_rbf::{TxAckRbf, TxAckRbfTlvs};
