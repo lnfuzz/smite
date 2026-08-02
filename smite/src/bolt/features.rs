@@ -17,6 +17,8 @@ impl Features {
     pub const OPTION_STATIC_REMOTEKEY: FeatureBit = 12;
     /// `option_anchors` (bits 22/23).
     pub const OPTION_ANCHORS: FeatureBit = 22;
+    /// `option_shutdown_anysegwit` (bits 26/27).
+    pub const OPTION_SHUTDOWN_ANYSEGWIT: FeatureBit = 26;
     /// `option_dual_fund` (bits 28/29).
     pub const OPTION_DUAL_FUND: FeatureBit = 28;
     /// `zero_fee_commitments` (bits 40/41).
@@ -27,6 +29,8 @@ impl Features {
     pub const OPTION_SCID_ALIAS: FeatureBit = 46;
     /// `option_zeroconf` (bits 50/51).
     pub const OPTION_ZEROCONF: FeatureBit = 50;
+    /// `option_simple_close` (bits 60/61).
+    pub const OPTION_SIMPLE_CLOSE: FeatureBit = 60;
     /// `option_simple_taproot` (bits 80/81).
     pub const OPTION_SIMPLE_TAPROOT: FeatureBit = 80;
     /// `option_simple_taproot_staging` (bits 180/181).
