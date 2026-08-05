@@ -1,7 +1,7 @@
 //! BOLT 2 `accept_channel` oracle, for the v1 outbound channel funding flow.
 
 use super::Oracle;
-use crate::bolt::{AcceptChannel, OpenChannel};
+use crate::bolt::{AcceptChannel, Features, OpenChannel};
 use crate::channel_tx::CommitmentCost;
 use crate::pending_channel::PendingChannel;
 use crate::violation::Violation;
@@ -105,7 +105,12 @@ fn verify_accepted_open_channel(open_channel: &OpenChannel) -> Result<(), String
     // Check that the channel type was included.
     // TODO: Check option_channel_type in negotiated features since it is
     // assumed to be supported.
-    let Some(channel_type) = open_channel.tlvs.channel_type.as_deref() else {
+    let Some(channel_type) = open_channel
+        .tlvs
+        .channel_type
+        .as_deref()
+        .map(Features::from)
+    else {
         return Err("open_channel does not include a channel_type".to_string());
     };
 
@@ -131,7 +136,7 @@ fn verify_accepted_open_channel(open_channel: &OpenChannel) -> Result<(), String
     // Check the initial commitment satisfies the channel reserve.
     verify_initial_commitment(
         open_channel,
-        channel_type,
+        &channel_type,
         open_channel.channel_reserve_satoshis,
     )
 }
@@ -150,7 +155,12 @@ fn verify_accept_channel(
     open_channel: &OpenChannel,
 ) -> Result<(), String> {
     // Check that the channel type was included.
-    let Some(channel_type) = accept_channel.tlvs.channel_type.as_deref() else {
+    let Some(channel_type) = accept_channel
+        .tlvs
+        .channel_type
+        .as_deref()
+        .map(Features::from)
+    else {
         return Err("accept_channel does not include a channel_type".to_string());
     };
 
@@ -197,7 +207,7 @@ fn verify_accept_channel(
     // Check the initial commitment satisfies the channel reserve.
     verify_initial_commitment(
         open_channel,
-        channel_type,
+        &channel_type,
         accept_channel.channel_reserve_satoshis,
     )
 }
@@ -219,7 +229,7 @@ fn verify_accept_channel(
 ///   they are not unnecessarily subtracted for these channel types.
 fn verify_initial_commitment(
     open_channel: &OpenChannel,
-    channel_type: &[u8],
+    channel_type: &Features,
     channel_reserve_satoshis: u64,
 ) -> Result<(), String> {
     // Check that the opener can afford the proposed feerate.
