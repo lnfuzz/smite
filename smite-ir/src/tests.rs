@@ -1384,6 +1384,102 @@ fn generated_channel_announcement_program_structure() {
         build_count, 1,
         "expected exactly one BuildChannelAnnouncement"
     );
+
+    // The funding transaction must be created, broadcast, and confirmed before
+    // its short_channel_id is looked up.
+    let position = |target: &Operation| {
+        ops.iter()
+            .position(|op| std::mem::discriminant(*op) == std::mem::discriminant(target))
+            .unwrap_or_else(|| panic!("expected a {target}"))
+    };
+    let create = position(&Operation::CreateFundingTransaction);
+    let broadcast = position(&Operation::BroadcastTransaction);
+    let mine = position(&Operation::MineBlocks(0));
+    let lookup = position(&Operation::LookupShortChannelId);
+    assert!(
+        create < broadcast && broadcast < mine && mine < lookup,
+        "expected Create < Broadcast < Mine < Lookup, got {create} {broadcast} {mine} {lookup}",
+    );
+}
+
+// The bitcoin keys the message announces must be the ones committed to by
+// the funding output's witness script, and the announced scid must come from
+// that same funding transaction. Otherwise the announcement cannot pass
+// on-chain validation.
+#[test]
+fn generated_channel_announcement_commits_to_its_funding_output() {
+    for seed in 0..100 {
+        let program = generate_channel_announcement_program(seed);
+        let find = |target: &Operation| {
+            program
+                .instructions
+                .iter()
+                .position(|i| {
+                    std::mem::discriminant(&i.operation) == std::mem::discriminant(target)
+                })
+                .unwrap_or_else(|| panic!("expected a {target}"))
+        };
+
+        let create_idx = find(&Operation::CreateFundingTransaction);
+        let lookup_idx = find(&Operation::LookupShortChannelId);
+        let build_idx = find(&Operation::BuildChannelAnnouncement);
+
+        let create = &program.instructions[create_idx];
+        let lookup = &program.instructions[lookup_idx];
+        let build = &program.instructions[build_idx];
+
+        // The scid is looked up from the funding transaction just created, and
+        // that scid is what the announcement carries.
+        assert_eq!(lookup.inputs[0], create_idx, "seed {seed}: scid lookup");
+        assert_eq!(build.inputs[2], lookup_idx, "seed {seed}: announced scid");
+
+        // Each announced bitcoin key is the private key behind the
+        // corresponding funding pubkey.
+        for (funding_pos, announced_pos) in [(0, 5), (1, 6)] {
+            let derive = &program.instructions[create.inputs[funding_pos]];
+            assert!(
+                matches!(derive.operation, Operation::DerivePoint),
+                "seed {seed}: funding pubkey {funding_pos} should be a DerivePoint",
+            );
+            assert_eq!(
+                derive.inputs[0],
+                build.inputs[announced_pos],
+                "seed {seed}: bitcoin_key_{} must match the funding output",
+                funding_pos + 1,
+            );
+        }
+    }
+}
+
+// Coin selection fails outright for amounts above Bitcoin's maximum supply, so
+// the generator must emit plausible funding values rather than full-range
+// randoms. Without this the program aborts before sending the announcement.
+#[test]
+fn generated_channel_announcement_uses_plausible_funding_values() {
+    for seed in 0..100 {
+        let program = generate_channel_announcement_program(seed);
+        let create_idx = program
+            .instructions
+            .iter()
+            .position(|i| matches!(i.operation, Operation::CreateFundingTransaction))
+            .expect("expected a CreateFundingTransaction");
+        let create = &program.instructions[create_idx];
+
+        match program.instructions[create.inputs[2]].operation {
+            Operation::LoadAmount(sats) => assert!(
+                (0..=ChannelAnnouncementGenerator::MAX_FUNDING_SATOSHIS).contains(&sats),
+                "seed {seed}: implausible funding amount {sats}",
+            ),
+            ref op => panic!("seed {seed}: expected LoadAmount, got {op}"),
+        }
+        match program.instructions[create.inputs[3]].operation {
+            Operation::LoadFeeratePerKw(feerate) => assert!(
+                (0..=ChannelAnnouncementGenerator::MAX_FEERATE_PER_KW).contains(&feerate),
+                "seed {seed}: implausible feerate {feerate}",
+            ),
+            ref op => panic!("seed {seed}: expected LoadFeeratePerKw, got {op}"),
+        }
+    }
 }
 
 fn generate_node_announcement_program(seed: u64) -> Program {
@@ -2279,8 +2375,8 @@ fn instr_reorder_returns_false_on_empty() {
 
 #[test]
 fn instr_reorder_returns_false_on_single_or_no_act() {
-    // ChannelAnnouncementGenerator produces a single Act instruction: SendMessage.
-    let mut program = generate_channel_announcement_program(0);
+    // NodeAnnouncementGenerator produces a single Act instruction: SendMessage.
+    let mut program = generate_node_announcement_program(0);
     let mutator = InstructionReorderMutator;
     let mut rng = SmallRng::seed_from_u64(0);
 
