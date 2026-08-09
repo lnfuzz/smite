@@ -71,14 +71,11 @@ impl<T: Target, S: SnapshotSetup<T>> Scenario for IrScenario<T, S> {
                 // crash.
                 log::debug!("[{:?}] execute connection error: {e}", start.elapsed());
             }
-            Err(ExecuteError::UnexpectedMessage { expected, got }) => {
+            Err(e @ ExecuteError::UnexpectedMessage { .. }) => {
                 // Target replied with an unexpected message type (often
                 // Error/Warning when rejecting our input). Usually normal
                 // protocol behavior.
-                log::debug!(
-                    "[{:?}] unexpected message: expected {expected}, got {got}",
-                    start.elapsed(),
-                );
+                log::debug!("[{:?}] {e}", start.elapsed());
             }
             Err(ExecuteError::PeerError(e)) => {
                 // Normal protocol behavior: the target rejected our input.

@@ -406,10 +406,15 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                 // -- Act operations --
                 Operation::SendMessage => {
                     let bytes = resolve_message(&variables, instr.inputs[0]);
-                    let msg_type = bytes.get(..2).map(|b| u16::from_be_bytes([b[0], b[1]]));
+                    let ty = u16::from_be_bytes(
+                        *bytes
+                            .first_chunk::<2>()
+                            .expect("encoded message has a 2-byte type prefix"),
+                    );
                     log::debug!(
-                        "[{:?}] SendMessage: type {msg_type:?}, {} bytes",
+                        "[{:?}] SendMessage: {}, {} bytes",
                         start.elapsed(),
+                        MessageType::from_u16(ty),
                         bytes.len(),
                     );
                     self.conn.send_message(bytes)?;
@@ -1219,8 +1224,8 @@ fn recv_non_ping(conn: &mut impl Connection, timeout: Duration) -> Result<Messag
                 let pong = Message::Pong(Pong::respond_to(&ping)).encode();
                 conn.send_message(&pong)?;
             }
-            Message::Unknown { msg_type, .. } => {
-                log::debug!("skipping unknown message type {msg_type}");
+            Message::Unknown { .. } => {
+                log::debug!("skipping message {msg}");
             }
             // TODO: Gossip messages are not currently consumed by any scenario,
             // so skip them for now. Revisit this once we want to extract their
@@ -1230,7 +1235,7 @@ fn recv_non_ping(conn: &mut impl Connection, timeout: Duration) -> Result<Messag
             | Message::ChannelUpdate(_)
             | Message::AnnouncementSignatures(_)
             | Message::GossipTimestampFilter(_) => {
-                log::debug!("skipping gossip message type {}", msg.msg_type());
+                log::debug!("skipping gossip message {msg}");
             }
             // Surface the received error message.
             Message::Error(e) => return Err(ExecuteError::PeerError(e)),
@@ -1802,17 +1807,14 @@ mod tests {
     fn decode_sent_channel_announcement(bytes: &[u8]) -> ChannelAnnouncement {
         match Message::decode(bytes).expect("valid message") {
             Message::ChannelAnnouncement(ca) => ca,
-            other => panic!(
-                "expected ChannelAnnouncement, got type {}",
-                other.msg_type()
-            ),
+            other => panic!("expected channel_announcement(256), got {other}"),
         }
     }
 
     fn decode_open_channel(bytes: &[u8]) -> OpenChannel {
         match Message::decode(bytes).expect("valid message") {
             Message::OpenChannel(oc) => oc,
-            other => panic!("expected OpenChannel, got type {}", other.msg_type()),
+            other => panic!("expected open_channel(32), got {other}"),
         }
     }
 
@@ -1945,10 +1947,7 @@ mod tests {
         assert_eq!(executor.conn.sent.len(), 1);
         let ca = match Message::decode(&executor.conn.sent[0]).expect("valid message") {
             Message::ChannelAnnouncement(ca) => ca,
-            other => panic!(
-                "expected ChannelAnnouncement, got type {}",
-                other.msg_type()
-            ),
+            other => panic!("expected channel_announcement(256), got {other}"),
         };
 
         let secp = Secp256k1::new();
@@ -2016,7 +2015,7 @@ mod tests {
         assert_eq!(executor.conn.sent.len(), 1);
         let na = match Message::decode(&executor.conn.sent[0]).expect("valid message") {
             Message::NodeAnnouncement(na) => na,
-            other => panic!("expected NodeAnnouncement, got type {}", other.msg_type()),
+            other => panic!("expected node_announcement(257), got {other}"),
         };
 
         let secp = Secp256k1::new();
@@ -2108,7 +2107,7 @@ mod tests {
         assert_eq!(executor.conn.sent.len(), 1);
         let cu = match Message::decode(&executor.conn.sent[0]).expect("valid message") {
             Message::ChannelUpdate(cu) => cu,
-            other => panic!("expected ChannelUpdate, got type {}", other.msg_type()),
+            other => panic!("expected channel_update(258), got {other}"),
         };
 
         assert_eq!(cu.chain_hash, sample_context().chain_hash);
@@ -2219,10 +2218,7 @@ mod tests {
         assert_eq!(executor.conn.sent.len(), 1);
         let ann_sigs = match Message::decode(&executor.conn.sent[0]).expect("valid message") {
             Message::AnnouncementSignatures(s) => s,
-            other => panic!(
-                "expected AnnouncementSignatures, got type {}",
-                other.msg_type()
-            ),
+            other => panic!("expected announcement_signatures(259), got {other}"),
         };
 
         assert_eq!(ann_sigs.channel_id, ChannelId::new(channel_id_bytes));
@@ -2521,13 +2517,13 @@ mod tests {
         // Verify the first message was `open_channel`.
         let oc = Message::decode(&executor.conn.sent[0]).unwrap();
         let Message::OpenChannel(_) = oc else {
-            panic!("expected OpenChannel, got {:?}", oc.msg_type());
+            panic!("expected open_channel(32), got {oc}");
         };
 
         // Verify the second message was the pong.
         let pong = Message::decode(&executor.conn.sent[1]).unwrap();
         let Message::Pong(pong) = pong else {
-            panic!("expected Pong, got {:?}", pong.msg_type());
+            panic!("expected pong(19), got {pong}");
         };
         assert_eq!(pong.ignored.len(), 4);
     }
@@ -3399,7 +3395,7 @@ mod tests {
         assert_eq!(executor.conn.sent.len(), 1);
         let fc = match Message::decode(&executor.conn.sent[0]).expect("valid message") {
             Message::FundingCreated(fc) => fc,
-            other => panic!("expected FundingCreated, got type {}", other.msg_type()),
+            other => panic!("expected funding_created(34), got {other}"),
         };
 
         assert_eq!(fc.temporary_channel_id, ChannelId::new([0xbb; 32]));
@@ -3515,7 +3511,7 @@ mod tests {
 
         let fc = match Message::decode(&executor.conn.sent[0]).expect("valid message") {
             Message::FundingCreated(fc) => fc,
-            other => panic!("expected FundingCreated, got type {}", other.msg_type()),
+            other => panic!("expected funding_created(34), got {other}"),
         };
         assert_eq!(fc.temporary_channel_id, ChannelId::new([0xbb; 32]));
         assert_eq!(
@@ -3557,7 +3553,7 @@ mod tests {
 
         let fc = match Message::decode(&executor.conn.sent[0]).expect("valid message") {
             Message::FundingCreated(fc) => fc,
-            other => panic!("expected FundingCreated, got type {}", other.msg_type()),
+            other => panic!("expected funding_created(34), got {other}"),
         };
         assert_eq!(fc.temporary_channel_id, ChannelId::new([0xbb; 32]));
         assert_eq!(
@@ -3710,7 +3706,7 @@ mod tests {
         // not carry the short_channel_id TLV.
         let cr1 = match Message::decode(&executor.conn.sent[1]).expect("valid message") {
             Message::ChannelReady(cr) => cr,
-            other => panic!("expected ChannelReady, got type {}", other.msg_type()),
+            other => panic!("expected channel_ready(36), got {other}"),
         };
         let expected_pcp1 = PublicKey::from_str(
             "023da092f6980e58d2c037173180e9a465476026ee50f96695963e8efe436f54eb",
@@ -3724,7 +3720,7 @@ mod tests {
         // carry the alias SCID we loaded in its short_channel_id TLV.
         let cr2 = match Message::decode(&executor.conn.sent[2]).expect("valid message") {
             Message::ChannelReady(cr) => cr,
-            other => panic!("expected ChannelReady, got type {}", other.msg_type()),
+            other => panic!("expected channel_ready(36), got {other}"),
         };
         let expected_pcp2 = PublicKey::from_str(
             "030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c1",
@@ -3776,7 +3772,7 @@ mod tests {
         assert_eq!(executor.conn.sent.len(), 1);
         let sd = match Message::decode(&executor.conn.sent[0]).expect("valid message") {
             Message::Shutdown(sd) => sd,
-            other => panic!("expected Shutdown, got type {}", other.msg_type()),
+            other => panic!("expected shutdown(38), got {other}"),
         };
         assert_eq!(sd.channel_id, channel_id);
         assert_eq!(sd.scriptpubkey, script.encode());
@@ -3816,7 +3812,7 @@ mod tests {
         assert_eq!(executor.conn.sent.len(), 1);
         let sd = match Message::decode(&executor.conn.sent[0]).expect("valid message") {
             Message::Shutdown(sd) => sd,
-            other => panic!("expected Shutdown, got type {}", other.msg_type()),
+            other => panic!("expected shutdown(38), got {other}"),
         };
         assert_eq!(sd.channel_id, channel_id);
         assert!(sd.scriptpubkey.is_empty());

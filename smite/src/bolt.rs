@@ -351,6 +351,12 @@ pub enum Message {
     },
 }
 
+impl std::fmt::Display for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.msg_type())
+    }
+}
+
 impl Message {
     /// Returns the message type.
     #[must_use]
@@ -391,6 +397,13 @@ impl Message {
             Self::GossipTimestampFilter(_) => MessageType::GOSSIP_TIMESTAMP_FILTER,
             Self::Unknown { msg_type, .. } => MessageType(*msg_type),
         }
+    }
+
+    /// Returns the message type name (e.g. `open_channel`), or `unknown` for an
+    /// unrecognized type.
+    #[must_use]
+    pub fn msg_name(&self) -> &'static str {
+        self.msg_type().name()
     }
 
     /// Encodes to wire format (with 2-byte message type prefix).
@@ -1211,176 +1224,206 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     #[test]
     fn message_type_values() {
-        assert_eq!(
-            Message::Warning(Warning::all_channels("")).msg_type(),
-            MessageType::WARNING
-        );
-        assert_eq!(Message::Init(Init::empty()).msg_type(), MessageType::INIT);
-        assert_eq!(
-            Message::Error(Error::all_channels("")).msg_type(),
-            MessageType::ERROR
-        );
-        assert_eq!(Message::Ping(Ping::new(0)).msg_type(), MessageType::PING);
-        assert_eq!(Message::Pong(Pong::new(0)).msg_type(), MessageType::PONG);
-        assert_eq!(
-            Message::OpenChannel(sample_open_channel()).msg_type(),
-            MessageType::OPEN_CHANNEL
-        );
-        assert_eq!(
-            Message::AcceptChannel(sample_accept_channel()).msg_type(),
-            MessageType::ACCEPT_CHANNEL
-        );
-        assert_eq!(
-            Message::FundingCreated(sample_funding_created()).msg_type(),
-            MessageType::FUNDING_CREATED
-        );
-        assert_eq!(
-            Message::FundingSigned(sample_funding_signed()).msg_type(),
-            MessageType::FUNDING_SIGNED
-        );
-        assert_eq!(
-            Message::ChannelReady(sample_channel_ready()).msg_type(),
-            MessageType::CHANNEL_READY
-        );
-        assert_eq!(
-            Message::Shutdown(Shutdown::for_channel(ChannelId([0; 32]), vec![])).msg_type(),
-            MessageType::SHUTDOWN
-        );
-        assert_eq!(
-            Message::ClosingComplete(sample_closing_complete()).msg_type(),
-            MessageType::CLOSING_COMPLETE,
-        );
-        assert_eq!(
-            Message::ClosingSig(sample_closing_sig()).msg_type(),
-            MessageType::CLOSING_SIG,
-        );
-        assert_eq!(
-            Message::OpenChannel2(sample_open_channel2()).msg_type(),
-            MessageType::OPEN_CHANNEL2
-        );
-        assert_eq!(
-            Message::AcceptChannel2(sample_accept_channel2(None)).msg_type(),
-            MessageType::ACCEPT_CHANNEL2
-        );
-        assert_eq!(
-            Message::TxAddInput(sample_tx_add_input()).msg_type(),
-            MessageType::TX_ADD_INPUT
-        );
-        assert_eq!(
-            Message::TxRemoveInput(TxRemoveInput {
-                channel_id: ChannelId::new([0; CHANNEL_ID_SIZE]),
-                serial_id: 0
-            })
-            .msg_type(),
-            MessageType::TX_REMOVE_INPUT
-        );
-        assert_eq!(
-            Message::TxRemoveOutput(TxRemoveOutput {
-                channel_id: ChannelId::new([0; CHANNEL_ID_SIZE]),
-                serial_id: 0
-            })
-            .msg_type(),
-            MessageType::TX_REMOVE_OUTPUT
-        );
-        assert_eq!(
-            Message::TxComplete(TxComplete {
-                channel_id: ChannelId::new([0; CHANNEL_ID_SIZE])
-            })
-            .msg_type(),
-            MessageType::TX_COMPLETE
-        );
-        assert_eq!(
-            Message::TxInitRbf(TxInitRbf {
-                channel_id: ChannelId::new([0; CHANNEL_ID_SIZE]),
-                locktime: 0,
-                feerate: 0,
-                tlvs: TxInitRbfTlvs::default(),
-            })
-            .msg_type(),
-            MessageType::TX_INIT_RBF
-        );
-        assert_eq!(
-            Message::TxAckRbf(TxAckRbf {
-                channel_id: ChannelId::new([0; CHANNEL_ID_SIZE]),
-                tlvs: TxAckRbfTlvs::default(),
-            })
-            .msg_type(),
-            MessageType::TX_ACK_RBF
-        );
-        assert_eq!(
-            Message::TxAbort(TxAbort::new(ChannelId::new([0; CHANNEL_ID_SIZE]), "")).msg_type(),
-            MessageType::TX_ABORT
-        );
-        assert_eq!(
-            Message::UpdateAddHtlc(sample_update_add_htlc()).msg_type(),
-            MessageType::UPDATE_ADD_HTLC
-        );
-        assert_eq!(
-            Message::UpdateFulfillHtlc(UpdateFulfillHtlc {
-                channel_id: ChannelId::new([0; CHANNEL_ID_SIZE]),
-                id: 0,
-                payment_preimage: [0; 32],
-                tlvs: UpdateFulfillHtlcTlvs::default(),
-            })
-            .msg_type(),
-            MessageType::UPDATE_FULFILL_HTLC
-        );
-        assert_eq!(
-            Message::UpdateFailHtlc(UpdateFailHtlc {
-                channel_id: ChannelId::new([0; CHANNEL_ID_SIZE]),
-                id: 0,
-                reason: vec![],
-                tlvs: UpdateFailHtlcTlvs::default(),
-            })
-            .msg_type(),
-            MessageType::UPDATE_FAIL_HTLC
-        );
-        assert_eq!(
-            Message::CommitmentSigned(sample_commitment_signed()).msg_type(),
-            MessageType::COMMITMENT_SIGNED
-        );
-        assert_eq!(
-            Message::RevokeAndAck(sample_revoke_and_ack()).msg_type(),
-            MessageType::REVOKE_AND_ACK
-        );
-        assert_eq!(
-            Message::UpdateFailMalformedHtlc(UpdateFailMalformedHtlc {
-                channel_id: ChannelId::new([0x42; CHANNEL_ID_SIZE]),
-                id: 12345,
-                sha256_of_onion: sha256::Hash::from_byte_array([0xaa; SHA256_HASH_SIZE]),
-                failure_code: 0x8001,
-            })
-            .msg_type(),
-            MessageType::UPDATE_FAIL_MALFORMED_HTLC
-        );
-        assert_eq!(
-            Message::ChannelAnnouncement(sample_channel_announcement()).msg_type(),
-            MessageType::CHANNEL_ANNOUNCEMENT
-        );
-        assert_eq!(
-            Message::NodeAnnouncement(sample_node_announcement()).msg_type(),
-            MessageType::NODE_ANNOUNCEMENT
-        );
-        assert_eq!(
-            Message::ChannelUpdate(sample_channel_update()).msg_type(),
-            MessageType::CHANNEL_UPDATE
-        );
-        assert_eq!(
-            Message::AnnouncementSignatures(sample_announcement_signatures()).msg_type(),
-            MessageType::ANNOUNCEMENT_SIGNATURES
-        );
-        assert_eq!(
-            Message::GossipTimestampFilter(GossipTimestampFilter::no_gossip([0u8; 32])).msg_type(),
-            MessageType::GOSSIP_TIMESTAMP_FILTER
-        );
-        assert_eq!(
-            Message::Unknown {
-                msg_type: 99,
-                payload: vec![]
-            }
-            .msg_type(),
-            MessageType(99)
-        );
+        let cases = vec![
+            (
+                Message::Warning(Warning::all_channels("")),
+                "warning",
+                MessageType::WARNING,
+            ),
+            (Message::Init(Init::empty()), "init", MessageType::INIT),
+            (
+                Message::Error(Error::all_channels("")),
+                "error",
+                MessageType::ERROR,
+            ),
+            (Message::Ping(Ping::new(0)), "ping", MessageType::PING),
+            (Message::Pong(Pong::new(0)), "pong", MessageType::PONG),
+            (
+                Message::OpenChannel(sample_open_channel()),
+                "open_channel",
+                MessageType::OPEN_CHANNEL,
+            ),
+            (
+                Message::AcceptChannel(sample_accept_channel()),
+                "accept_channel",
+                MessageType::ACCEPT_CHANNEL,
+            ),
+            (
+                Message::FundingCreated(sample_funding_created()),
+                "funding_created",
+                MessageType::FUNDING_CREATED,
+            ),
+            (
+                Message::FundingSigned(sample_funding_signed()),
+                "funding_signed",
+                MessageType::FUNDING_SIGNED,
+            ),
+            (
+                Message::ChannelReady(sample_channel_ready()),
+                "channel_ready",
+                MessageType::CHANNEL_READY,
+            ),
+            (
+                Message::Shutdown(Shutdown::for_channel(ChannelId([0; 32]), vec![])),
+                "shutdown",
+                MessageType::SHUTDOWN,
+            ),
+            (
+                Message::ClosingComplete(sample_closing_complete()),
+                "closing_complete",
+                MessageType::CLOSING_COMPLETE,
+            ),
+            (
+                Message::ClosingSig(sample_closing_sig()),
+                "closing_sig",
+                MessageType::CLOSING_SIG,
+            ),
+            (
+                Message::OpenChannel2(sample_open_channel2()),
+                "open_channel2",
+                MessageType::OPEN_CHANNEL2,
+            ),
+            (
+                Message::AcceptChannel2(sample_accept_channel2(None)),
+                "accept_channel2",
+                MessageType::ACCEPT_CHANNEL2,
+            ),
+            (
+                Message::TxAddInput(sample_tx_add_input()),
+                "tx_add_input",
+                MessageType::TX_ADD_INPUT,
+            ),
+            (
+                Message::TxRemoveInput(TxRemoveInput {
+                    channel_id: ChannelId::new([0; CHANNEL_ID_SIZE]),
+                    serial_id: 0,
+                }),
+                "tx_remove_input",
+                MessageType::TX_REMOVE_INPUT,
+            ),
+            (
+                Message::TxRemoveOutput(TxRemoveOutput {
+                    channel_id: ChannelId::new([0; CHANNEL_ID_SIZE]),
+                    serial_id: 0,
+                }),
+                "tx_remove_output",
+                MessageType::TX_REMOVE_OUTPUT,
+            ),
+            (
+                Message::TxComplete(TxComplete {
+                    channel_id: ChannelId::new([0; CHANNEL_ID_SIZE]),
+                }),
+                "tx_complete",
+                MessageType::TX_COMPLETE,
+            ),
+            (
+                Message::TxInitRbf(TxInitRbf {
+                    channel_id: ChannelId::new([0; CHANNEL_ID_SIZE]),
+                    locktime: 0,
+                    feerate: 0,
+                    tlvs: TxInitRbfTlvs::default(),
+                }),
+                "tx_init_rbf",
+                MessageType::TX_INIT_RBF,
+            ),
+            (
+                Message::TxAckRbf(TxAckRbf {
+                    channel_id: ChannelId::new([0; CHANNEL_ID_SIZE]),
+                    tlvs: TxAckRbfTlvs::default(),
+                }),
+                "tx_ack_rbf",
+                MessageType::TX_ACK_RBF,
+            ),
+            (
+                Message::TxAbort(TxAbort::new(ChannelId::new([0; CHANNEL_ID_SIZE]), "")),
+                "tx_abort",
+                MessageType::TX_ABORT,
+            ),
+            (
+                Message::UpdateAddHtlc(sample_update_add_htlc()),
+                "update_add_htlc",
+                MessageType::UPDATE_ADD_HTLC,
+            ),
+            (
+                Message::UpdateFulfillHtlc(UpdateFulfillHtlc {
+                    channel_id: ChannelId::new([0; CHANNEL_ID_SIZE]),
+                    id: 0,
+                    payment_preimage: [0; 32],
+                    tlvs: UpdateFulfillHtlcTlvs::default(),
+                }),
+                "update_fulfill_htlc",
+                MessageType::UPDATE_FULFILL_HTLC,
+            ),
+            (
+                Message::UpdateFailHtlc(UpdateFailHtlc {
+                    channel_id: ChannelId::new([0; CHANNEL_ID_SIZE]),
+                    id: 0,
+                    reason: vec![],
+                    tlvs: UpdateFailHtlcTlvs::default(),
+                }),
+                "update_fail_htlc",
+                MessageType::UPDATE_FAIL_HTLC,
+            ),
+            (
+                Message::CommitmentSigned(sample_commitment_signed()),
+                "commitment_signed",
+                MessageType::COMMITMENT_SIGNED,
+            ),
+            (
+                Message::RevokeAndAck(sample_revoke_and_ack()),
+                "revoke_and_ack",
+                MessageType::REVOKE_AND_ACK,
+            ),
+            (
+                Message::UpdateFailMalformedHtlc(UpdateFailMalformedHtlc {
+                    channel_id: ChannelId::new([0x42; CHANNEL_ID_SIZE]),
+                    id: 12345,
+                    sha256_of_onion: sha256::Hash::from_byte_array([0xaa; SHA256_HASH_SIZE]),
+                    failure_code: 0x8001,
+                }),
+                "update_fail_malformed_htlc",
+                MessageType::UPDATE_FAIL_MALFORMED_HTLC,
+            ),
+            (
+                Message::ChannelAnnouncement(sample_channel_announcement()),
+                "channel_announcement",
+                MessageType::CHANNEL_ANNOUNCEMENT,
+            ),
+            (
+                Message::NodeAnnouncement(sample_node_announcement()),
+                "node_announcement",
+                MessageType::NODE_ANNOUNCEMENT,
+            ),
+            (
+                Message::ChannelUpdate(sample_channel_update()),
+                "channel_update",
+                MessageType::CHANNEL_UPDATE,
+            ),
+            (
+                Message::AnnouncementSignatures(sample_announcement_signatures()),
+                "announcement_signatures",
+                MessageType::ANNOUNCEMENT_SIGNATURES,
+            ),
+            (
+                Message::GossipTimestampFilter(GossipTimestampFilter::no_gossip([0u8; 32])),
+                "gossip_timestamp_filter",
+                MessageType::GOSSIP_TIMESTAMP_FILTER,
+            ),
+            (
+                Message::Unknown {
+                    msg_type: 99,
+                    payload: vec![],
+                },
+                "unknown",
+                MessageType(99),
+            ),
+        ];
+        for (msg, name, ty) in cases {
+            assert_eq!(msg.msg_type(), ty, "wrong type number for {name}");
+            assert_eq!(msg.msg_name(), name, "wrong type name for {ty}");
+            assert_eq!(msg.to_string(), format!("{name}({})", ty.as_u16()));
+            assert_eq!(msg.to_string(), ty.to_string());
+        }
     }
 
     #[test]

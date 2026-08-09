@@ -87,7 +87,7 @@ impl<T: Target> NoiseScenario<T> {
         let init_bytes = recv_message(&mut self.stream, cipher);
         let init = match Message::decode(&init_bytes).expect("valid init message") {
             Message::Init(init) => init,
-            other => panic!("expected init, got {other:?}"),
+            other => panic!("expected init(16), got {other}"),
         };
         let echo_init = Init::echo(&init);
         let encoded = Message::Init(echo_init).encode();
