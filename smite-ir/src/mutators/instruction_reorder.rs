@@ -6,7 +6,9 @@ use super::Mutator;
 use crate::Program;
 
 /// Swaps two `Act` instructions that have no data dependencies between them.
-/// This explores alternative execution orderings while preserving SSA invariants.
+/// An `Act` is any instruction that is not pure, i.e. one whose position in the
+/// program affects behavior. This explores alternative execution orderings
+/// while preserving SSA invariants.
 pub struct InstructionReorderMutator;
 
 impl Mutator for InstructionReorderMutator {
@@ -16,7 +18,7 @@ impl Mutator for InstructionReorderMutator {
             .instructions
             .iter()
             .enumerate()
-            .filter_map(|(i, instr)| instr.operation.has_side_effects().then_some(i))
+            .filter_map(|(i, instr)| (!instr.operation.is_pure()).then_some(i))
             .choose(rng)
         else {
             return false;
@@ -37,7 +39,7 @@ impl Mutator for InstructionReorderMutator {
             .filter(|&i| {
                 // Ensure the candidate is an Act and does not depend on anything
                 // defined at or after Act_1, guaranteeing it can be safely moved up.
-                program.instructions[i].operation.has_side_effects()
+                !program.instructions[i].operation.is_pure()
                     && !program.instructions[i]
                         .inputs
                         .iter()
