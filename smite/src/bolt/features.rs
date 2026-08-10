@@ -9,12 +9,16 @@ pub type FeatureBit = usize;
 pub struct Features(Vec<u8>);
 
 impl Features {
+    /// `option_upfront_shutdown_script` (bits 4/5).
+    pub const OPTION_UPFRONT_SHUTDOWN_SCRIPT: FeatureBit = 4;
     /// `gossip_queries` (bits 6/7).
     pub const GOSSIP_QUERIES: FeatureBit = 6;
     /// `gossip_queries_ex` (bits 10/11).
     pub const GOSSIP_QUERIES_EX: FeatureBit = 10;
     /// `option_static_remotekey` (bits 12/13).
     pub const OPTION_STATIC_REMOTEKEY: FeatureBit = 12;
+    /// `option_support_large_channel` (bits 18/19).
+    pub const OPTION_SUPPORT_LARGE_CHANNEL: FeatureBit = 18;
     /// `option_anchors` (bits 22/23).
     pub const OPTION_ANCHORS: FeatureBit = 22;
     /// `option_shutdown_anysegwit` (bits 26/27).
@@ -25,6 +29,8 @@ impl Features {
     pub const ZERO_FEE_COMMITMENTS: FeatureBit = 40;
     /// `option_provide_storage` (bits 42/43).
     pub const OPTION_PROVIDE_STORAGE: FeatureBit = 42;
+    /// `option_channel_type` (bits 44/45).
+    pub const OPTION_CHANNEL_TYPE: FeatureBit = 44;
     /// `option_scid_alias` (bits 46/47).
     pub const OPTION_SCID_ALIAS: FeatureBit = 46;
     /// `option_zeroconf` (bits 50/51).

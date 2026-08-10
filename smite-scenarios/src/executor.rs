@@ -481,6 +481,7 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                     AcceptChannelOracle.evaluate(&AcceptChannelContext {
                         accept_channel: &ac,
                         negotiation: self.negotiations.get(&ac.temporary_channel_id),
+                        negotiated_features: &self.context.negotiated_features,
                     })?;
                     record_recv_accept_channel(&mut self.negotiations, &ac);
                     Some(Variable::AcceptChannel(ac))
@@ -1557,7 +1558,11 @@ mod tests {
             target_pubkey: sample_pubkey(1),
             chain_hash: [0xcc; 32],
             block_height: 800_000,
-            negotiated_features: Features::from(vec![0x40, 0x10, 0x00]),
+            negotiated_features: Features::from_bits(&[
+                Features::OPTION_STATIC_REMOTEKEY,
+                Features::OPTION_ANCHORS,
+                Features::OPTION_CHANNEL_TYPE,
+            ]),
         }
     }
 
