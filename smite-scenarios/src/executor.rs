@@ -9,8 +9,8 @@ use bitcoin::{OutPoint, ScriptBuf, Txid};
 use smite::bitcoin::{BitcoinCli, TxBlockPosition, Utxo};
 use smite::bolt::{
     AcceptChannel, AnnouncementSignatures, ChannelAnnouncement, ChannelId, ChannelReady,
-    ChannelReadyTlvs, ChannelUpdate, FundingCreated, FundingSigned, Message, NodeAnnouncement,
-    OpenChannel, OpenChannelTlvs, Pong, ShortChannelId, Shutdown, msg_type,
+    ChannelReadyTlvs, ChannelUpdate, FundingCreated, FundingSigned, Message, MessageType,
+    NodeAnnouncement, OpenChannel, OpenChannelTlvs, Pong, ShortChannelId, Shutdown,
 };
 use smite::channel_tx::{
     ChannelConfig, ChannelPartyConfig, ChannelState, FundingTransaction, HolderIdentity, Side,
@@ -203,8 +203,11 @@ pub enum ExecuteError {
     Decode(#[from] smite::bolt::BoltError),
 
     /// Received a different message type than expected.
-    #[error("unexpected message: expected type {expected}, got {got}")]
-    UnexpectedMessage { expected: u16, got: u16 },
+    #[error("unexpected message: expected {expected}, got {got}")]
+    UnexpectedMessage {
+        expected: MessageType,
+        got: MessageType,
+    },
 
     /// The target sent a BOLT `error`.
     #[error("peer error on {:?}: {}", .0.channel_id, .0.message().unwrap_or("<non-utf8>"))]
@@ -1245,7 +1248,7 @@ fn recv_accept_channel(conn: &mut impl Connection) -> Result<AcceptChannel, Exec
     match recv_non_ping(conn, RECV_IDLE_TIMEOUT)? {
         Message::AcceptChannel(ac) => Ok(ac),
         other => Err(ExecuteError::UnexpectedMessage {
-            expected: msg_type::ACCEPT_CHANNEL,
+            expected: MessageType::ACCEPT_CHANNEL,
             got: other.msg_type(),
         }),
     }
@@ -1256,7 +1259,7 @@ fn recv_funding_signed(conn: &mut impl Connection) -> Result<FundingSigned, Exec
     match recv_non_ping(conn, RECV_IDLE_TIMEOUT)? {
         Message::FundingSigned(fs) => Ok(fs),
         other => Err(ExecuteError::UnexpectedMessage {
-            expected: msg_type::FUNDING_SIGNED,
+            expected: MessageType::FUNDING_SIGNED,
             got: other.msg_type(),
         }),
     }
@@ -1280,7 +1283,7 @@ fn recv_channel_ready(
         Message::ChannelReady(cr) => cr,
         other => {
             return Err(ExecuteError::UnexpectedMessage {
-                expected: msg_type::CHANNEL_READY,
+                expected: MessageType::CHANNEL_READY,
                 got: other.msg_type(),
             });
         }
@@ -2448,8 +2451,8 @@ mod tests {
         assert!(matches!(
             err,
             ExecuteError::UnexpectedMessage {
-                expected: msg_type::ACCEPT_CHANNEL,
-                got: msg_type::INIT,
+                expected: MessageType::ACCEPT_CHANNEL,
+                got: MessageType::INIT,
             }
         ));
     }

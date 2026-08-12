@@ -135,74 +135,138 @@ pub enum BoltError {
     },
 }
 
-/// BOLT message type constants.
-pub mod msg_type {
+/// A BOLT message type number that displays as `name(type)`, e.g.
+/// `open_channel(32)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MessageType(u16);
+
+impl MessageType {
     /// Warning message (BOLT 1).
-    pub const WARNING: u16 = 1;
+    pub const WARNING: MessageType = MessageType(1);
     /// Init message (BOLT 1).
-    pub const INIT: u16 = 16;
+    pub const INIT: MessageType = MessageType(16);
     /// Error message (BOLT 1).
-    pub const ERROR: u16 = 17;
+    pub const ERROR: MessageType = MessageType(17);
     /// Ping message (BOLT 1).
-    pub const PING: u16 = 18;
+    pub const PING: MessageType = MessageType(18);
     /// Pong message (BOLT 1).
-    pub const PONG: u16 = 19;
+    pub const PONG: MessageType = MessageType(19);
     /// `open_channel` message (BOLT 2).
-    pub const OPEN_CHANNEL: u16 = 32;
+    pub const OPEN_CHANNEL: MessageType = MessageType(32);
     /// `accept_channel` message (BOLT 2).
-    pub const ACCEPT_CHANNEL: u16 = 33;
+    pub const ACCEPT_CHANNEL: MessageType = MessageType(33);
     /// `funding_created` message (BOLT 2).
-    pub const FUNDING_CREATED: u16 = 34;
+    pub const FUNDING_CREATED: MessageType = MessageType(34);
     /// `funding_signed` message (BOLT 2).
-    pub const FUNDING_SIGNED: u16 = 35;
+    pub const FUNDING_SIGNED: MessageType = MessageType(35);
     /// `channel_ready` message (BOLT 2).
-    pub const CHANNEL_READY: u16 = 36;
+    pub const CHANNEL_READY: MessageType = MessageType(36);
     /// Shutdown message (BOLT 2).
-    pub const SHUTDOWN: u16 = 38;
+    pub const SHUTDOWN: MessageType = MessageType(38);
     /// `closing_complete` message (BOLT 2).
-    pub const CLOSING_COMPLETE: u16 = 40;
+    pub const CLOSING_COMPLETE: MessageType = MessageType(40);
     /// `closing_sig` message (BOLT 2).
-    pub const CLOSING_SIG: u16 = 41;
+    pub const CLOSING_SIG: MessageType = MessageType(41);
     /// `open_channel2` message (BOLT 2).
-    pub const OPEN_CHANNEL2: u16 = 64;
+    pub const OPEN_CHANNEL2: MessageType = MessageType(64);
     /// `accept_channel2` message (BOLT 2).
-    pub const ACCEPT_CHANNEL2: u16 = 65;
+    pub const ACCEPT_CHANNEL2: MessageType = MessageType(65);
     /// `tx_add_input` message (BOLT 2).
-    pub const TX_ADD_INPUT: u16 = 66;
+    pub const TX_ADD_INPUT: MessageType = MessageType(66);
     /// `tx_remove_input` message (BOLT 2).
-    pub const TX_REMOVE_INPUT: u16 = 68;
+    pub const TX_REMOVE_INPUT: MessageType = MessageType(68);
     /// `tx_remove_output` message (BOLT 2).
-    pub const TX_REMOVE_OUTPUT: u16 = 69;
+    pub const TX_REMOVE_OUTPUT: MessageType = MessageType(69);
     /// `tx_complete` message (BOLT 2).
-    pub const TX_COMPLETE: u16 = 70;
+    pub const TX_COMPLETE: MessageType = MessageType(70);
     /// `tx_init_rbf` message (BOLT 2).
-    pub const TX_INIT_RBF: u16 = 72;
+    pub const TX_INIT_RBF: MessageType = MessageType(72);
     /// `tx_ack_rbf` message (BOLT 2).
-    pub const TX_ACK_RBF: u16 = 73;
+    pub const TX_ACK_RBF: MessageType = MessageType(73);
     /// `tx_abort` message (BOLT 2).
-    pub const TX_ABORT: u16 = 74;
+    pub const TX_ABORT: MessageType = MessageType(74);
     /// `update_add_htlc` message (BOLT 2).
-    pub const UPDATE_ADD_HTLC: u16 = 128;
+    pub const UPDATE_ADD_HTLC: MessageType = MessageType(128);
     /// `update_fulfill_htlc` message (BOLT 2).
-    pub const UPDATE_FULFILL_HTLC: u16 = 130;
+    pub const UPDATE_FULFILL_HTLC: MessageType = MessageType(130);
     /// `update_fail_htlc` message (BOLT 2).
-    pub const UPDATE_FAIL_HTLC: u16 = 131;
+    pub const UPDATE_FAIL_HTLC: MessageType = MessageType(131);
     /// `commitment_signed` message (BOLT 2).
-    pub const COMMITMENT_SIGNED: u16 = 132;
+    pub const COMMITMENT_SIGNED: MessageType = MessageType(132);
     /// `revoke_and_ack` message (BOLT 2).
-    pub const REVOKE_AND_ACK: u16 = 133;
+    pub const REVOKE_AND_ACK: MessageType = MessageType(133);
     /// `update_fail_malformed_htlc` message (BOLT 2).
-    pub const UPDATE_FAIL_MALFORMED_HTLC: u16 = 135;
+    pub const UPDATE_FAIL_MALFORMED_HTLC: MessageType = MessageType(135);
     /// `channel_announcement` message (BOLT 7).
-    pub const CHANNEL_ANNOUNCEMENT: u16 = 256;
+    pub const CHANNEL_ANNOUNCEMENT: MessageType = MessageType(256);
     /// `node_announcement` message (BOLT 7).
-    pub const NODE_ANNOUNCEMENT: u16 = 257;
+    pub const NODE_ANNOUNCEMENT: MessageType = MessageType(257);
     /// `channel_update` message (BOLT 7).
-    pub const CHANNEL_UPDATE: u16 = 258;
+    pub const CHANNEL_UPDATE: MessageType = MessageType(258);
     /// `announcement_signatures` message (BOLT 7).
-    pub const ANNOUNCEMENT_SIGNATURES: u16 = 259;
+    pub const ANNOUNCEMENT_SIGNATURES: MessageType = MessageType(259);
     /// Gossip timestamp filter message (BOLT 7).
-    pub const GOSSIP_TIMESTAMP_FILTER: u16 = 265;
+    pub const GOSSIP_TIMESTAMP_FILTER: MessageType = MessageType(265);
+
+    /// Constructs a message type from its raw wire number.
+    #[must_use]
+    pub const fn from_u16(ty: u16) -> Self {
+        Self(ty)
+    }
+
+    /// Returns the raw wire number.
+    #[must_use]
+    pub const fn as_u16(self) -> u16 {
+        self.0
+    }
+
+    /// Returns the BOLT name for this message type (e.g. `open_channel`), or
+    /// `unknown` if the type is not recognized.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::WARNING => "warning",
+            Self::INIT => "init",
+            Self::ERROR => "error",
+            Self::PING => "ping",
+            Self::PONG => "pong",
+            Self::OPEN_CHANNEL => "open_channel",
+            Self::ACCEPT_CHANNEL => "accept_channel",
+            Self::FUNDING_CREATED => "funding_created",
+            Self::FUNDING_SIGNED => "funding_signed",
+            Self::CHANNEL_READY => "channel_ready",
+            Self::SHUTDOWN => "shutdown",
+            Self::CLOSING_COMPLETE => "closing_complete",
+            Self::CLOSING_SIG => "closing_sig",
+            Self::OPEN_CHANNEL2 => "open_channel2",
+            Self::ACCEPT_CHANNEL2 => "accept_channel2",
+            Self::TX_ADD_INPUT => "tx_add_input",
+            Self::TX_REMOVE_INPUT => "tx_remove_input",
+            Self::TX_REMOVE_OUTPUT => "tx_remove_output",
+            Self::TX_COMPLETE => "tx_complete",
+            Self::TX_INIT_RBF => "tx_init_rbf",
+            Self::TX_ACK_RBF => "tx_ack_rbf",
+            Self::TX_ABORT => "tx_abort",
+            Self::UPDATE_ADD_HTLC => "update_add_htlc",
+            Self::UPDATE_FULFILL_HTLC => "update_fulfill_htlc",
+            Self::UPDATE_FAIL_HTLC => "update_fail_htlc",
+            Self::COMMITMENT_SIGNED => "commitment_signed",
+            Self::REVOKE_AND_ACK => "revoke_and_ack",
+            Self::UPDATE_FAIL_MALFORMED_HTLC => "update_fail_malformed_htlc",
+            Self::CHANNEL_ANNOUNCEMENT => "channel_announcement",
+            Self::NODE_ANNOUNCEMENT => "node_announcement",
+            Self::CHANNEL_UPDATE => "channel_update",
+            Self::ANNOUNCEMENT_SIGNATURES => "announcement_signatures",
+            Self::GOSSIP_TIMESTAMP_FILTER => "gossip_timestamp_filter",
+            _ => "unknown",
+        }
+    }
+}
+
+impl std::fmt::Display for MessageType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}({})", self.name(), self.0)
+    }
 }
 
 /// A decoded BOLT message.
@@ -288,44 +352,44 @@ pub enum Message {
 }
 
 impl Message {
-    /// Returns the message type number.
+    /// Returns the message type.
     #[must_use]
-    pub fn msg_type(&self) -> u16 {
+    pub fn msg_type(&self) -> MessageType {
         match self {
-            Self::Warning(_) => msg_type::WARNING,
-            Self::Init(_) => msg_type::INIT,
-            Self::Error(_) => msg_type::ERROR,
-            Self::Ping(_) => msg_type::PING,
-            Self::Pong(_) => msg_type::PONG,
-            Self::OpenChannel(_) => msg_type::OPEN_CHANNEL,
-            Self::AcceptChannel(_) => msg_type::ACCEPT_CHANNEL,
-            Self::FundingCreated(_) => msg_type::FUNDING_CREATED,
-            Self::FundingSigned(_) => msg_type::FUNDING_SIGNED,
-            Self::ChannelReady(_) => msg_type::CHANNEL_READY,
-            Self::Shutdown(_) => msg_type::SHUTDOWN,
-            Self::ClosingComplete(_) => msg_type::CLOSING_COMPLETE,
-            Self::ClosingSig(_) => msg_type::CLOSING_SIG,
-            Self::OpenChannel2(_) => msg_type::OPEN_CHANNEL2,
-            Self::AcceptChannel2(_) => msg_type::ACCEPT_CHANNEL2,
-            Self::TxAddInput(_) => msg_type::TX_ADD_INPUT,
-            Self::TxRemoveInput(_) => msg_type::TX_REMOVE_INPUT,
-            Self::TxRemoveOutput(_) => msg_type::TX_REMOVE_OUTPUT,
-            Self::TxComplete(_) => msg_type::TX_COMPLETE,
-            Self::TxInitRbf(_) => msg_type::TX_INIT_RBF,
-            Self::TxAckRbf(_) => msg_type::TX_ACK_RBF,
-            Self::TxAbort(_) => msg_type::TX_ABORT,
-            Self::UpdateAddHtlc(_) => msg_type::UPDATE_ADD_HTLC,
-            Self::UpdateFulfillHtlc(_) => msg_type::UPDATE_FULFILL_HTLC,
-            Self::UpdateFailHtlc(_) => msg_type::UPDATE_FAIL_HTLC,
-            Self::CommitmentSigned(_) => msg_type::COMMITMENT_SIGNED,
-            Self::RevokeAndAck(_) => msg_type::REVOKE_AND_ACK,
-            Self::UpdateFailMalformedHtlc(_) => msg_type::UPDATE_FAIL_MALFORMED_HTLC,
-            Self::ChannelAnnouncement(_) => msg_type::CHANNEL_ANNOUNCEMENT,
-            Self::NodeAnnouncement(_) => msg_type::NODE_ANNOUNCEMENT,
-            Self::ChannelUpdate(_) => msg_type::CHANNEL_UPDATE,
-            Self::AnnouncementSignatures(_) => msg_type::ANNOUNCEMENT_SIGNATURES,
-            Self::GossipTimestampFilter(_) => msg_type::GOSSIP_TIMESTAMP_FILTER,
-            Self::Unknown { msg_type, .. } => *msg_type,
+            Self::Warning(_) => MessageType::WARNING,
+            Self::Init(_) => MessageType::INIT,
+            Self::Error(_) => MessageType::ERROR,
+            Self::Ping(_) => MessageType::PING,
+            Self::Pong(_) => MessageType::PONG,
+            Self::OpenChannel(_) => MessageType::OPEN_CHANNEL,
+            Self::AcceptChannel(_) => MessageType::ACCEPT_CHANNEL,
+            Self::FundingCreated(_) => MessageType::FUNDING_CREATED,
+            Self::FundingSigned(_) => MessageType::FUNDING_SIGNED,
+            Self::ChannelReady(_) => MessageType::CHANNEL_READY,
+            Self::Shutdown(_) => MessageType::SHUTDOWN,
+            Self::ClosingComplete(_) => MessageType::CLOSING_COMPLETE,
+            Self::ClosingSig(_) => MessageType::CLOSING_SIG,
+            Self::OpenChannel2(_) => MessageType::OPEN_CHANNEL2,
+            Self::AcceptChannel2(_) => MessageType::ACCEPT_CHANNEL2,
+            Self::TxAddInput(_) => MessageType::TX_ADD_INPUT,
+            Self::TxRemoveInput(_) => MessageType::TX_REMOVE_INPUT,
+            Self::TxRemoveOutput(_) => MessageType::TX_REMOVE_OUTPUT,
+            Self::TxComplete(_) => MessageType::TX_COMPLETE,
+            Self::TxInitRbf(_) => MessageType::TX_INIT_RBF,
+            Self::TxAckRbf(_) => MessageType::TX_ACK_RBF,
+            Self::TxAbort(_) => MessageType::TX_ABORT,
+            Self::UpdateAddHtlc(_) => MessageType::UPDATE_ADD_HTLC,
+            Self::UpdateFulfillHtlc(_) => MessageType::UPDATE_FULFILL_HTLC,
+            Self::UpdateFailHtlc(_) => MessageType::UPDATE_FAIL_HTLC,
+            Self::CommitmentSigned(_) => MessageType::COMMITMENT_SIGNED,
+            Self::RevokeAndAck(_) => MessageType::REVOKE_AND_ACK,
+            Self::UpdateFailMalformedHtlc(_) => MessageType::UPDATE_FAIL_MALFORMED_HTLC,
+            Self::ChannelAnnouncement(_) => MessageType::CHANNEL_ANNOUNCEMENT,
+            Self::NodeAnnouncement(_) => MessageType::NODE_ANNOUNCEMENT,
+            Self::ChannelUpdate(_) => MessageType::CHANNEL_UPDATE,
+            Self::AnnouncementSignatures(_) => MessageType::ANNOUNCEMENT_SIGNATURES,
+            Self::GossipTimestampFilter(_) => MessageType::GOSSIP_TIMESTAMP_FILTER,
+            Self::Unknown { msg_type, .. } => MessageType(*msg_type),
         }
     }
 
@@ -333,7 +397,7 @@ impl Message {
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        self.msg_type().write(&mut out);
+        self.msg_type().as_u16().write(&mut out);
         match self {
             Self::Warning(m) => out.extend(m.encode()),
             Self::Init(m) => out.extend(m.encode()),
@@ -384,54 +448,62 @@ impl Message {
         let mut cursor = data;
         let msg_type = u16::read(&mut cursor)?;
 
-        match msg_type {
-            msg_type::WARNING => Ok(Self::Warning(Warning::decode(cursor)?)),
-            msg_type::INIT => Ok(Self::Init(Init::decode(cursor)?)),
-            msg_type::ERROR => Ok(Self::Error(Error::decode(cursor)?)),
-            msg_type::PING => Ok(Self::Ping(Ping::decode(cursor)?)),
-            msg_type::PONG => Ok(Self::Pong(Pong::decode(cursor)?)),
-            msg_type::OPEN_CHANNEL => Ok(Self::OpenChannel(OpenChannel::decode(cursor)?)),
-            msg_type::ACCEPT_CHANNEL => Ok(Self::AcceptChannel(AcceptChannel::decode(cursor)?)),
-            msg_type::FUNDING_CREATED => Ok(Self::FundingCreated(FundingCreated::decode(cursor)?)),
-            msg_type::FUNDING_SIGNED => Ok(Self::FundingSigned(FundingSigned::decode(cursor)?)),
-            msg_type::CHANNEL_READY => Ok(Self::ChannelReady(ChannelReady::decode(cursor)?)),
-            msg_type::SHUTDOWN => Ok(Self::Shutdown(Shutdown::decode(cursor)?)),
-            msg_type::CLOSING_COMPLETE => {
+        match MessageType(msg_type) {
+            MessageType::WARNING => Ok(Self::Warning(Warning::decode(cursor)?)),
+            MessageType::INIT => Ok(Self::Init(Init::decode(cursor)?)),
+            MessageType::ERROR => Ok(Self::Error(Error::decode(cursor)?)),
+            MessageType::PING => Ok(Self::Ping(Ping::decode(cursor)?)),
+            MessageType::PONG => Ok(Self::Pong(Pong::decode(cursor)?)),
+            MessageType::OPEN_CHANNEL => Ok(Self::OpenChannel(OpenChannel::decode(cursor)?)),
+            MessageType::ACCEPT_CHANNEL => Ok(Self::AcceptChannel(AcceptChannel::decode(cursor)?)),
+            MessageType::FUNDING_CREATED => {
+                Ok(Self::FundingCreated(FundingCreated::decode(cursor)?))
+            }
+            MessageType::FUNDING_SIGNED => Ok(Self::FundingSigned(FundingSigned::decode(cursor)?)),
+            MessageType::CHANNEL_READY => Ok(Self::ChannelReady(ChannelReady::decode(cursor)?)),
+            MessageType::SHUTDOWN => Ok(Self::Shutdown(Shutdown::decode(cursor)?)),
+            MessageType::CLOSING_COMPLETE => {
                 Ok(Self::ClosingComplete(ClosingComplete::decode(cursor)?))
             }
-            msg_type::CLOSING_SIG => Ok(Self::ClosingSig(ClosingSig::decode(cursor)?)),
-            msg_type::OPEN_CHANNEL2 => Ok(Self::OpenChannel2(OpenChannel2::decode(cursor)?)),
-            msg_type::ACCEPT_CHANNEL2 => Ok(Self::AcceptChannel2(AcceptChannel2::decode(cursor)?)),
-            msg_type::TX_ADD_INPUT => Ok(Self::TxAddInput(TxAddInput::decode(cursor)?)),
-            msg_type::TX_REMOVE_INPUT => Ok(Self::TxRemoveInput(TxRemoveInput::decode(cursor)?)),
-            msg_type::TX_REMOVE_OUTPUT => Ok(Self::TxRemoveOutput(TxRemoveOutput::decode(cursor)?)),
-            msg_type::TX_COMPLETE => Ok(Self::TxComplete(TxComplete::decode(cursor)?)),
-            msg_type::TX_INIT_RBF => Ok(Self::TxInitRbf(TxInitRbf::decode(cursor)?)),
-            msg_type::TX_ACK_RBF => Ok(Self::TxAckRbf(TxAckRbf::decode(cursor)?)),
-            msg_type::TX_ABORT => Ok(Self::TxAbort(TxAbort::decode(cursor)?)),
-            msg_type::UPDATE_ADD_HTLC => Ok(Self::UpdateAddHtlc(UpdateAddHtlc::decode(cursor)?)),
-            msg_type::UPDATE_FULFILL_HTLC => {
+            MessageType::CLOSING_SIG => Ok(Self::ClosingSig(ClosingSig::decode(cursor)?)),
+            MessageType::OPEN_CHANNEL2 => Ok(Self::OpenChannel2(OpenChannel2::decode(cursor)?)),
+            MessageType::ACCEPT_CHANNEL2 => {
+                Ok(Self::AcceptChannel2(AcceptChannel2::decode(cursor)?))
+            }
+            MessageType::TX_ADD_INPUT => Ok(Self::TxAddInput(TxAddInput::decode(cursor)?)),
+            MessageType::TX_REMOVE_INPUT => Ok(Self::TxRemoveInput(TxRemoveInput::decode(cursor)?)),
+            MessageType::TX_REMOVE_OUTPUT => {
+                Ok(Self::TxRemoveOutput(TxRemoveOutput::decode(cursor)?))
+            }
+            MessageType::TX_COMPLETE => Ok(Self::TxComplete(TxComplete::decode(cursor)?)),
+            MessageType::TX_INIT_RBF => Ok(Self::TxInitRbf(TxInitRbf::decode(cursor)?)),
+            MessageType::TX_ACK_RBF => Ok(Self::TxAckRbf(TxAckRbf::decode(cursor)?)),
+            MessageType::TX_ABORT => Ok(Self::TxAbort(TxAbort::decode(cursor)?)),
+            MessageType::UPDATE_ADD_HTLC => Ok(Self::UpdateAddHtlc(UpdateAddHtlc::decode(cursor)?)),
+            MessageType::UPDATE_FULFILL_HTLC => {
                 Ok(Self::UpdateFulfillHtlc(UpdateFulfillHtlc::decode(cursor)?))
             }
-            msg_type::UPDATE_FAIL_HTLC => Ok(Self::UpdateFailHtlc(UpdateFailHtlc::decode(cursor)?)),
-            msg_type::COMMITMENT_SIGNED => {
+            MessageType::UPDATE_FAIL_HTLC => {
+                Ok(Self::UpdateFailHtlc(UpdateFailHtlc::decode(cursor)?))
+            }
+            MessageType::COMMITMENT_SIGNED => {
                 Ok(Self::CommitmentSigned(CommitmentSigned::decode(cursor)?))
             }
-            msg_type::REVOKE_AND_ACK => Ok(Self::RevokeAndAck(RevokeAndAck::decode(cursor)?)),
-            msg_type::UPDATE_FAIL_MALFORMED_HTLC => Ok(Self::UpdateFailMalformedHtlc(
+            MessageType::REVOKE_AND_ACK => Ok(Self::RevokeAndAck(RevokeAndAck::decode(cursor)?)),
+            MessageType::UPDATE_FAIL_MALFORMED_HTLC => Ok(Self::UpdateFailMalformedHtlc(
                 UpdateFailMalformedHtlc::decode(cursor)?,
             )),
-            msg_type::CHANNEL_ANNOUNCEMENT => Ok(Self::ChannelAnnouncement(
+            MessageType::CHANNEL_ANNOUNCEMENT => Ok(Self::ChannelAnnouncement(
                 ChannelAnnouncement::decode(cursor)?,
             )),
-            msg_type::NODE_ANNOUNCEMENT => {
+            MessageType::NODE_ANNOUNCEMENT => {
                 Ok(Self::NodeAnnouncement(NodeAnnouncement::decode(cursor)?))
             }
-            msg_type::CHANNEL_UPDATE => Ok(Self::ChannelUpdate(ChannelUpdate::decode(cursor)?)),
-            msg_type::ANNOUNCEMENT_SIGNATURES => Ok(Self::AnnouncementSignatures(
+            MessageType::CHANNEL_UPDATE => Ok(Self::ChannelUpdate(ChannelUpdate::decode(cursor)?)),
+            MessageType::ANNOUNCEMENT_SIGNATURES => Ok(Self::AnnouncementSignatures(
                 AnnouncementSignatures::decode(cursor)?,
             )),
-            msg_type::GOSSIP_TIMESTAMP_FILTER => Ok(Self::GossipTimestampFilter(
+            MessageType::GOSSIP_TIMESTAMP_FILTER => Ok(Self::GossipTimestampFilter(
                 GossipTimestampFilter::decode(cursor)?,
             )),
             _ => {
@@ -1141,58 +1213,58 @@ mod tests {
     fn message_type_values() {
         assert_eq!(
             Message::Warning(Warning::all_channels("")).msg_type(),
-            msg_type::WARNING
+            MessageType::WARNING
         );
-        assert_eq!(Message::Init(Init::empty()).msg_type(), msg_type::INIT);
+        assert_eq!(Message::Init(Init::empty()).msg_type(), MessageType::INIT);
         assert_eq!(
             Message::Error(Error::all_channels("")).msg_type(),
-            msg_type::ERROR
+            MessageType::ERROR
         );
-        assert_eq!(Message::Ping(Ping::new(0)).msg_type(), msg_type::PING);
-        assert_eq!(Message::Pong(Pong::new(0)).msg_type(), msg_type::PONG);
+        assert_eq!(Message::Ping(Ping::new(0)).msg_type(), MessageType::PING);
+        assert_eq!(Message::Pong(Pong::new(0)).msg_type(), MessageType::PONG);
         assert_eq!(
             Message::OpenChannel(sample_open_channel()).msg_type(),
-            msg_type::OPEN_CHANNEL
+            MessageType::OPEN_CHANNEL
         );
         assert_eq!(
             Message::AcceptChannel(sample_accept_channel()).msg_type(),
-            msg_type::ACCEPT_CHANNEL
+            MessageType::ACCEPT_CHANNEL
         );
         assert_eq!(
             Message::FundingCreated(sample_funding_created()).msg_type(),
-            msg_type::FUNDING_CREATED
+            MessageType::FUNDING_CREATED
         );
         assert_eq!(
             Message::FundingSigned(sample_funding_signed()).msg_type(),
-            msg_type::FUNDING_SIGNED
+            MessageType::FUNDING_SIGNED
         );
         assert_eq!(
             Message::ChannelReady(sample_channel_ready()).msg_type(),
-            msg_type::CHANNEL_READY
+            MessageType::CHANNEL_READY
         );
         assert_eq!(
             Message::Shutdown(Shutdown::for_channel(ChannelId([0; 32]), vec![])).msg_type(),
-            msg_type::SHUTDOWN
+            MessageType::SHUTDOWN
         );
         assert_eq!(
             Message::ClosingComplete(sample_closing_complete()).msg_type(),
-            msg_type::CLOSING_COMPLETE,
+            MessageType::CLOSING_COMPLETE,
         );
         assert_eq!(
             Message::ClosingSig(sample_closing_sig()).msg_type(),
-            msg_type::CLOSING_SIG,
+            MessageType::CLOSING_SIG,
         );
         assert_eq!(
             Message::OpenChannel2(sample_open_channel2()).msg_type(),
-            msg_type::OPEN_CHANNEL2
+            MessageType::OPEN_CHANNEL2
         );
         assert_eq!(
             Message::AcceptChannel2(sample_accept_channel2(None)).msg_type(),
-            msg_type::ACCEPT_CHANNEL2
+            MessageType::ACCEPT_CHANNEL2
         );
         assert_eq!(
             Message::TxAddInput(sample_tx_add_input()).msg_type(),
-            msg_type::TX_ADD_INPUT
+            MessageType::TX_ADD_INPUT
         );
         assert_eq!(
             Message::TxRemoveInput(TxRemoveInput {
@@ -1200,7 +1272,7 @@ mod tests {
                 serial_id: 0
             })
             .msg_type(),
-            msg_type::TX_REMOVE_INPUT
+            MessageType::TX_REMOVE_INPUT
         );
         assert_eq!(
             Message::TxRemoveOutput(TxRemoveOutput {
@@ -1208,14 +1280,14 @@ mod tests {
                 serial_id: 0
             })
             .msg_type(),
-            msg_type::TX_REMOVE_OUTPUT
+            MessageType::TX_REMOVE_OUTPUT
         );
         assert_eq!(
             Message::TxComplete(TxComplete {
                 channel_id: ChannelId::new([0; CHANNEL_ID_SIZE])
             })
             .msg_type(),
-            msg_type::TX_COMPLETE
+            MessageType::TX_COMPLETE
         );
         assert_eq!(
             Message::TxInitRbf(TxInitRbf {
@@ -1225,7 +1297,7 @@ mod tests {
                 tlvs: TxInitRbfTlvs::default(),
             })
             .msg_type(),
-            msg_type::TX_INIT_RBF
+            MessageType::TX_INIT_RBF
         );
         assert_eq!(
             Message::TxAckRbf(TxAckRbf {
@@ -1233,15 +1305,15 @@ mod tests {
                 tlvs: TxAckRbfTlvs::default(),
             })
             .msg_type(),
-            msg_type::TX_ACK_RBF
+            MessageType::TX_ACK_RBF
         );
         assert_eq!(
             Message::TxAbort(TxAbort::new(ChannelId::new([0; CHANNEL_ID_SIZE]), "")).msg_type(),
-            msg_type::TX_ABORT
+            MessageType::TX_ABORT
         );
         assert_eq!(
             Message::UpdateAddHtlc(sample_update_add_htlc()).msg_type(),
-            msg_type::UPDATE_ADD_HTLC
+            MessageType::UPDATE_ADD_HTLC
         );
         assert_eq!(
             Message::UpdateFulfillHtlc(UpdateFulfillHtlc {
@@ -1251,7 +1323,7 @@ mod tests {
                 tlvs: UpdateFulfillHtlcTlvs::default(),
             })
             .msg_type(),
-            msg_type::UPDATE_FULFILL_HTLC
+            MessageType::UPDATE_FULFILL_HTLC
         );
         assert_eq!(
             Message::UpdateFailHtlc(UpdateFailHtlc {
@@ -1261,15 +1333,15 @@ mod tests {
                 tlvs: UpdateFailHtlcTlvs::default(),
             })
             .msg_type(),
-            msg_type::UPDATE_FAIL_HTLC
+            MessageType::UPDATE_FAIL_HTLC
         );
         assert_eq!(
             Message::CommitmentSigned(sample_commitment_signed()).msg_type(),
-            msg_type::COMMITMENT_SIGNED
+            MessageType::COMMITMENT_SIGNED
         );
         assert_eq!(
             Message::RevokeAndAck(sample_revoke_and_ack()).msg_type(),
-            msg_type::REVOKE_AND_ACK
+            MessageType::REVOKE_AND_ACK
         );
         assert_eq!(
             Message::UpdateFailMalformedHtlc(UpdateFailMalformedHtlc {
@@ -1279,27 +1351,27 @@ mod tests {
                 failure_code: 0x8001,
             })
             .msg_type(),
-            msg_type::UPDATE_FAIL_MALFORMED_HTLC
+            MessageType::UPDATE_FAIL_MALFORMED_HTLC
         );
         assert_eq!(
             Message::ChannelAnnouncement(sample_channel_announcement()).msg_type(),
-            msg_type::CHANNEL_ANNOUNCEMENT
+            MessageType::CHANNEL_ANNOUNCEMENT
         );
         assert_eq!(
             Message::NodeAnnouncement(sample_node_announcement()).msg_type(),
-            msg_type::NODE_ANNOUNCEMENT
+            MessageType::NODE_ANNOUNCEMENT
         );
         assert_eq!(
             Message::ChannelUpdate(sample_channel_update()).msg_type(),
-            msg_type::CHANNEL_UPDATE
+            MessageType::CHANNEL_UPDATE
         );
         assert_eq!(
             Message::AnnouncementSignatures(sample_announcement_signatures()).msg_type(),
-            msg_type::ANNOUNCEMENT_SIGNATURES
+            MessageType::ANNOUNCEMENT_SIGNATURES
         );
         assert_eq!(
             Message::GossipTimestampFilter(GossipTimestampFilter::no_gossip([0u8; 32])).msg_type(),
-            msg_type::GOSSIP_TIMESTAMP_FILTER
+            MessageType::GOSSIP_TIMESTAMP_FILTER
         );
         assert_eq!(
             Message::Unknown {
@@ -1307,7 +1379,7 @@ mod tests {
                 payload: vec![]
             }
             .msg_type(),
-            99
+            MessageType(99)
         );
     }
 
@@ -1346,7 +1418,7 @@ mod tests {
 
     #[test]
     fn message_with_type_helper() {
-        let data = message_with_type(msg_type::PING, &[0x00, 0x04, 0x00, 0x00]);
+        let data = message_with_type(MessageType::PING.as_u16(), &[0x00, 0x04, 0x00, 0x00]);
         assert_eq!(data, [0x00, 0x12, 0x00, 0x04, 0x00, 0x00]); // 0x12 = 18 = PING
     }
 }
