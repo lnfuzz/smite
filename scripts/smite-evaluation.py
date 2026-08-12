@@ -177,6 +177,15 @@ def parse_fuzzer_stats(filepath):
     return 0.0
 
 
+def get_commit_info(root_dir, config_name):
+    """Reads the saved commit metadata from the orchestrator."""
+    commit_file = os.path.join(root_dir, config_name, "latest_commit.txt")
+    if os.path.exists(commit_file):
+        with open(commit_file, "r") as f:
+            return f.read().strip()
+    return "Unknown commit"
+
+
 def calculate_union_coverage(trial_paths):
     """
     Performs bitwise-AND across all trial bitmaps to calculate multi-core union coverage.
@@ -331,7 +340,9 @@ def generate_plots(
     plt.close()
 
 
-def write_evaluation_report(report_path, df_results, config_a, config_b, targets):
+def write_evaluation_report(
+    report_path, df_results, config_a, config_b, commit_a, commit_b, targets
+):
     """Writes the final comprehensive Markdown evaluation report."""
 
     # Order columns for clean Markdown display
@@ -357,8 +368,12 @@ def write_evaluation_report(report_path, df_results, config_a, config_b, targets
 
     with open(report_path, "w") as f:
         f.write("# Fuzzing Evaluation Report\n\n")
-        f.write(f"**Configuration A (Baseline):** `{config_a}`\n")
-        f.write(f"**Configuration B (Experimental):** `{config_b}`\n\n")
+        f.write(
+            f"**Configuration A (Baseline):** `{config_a}` *(Commit: {commit_a})*\n"
+        )
+        f.write(
+            f"**Configuration B (Experimental):** `{config_b}` *(Commit: {commit_b})*\n\n"
+        )
 
         f.write("## 1. Summary Statistics\n\n")
         pd.set_option("display.float_format", lambda x: "%.3f" % x)
@@ -457,6 +472,9 @@ def process_data(
     """Extracts metrics, computes statistics, and generates visualizations/reports."""
     results_dir = os.path.join(root_dir, "results")
     os.makedirs(results_dir, exist_ok=True)
+
+    commit_a = get_commit_info(root_dir, config_a)
+    commit_b = get_commit_info(root_dir, config_b)
 
     summary_stats = []
     p_values_cov_raw = []
@@ -613,7 +631,9 @@ def process_data(
     df_results.to_csv(csv_path, index=False)
 
     report_path = os.path.join(results_dir, "evaluation_report.md")
-    write_evaluation_report(report_path, df_results, config_a, config_b, targets)
+    write_evaluation_report(
+        report_path, df_results, config_a, config_b, commit_a, commit_b, targets
+    )
 
     print(f"\n[*] Evaluation complete. Results saved to {results_dir}")
     print(f"    - Open {report_path} to interpret the campaign.")

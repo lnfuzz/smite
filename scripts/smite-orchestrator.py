@@ -870,6 +870,31 @@ def ensure_seed_dir(args, console: Console):
     )
 
 
+def save_commit_metadata(out_dir: Path, smite_dirs: dict, console: Console):
+    """Extracts the latest git commit hash and date, saving them to the output directory."""
+    for label, smite_dir in smite_dirs.items():
+        config_out = out_dir / label
+        config_out.mkdir(parents=True, exist_ok=True)
+
+        try:
+            # %h = abbreviated hash, %cd = commit date
+            res = subprocess.run(
+                ["git", "log", "-1", "--format=%h (%cd)", "--date=short"],
+                cwd=smite_dir,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            commit_info = res.stdout.strip()
+        except Exception:
+            commit_info = "Unknown commit"
+            console.print(
+                f"[yellow]Warning: Could not get git info for '{label}' in {smite_dir}[/]"
+            )
+
+        (config_out / "latest_commit.txt").write_text(commit_info + "\n")
+
+
 def parse_args():
     """Parse CLI args and resolve all filesystem paths to absolute up front."""
     p = argparse.ArgumentParser(
@@ -917,6 +942,8 @@ def main():
             smite_dirs[l] = Path(d.strip()).expanduser().resolve()
     except ValueError:
         sys.exit("ERROR: --configs must use 'label:smite_dir' format")
+
+    save_commit_metadata(args.out_dir, smite_dirs, console)
 
     EnvironmentManager.validate(args.afl_dir, smite_dirs, console)
     EnvironmentManager.validate_paths(args.afl_dir, smite_dirs, console)
