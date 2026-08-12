@@ -189,6 +189,8 @@ class TrialConfig:
         """The exact afl-fuzz invocation for a standalone runner."""
         # Fixed power schedule for every standalone trial.
         POWER_SCHEDULE = "explore"
+        # Fixed timeout for a single input.
+        EXEC_TIMEOUT = 2000  # 2 seconds
         return [
             "taskset",
             "-c",
@@ -203,6 +205,8 @@ class TrialConfig:
             POWER_SCHEDULE,
             "-V",
             str(self.timeout),
+            "-t",
+            str(EXEC_TIMEOUT),
             "--",
             str(self.sharedir),
         ]
@@ -215,6 +219,7 @@ class TrialConfig:
                 "AFL_NO_UI": "1",
                 "AFL_NO_COLOR": "1",
                 "AFL_FORKSRV_INIT_TMOUT": "1800000",
+                "AFL_HANG_TIMEOUT": "4000",  # 4 seconds
             }
         )
         testcache = testcache_size_mb()
