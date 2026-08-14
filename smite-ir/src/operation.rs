@@ -233,6 +233,7 @@ pub enum Operation {
     /// Sign wallet inputs of the transaction and broadcast it via `bitcoin-cli`.
     /// Input: `FundingTransaction`.
     BroadcastTransaction,
+    // -- Query: read state from outside the program --
     /// Look up the confirmed block position of a broadcast funding transaction
     /// and produce the corresponding BOLT 7 `short_channel_id`.
     ///
@@ -688,7 +689,6 @@ impl fmt::Display for Operation {
             Self::LoadChannelType(v) => write!(f, "LoadChannelType({v})"),
             Self::LoadTargetPubkeyFromContext => write!(f, "LoadTargetPubkeyFromContext()"),
             Self::LoadChainHashFromContext => write!(f, "LoadChainHashFromContext()"),
-            Self::MineBlocks(v) => write!(f, "MineBlocks({v})"),
             // Operations with inputs: parens added by Program::Display.
             Self::DerivePoint => write!(f, "DerivePoint"),
             Self::ExtractAcceptChannel(field) => write!(f, "Extract{field}"),
@@ -713,6 +713,7 @@ impl fmt::Display for Operation {
             Self::RecvAcceptChannel => write!(f, "RecvAcceptChannel"),
             Self::RecvFundingSigned => write!(f, "RecvFundingSigned"),
             Self::RecvChannelReady => write!(f, "RecvChannelReady()"),
+            Self::MineBlocks(v) => write!(f, "MineBlocks({v})"),
             Self::BroadcastTransaction => write!(f, "BroadcastTransaction"),
             Self::LookupShortChannelId => write!(f, "LookupShortChannelId"),
         }
@@ -792,28 +793,6 @@ impl Operation {
                 VariableType::Amount,       // funding_satoshis
                 VariableType::FeeratePerKw, // feerate_per_kw
             ],
-            Self::SendMessage => vec![VariableType::Message],
-            Self::SendOpenChannel => vec![VariableType::OpenChannelMessage],
-            Self::SendFundingCreated => vec![
-                VariableType::FundingTransaction, // funding_transaction
-                VariableType::PrivateKey,         // opener_funding_privkey
-                VariableType::ChannelId,          // temporary_channel_id
-            ],
-            Self::SendChannelReady { .. } => vec![
-                VariableType::ChannelId,      // channel_id
-                VariableType::Point,          // second_per_commitment_point
-                VariableType::ShortChannelId, // short_channel_id (alias)
-            ],
-            Self::SendShutdown => vec![
-                VariableType::ChannelId, // channel_id
-                VariableType::Bytes,     // scriptpubkey
-            ],
-            Self::RecvAcceptChannel => vec![VariableType::SentOpenChannel],
-            Self::RecvFundingSigned => vec![VariableType::SentFundingCreated],
-            Self::BroadcastTransaction | Self::LookupShortChannelId => {
-                vec![VariableType::FundingTransaction]
-            }
-
             Self::BuildOpenChannel => vec![
                 VariableType::ChainHash,    // chain_hash
                 VariableType::ChannelId,    // temporary_channel_id
@@ -878,6 +857,27 @@ impl Operation {
                 VariableType::PrivateKey,     // bitcoin_sk_1 (our bitcoin signing key)
                 VariableType::Point,          // bitcoin_key_2 (target's bitcoin public key)
             ],
+            Self::SendMessage => vec![VariableType::Message],
+            Self::SendOpenChannel => vec![VariableType::OpenChannelMessage],
+            Self::SendFundingCreated => vec![
+                VariableType::FundingTransaction, // funding_transaction
+                VariableType::PrivateKey,         // opener_funding_privkey
+                VariableType::ChannelId,          // temporary_channel_id
+            ],
+            Self::SendChannelReady { .. } => vec![
+                VariableType::ChannelId,      // channel_id
+                VariableType::Point,          // second_per_commitment_point
+                VariableType::ShortChannelId, // short_channel_id (alias)
+            ],
+            Self::SendShutdown => vec![
+                VariableType::ChannelId, // channel_id
+                VariableType::Bytes,     // scriptpubkey
+            ],
+            Self::RecvAcceptChannel => vec![VariableType::SentOpenChannel],
+            Self::RecvFundingSigned => vec![VariableType::SentFundingCreated],
+            Self::BroadcastTransaction | Self::LookupShortChannelId => {
+                vec![VariableType::FundingTransaction]
+            }
         }
     }
 
@@ -932,29 +932,16 @@ impl Operation {
     }
 
     /// Returns `true` if this operation has I/O side effects and therefore
-    /// cannot be dropped by DCE or deduplicated by CSE.
+    /// cannot be dropped by DCE.
     #[must_use]
     pub fn has_side_effects(&self) -> bool {
         match self {
-            Self::SendMessage
-            | Self::SendOpenChannel
-            | Self::SendFundingCreated
-            | Self::SendChannelReady { .. }
-            | Self::SendShutdown
-            | Self::RecvAcceptChannel
-            | Self::RecvFundingSigned
-            | Self::RecvChannelReady
-            | Self::MineBlocks(_)
-            | Self::CreateFundingTransaction
-            | Self::BroadcastTransaction
-            | Self::LookupShortChannelId => true,
             Self::LoadAmount(_)
             | Self::LoadShortChannelId(_)
-            | Self::BuildChannelAnnouncement
             | Self::LoadFeeratePerKw(_)
-            | Self::LoadForwardingFee(_)
             | Self::LoadBlockHeight(_)
             | Self::LoadTimestamp(_)
+            | Self::LoadForwardingFee(_)
             | Self::LoadU16(_)
             | Self::LoadU8(_)
             | Self::LoadBytes(_)
@@ -968,10 +955,85 @@ impl Operation {
             | Self::DerivePoint
             | Self::ExtractAcceptChannel(_)
             | Self::BuildOpenChannel
+            | Self::BuildChannelAnnouncement
             | Self::BuildNodeAnnouncement { .. }
             | Self::BuildChannelUpdate
-            | Self::BuildAnnouncementSignatures => false,
+            | Self::BuildAnnouncementSignatures
+            | Self::LookupShortChannelId => false,
+            Self::CreateFundingTransaction
+            | Self::SendMessage
+            | Self::SendOpenChannel
+            | Self::SendFundingCreated
+            | Self::SendChannelReady { .. }
+            | Self::SendShutdown
+            | Self::RecvAcceptChannel
+            | Self::RecvFundingSigned
+            | Self::RecvChannelReady
+            | Self::MineBlocks(_)
+            | Self::BroadcastTransaction => true,
         }
+    }
+
+    /// Returns `true` if this operation's result depends only on its inputs.
+    /// An operation that also reads external state cannot be deduplicated by
+    /// CSE even when it is free of side effects, and its position in the
+    /// program is meaningful.
+    #[must_use]
+    pub fn depends_only_on_inputs(&self) -> bool {
+        match self {
+            // The program context is recorded before the Nyx snapshot and does
+            // not change during execution, so the context loads behave like
+            // the literal loads above.
+            Self::LoadAmount(_)
+            | Self::LoadShortChannelId(_)
+            | Self::LoadFeeratePerKw(_)
+            | Self::LoadBlockHeight(_)
+            | Self::LoadTimestamp(_)
+            | Self::LoadForwardingFee(_)
+            | Self::LoadU16(_)
+            | Self::LoadU8(_)
+            | Self::LoadBytes(_)
+            | Self::LoadFeatures(_)
+            | Self::LoadPrivateKey(_)
+            | Self::LoadChannelId(_)
+            | Self::LoadShutdownScript(_)
+            | Self::LoadChannelType(_)
+            | Self::LoadTargetPubkeyFromContext
+            | Self::LoadChainHashFromContext
+            | Self::DerivePoint
+            | Self::ExtractAcceptChannel(_)
+            | Self::BuildOpenChannel
+            | Self::BuildChannelAnnouncement
+            | Self::BuildNodeAnnouncement { .. }
+            | Self::BuildChannelUpdate
+            | Self::BuildAnnouncementSignatures
+            | Self::SendMessage
+            | Self::SendOpenChannel
+            | Self::SendChannelReady { .. }
+            | Self::SendShutdown
+            | Self::MineBlocks(_)
+            | Self::BroadcastTransaction => true,
+            // `CreateFundingTransaction` selects coins from the wallet, whose
+            // contents change as transactions are created and broadcast.
+            // `SendFundingCreated` builds its message from the recorded
+            // negotiation and channel state. The `Recv` operations read
+            // whatever the target sends us, and `LookupShortChannelId` reads
+            // chain state.
+            Self::CreateFundingTransaction
+            | Self::SendFundingCreated
+            | Self::RecvAcceptChannel
+            | Self::RecvFundingSigned
+            | Self::RecvChannelReady
+            | Self::LookupShortChannelId => false,
+        }
+    }
+
+    /// Returns `true` if this operation is free of side effects and depends
+    /// only on its inputs. Only pure operations may be merged by CSE or
+    /// reordered freely.
+    #[must_use]
+    pub fn is_pure(&self) -> bool {
+        !self.has_side_effects() && self.depends_only_on_inputs()
     }
 
     /// Returns true if this operation has parameters that can be mutated

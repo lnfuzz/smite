@@ -709,9 +709,12 @@ fn lookup_short_channel_id_operation() {
     assert_eq!(op.input_types(), vec![VariableType::FundingTransaction]);
     assert_eq!(op.output_type(), Some(VariableType::ShortChannelId));
     assert!(!op.is_param_mutable());
-    // Non-deterministic (depends on chain state), so must not be dropped by DCE
-    // or deduplicated by CSE.
-    assert!(op.has_side_effects());
+    // Read-only, so DCE may drop it when its result is unused.
+    assert!(!op.has_side_effects());
+    // Depends on chain state, so it must not be deduplicated by CSE and its
+    // position relative to `MineBlocks` is meaningful.
+    assert!(!op.depends_only_on_inputs());
+    assert!(!op.is_pure());
     assert_eq!(op.to_string(), "LookupShortChannelId");
 }
 
@@ -750,6 +753,15 @@ fn create_and_broadcast_tx_instructions() -> Vec<Instruction> {
             inputs: vec![6],
         },
     ]
+}
+
+/// Returns the index of the funding transaction produced by
+/// `create_and_broadcast_tx_instructions`.
+fn funding_tx_index(instrs: &[Instruction]) -> usize {
+    instrs
+        .iter()
+        .position(|i| matches!(i.operation, Operation::CreateFundingTransaction))
+        .expect("the helper creates a funding transaction")
 }
 
 #[test]
@@ -2409,6 +2421,49 @@ fn instr_reorder_preserves_well_formedness() {
     assert_mutator_preserves_well_formedness(&InstructionReorderMutator, &original);
 }
 
+// `LookupShortChannelId` is read-only but nondeterministic, so it stays an
+// `Act` and the mutator may still move it across a `MineBlocks`. That swap is
+// how a confirmed scid becomes the unconfirmed sentinel.
+#[test]
+fn instr_reorder_moves_lookup_short_channel_id() {
+    let mut instrs = create_and_broadcast_tx_instructions();
+    let funding_tx = funding_tx_index(&instrs);
+    instrs.push(Instruction {
+        operation: Operation::MineBlocks(6),
+        inputs: vec![],
+    });
+    let mine_idx = instrs.len() - 1;
+    instrs.push(Instruction {
+        operation: Operation::LookupShortChannelId,
+        inputs: vec![funding_tx],
+    });
+
+    let mut rng = SmallRng::seed_from_u64(0);
+    let mut moved = false;
+    for _ in 0..100 {
+        let mut program = Program {
+            instructions: instrs.clone(),
+        };
+        if !InstructionReorderMutator.mutate(&mut program, &mut rng) {
+            continue;
+        }
+        assert_well_formed(&program);
+        let lookup = program
+            .instructions
+            .iter()
+            .position(|i| matches!(i.operation, Operation::LookupShortChannelId))
+            .expect("lookup is never removed by a reorder");
+        if lookup <= mine_idx {
+            moved = true;
+            break;
+        }
+    }
+    assert!(
+        moved,
+        "reorder must be able to move the lookup before MineBlocks"
+    );
+}
+
 // -- GeneratorInsertionMutator tests --
 
 // A test generator that doesn't use RNG, ensuring its operations are always predictable.
@@ -2736,6 +2791,80 @@ fn dead_code_idempotent() {
     assert_eq!(once, twice, "elimination is idempotent");
 }
 
+// `LookupShortChannelId` is read-only, so a lookup whose result nothing
+// consumes can be dropped.
+#[test]
+fn dce_drops_unused_lookup_short_channel_id() {
+    let mut instrs = create_and_broadcast_tx_instructions();
+    let funding_tx = funding_tx_index(&instrs);
+    instrs.push(Instruction {
+        operation: Operation::MineBlocks(6),
+        inputs: vec![],
+    });
+    instrs.push(Instruction {
+        operation: Operation::LookupShortChannelId,
+        inputs: vec![funding_tx],
+    });
+    let mut program = Program {
+        instructions: instrs,
+    };
+
+    assert!(DeadCodeEliminator.minimize(&mut program));
+    assert!(
+        !program
+            .instructions
+            .iter()
+            .any(|i| matches!(i.operation, Operation::LookupShortChannelId)),
+        "DCE must drop a LookupShortChannelId whose result is unused",
+    );
+    assert_well_formed(&program);
+}
+
+// A lookup whose result is consumed must survive, now that it no longer
+// relies on being marked as side-effecting to stay in the program.
+#[test]
+fn dead_code_keeps_referenced_lookup_short_channel_id() {
+    let mut instrs = create_and_broadcast_tx_instructions();
+    let funding_tx = funding_tx_index(&instrs);
+    let point = instrs
+        .iter()
+        .position(|i| matches!(i.operation, Operation::DerivePoint))
+        .expect("the helper derives a point");
+    instrs.push(Instruction {
+        operation: Operation::MineBlocks(6),
+        inputs: vec![],
+    });
+    instrs.push(Instruction {
+        operation: Operation::LookupShortChannelId,
+        inputs: vec![funding_tx],
+    });
+    let scid = instrs.len() - 1;
+    instrs.push(Instruction {
+        operation: Operation::LoadChannelId([1u8; 32]),
+        inputs: vec![],
+    });
+    let channel_id = instrs.len() - 1;
+    instrs.push(Instruction {
+        operation: Operation::SendChannelReady {
+            include_alias: false,
+        },
+        inputs: vec![channel_id, point, scid],
+    });
+    let mut program = Program {
+        instructions: instrs,
+    };
+
+    DeadCodeEliminator.minimize(&mut program);
+    assert!(
+        program
+            .instructions
+            .iter()
+            .any(|i| matches!(i.operation, Operation::LookupShortChannelId)),
+        "DeadCodeEliminator must not remove a referenced LookupShortChannelId",
+    );
+    assert_well_formed(&program);
+}
+
 // -- CommonSubexpressionEliminator tests --
 
 #[test]
@@ -2782,6 +2911,42 @@ fn cse_rewires_references() {
     };
     assert!(CommonSubexpressionEliminator.minimize(&mut program));
     assert_eq!(program, expected);
+    assert_well_formed(&program);
+}
+
+// Two lookups of the same funding transaction can return different results
+// when a `MineBlocks` separates them, so CSE must not merge them even though
+// `LookupShortChannelId` has no side effects.
+#[test]
+fn cse_does_not_merge_lookup_short_channel_id() {
+    let mut instrs = create_and_broadcast_tx_instructions();
+    let funding_tx = funding_tx_index(&instrs);
+    instrs.push(Instruction {
+        operation: Operation::LookupShortChannelId,
+        inputs: vec![funding_tx],
+    });
+    instrs.push(Instruction {
+        operation: Operation::MineBlocks(6),
+        inputs: vec![],
+    });
+    instrs.push(Instruction {
+        operation: Operation::LookupShortChannelId,
+        inputs: vec![funding_tx],
+    });
+    let mut program = Program {
+        instructions: instrs,
+    };
+
+    CommonSubexpressionEliminator.minimize(&mut program);
+    assert_eq!(
+        program
+            .instructions
+            .iter()
+            .filter(|i| matches!(i.operation, Operation::LookupShortChannelId))
+            .count(),
+        2,
+        "CSE must not merge lookups separated by MineBlocks",
+    );
     assert_well_formed(&program);
 }
 

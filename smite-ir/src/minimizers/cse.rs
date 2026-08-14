@@ -30,7 +30,7 @@ impl Minimizer for CommonSubexpressionEliminator {
             for input in &mut instr.inputs {
                 *input = new_idx[*input];
             }
-            if instr.operation.has_side_effects() {
+            if !instr.operation.is_pure() {
                 new_idx[i] = instructions.len();
                 instructions.push(instr);
                 continue;
