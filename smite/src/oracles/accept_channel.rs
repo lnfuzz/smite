@@ -224,7 +224,7 @@ fn verify_initial_commitment(
 ) -> Result<(), String> {
     // Check that the opener can afford the proposed feerate.
     let opener_balance_sat = (open_channel.funding_satoshis * 1000 - open_channel.push_msat) / 1000;
-    let commitment_cost = CommitmentCost::new(open_channel.feerate_per_kw, channel_type);
+    let commitment_cost = CommitmentCost::new(open_channel.feerate_per_kw, channel_type, 0);
     let Some(balance_after_fee) = opener_balance_sat.checked_sub(commitment_cost.fee_sat) else {
         return Err(format!(
             "opener balance {opener_balance_sat} sat cannot cover the commitment fee of {} sat",

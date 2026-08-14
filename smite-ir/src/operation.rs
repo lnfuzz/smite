@@ -184,10 +184,11 @@ pub enum Operation {
     /// Build and send a `funding_created` message (BOLT 2, type 34).
     /// Produces a `SentFundingCreated` variable.
     ///
-    /// Inputs (3):
+    /// Inputs (4):
     ///   0: `funding_transaction` (`FundingTransaction`)
     ///   1: `opener_funding_privkey` (`PrivateKey`)
-    ///   2: `temporary_channel_id` (`ChannelId`)
+    ///   2: `opener_htlc_basepoint_privkey` (`PrivateKey`)
+    ///   3: `temporary_channel_id` (`ChannelId`)
     SendFundingCreated,
     /// Build and send a `channel_ready` message (BOLT 2, type 36).
     ///
@@ -797,6 +798,7 @@ impl Operation {
             Self::SendFundingCreated => vec![
                 VariableType::FundingTransaction, // funding_transaction
                 VariableType::PrivateKey,         // opener_funding_privkey
+                VariableType::PrivateKey,         // opener_htlc_basepoint_privkey
                 VariableType::ChannelId,          // temporary_channel_id
             ],
             Self::SendChannelReady { .. } => vec![

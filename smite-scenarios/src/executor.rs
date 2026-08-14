@@ -858,7 +858,7 @@ fn build_open_channel(variables: &[Option<Variable>], inputs: &[usize]) -> OpenC
     }
 }
 
-/// Builds a `funding_created` message from 3 input variables.
+/// Builds a `funding_created` message from 4 input variables.
 ///
 /// Channel parameters are read from the negotiated `open_channel` and
 /// `accept_channel` messages recorded in `negotiations`, ensuring the
@@ -876,7 +876,8 @@ fn build_funding_created(
 ) -> Result<FundingCreated, ExecuteError> {
     let funding_tx = resolve_funding_transaction(variables, inputs[0]);
     let opener_funding_privkey_bytes = resolve_private_key(variables, inputs[1]);
-    let temporary_channel_id = resolve_channel_id(variables, inputs[2]);
+    let opener_htlc_basepoint_privkey_bytes = resolve_private_key(variables, inputs[2]);
+    let temporary_channel_id = resolve_channel_id(variables, inputs[3]);
 
     let funding_outpoint = OutPoint {
         txid: funding_tx.tx.compute_txid(),
@@ -913,11 +914,16 @@ fn build_funding_created(
     let secp = Secp256k1::new();
     let opener_funding_pubkey = PublicKey::from_secret_key(&secp, &opener_funding_privkey);
 
+    let opener_htlc_basepoint_privkey =
+        SecretKey::from_slice(&opener_htlc_basepoint_privkey_bytes).expect("valid private key");
+    let opener_htlc_basepoint = PublicKey::from_secret_key(&secp, &opener_htlc_basepoint_privkey);
+
     let opener = ChannelPartyConfig {
         funding_pubkey: opener_funding_pubkey,
         payment_basepoint: open_channel.payment_basepoint,
         revocation_basepoint: open_channel.revocation_basepoint,
         delayed_payment_basepoint: open_channel.delayed_payment_basepoint,
+        htlc_basepoint: opener_htlc_basepoint,
         dust_limit_satoshis: open_channel.dust_limit_satoshis,
         to_self_delay: open_channel.to_self_delay,
     };
@@ -926,6 +932,7 @@ fn build_funding_created(
         payment_basepoint: accept_channel.payment_basepoint,
         revocation_basepoint: accept_channel.revocation_basepoint,
         delayed_payment_basepoint: accept_channel.delayed_payment_basepoint,
+        htlc_basepoint: accept_channel.htlc_basepoint,
         dust_limit_satoshis: accept_channel.dust_limit_satoshis,
         to_self_delay: accept_channel.to_self_delay,
     };
@@ -947,8 +954,10 @@ fn build_funding_created(
     let holder = HolderIdentity {
         side: Side::Opener,
         funding_privkey: opener_funding_privkey,
+        htlc_basepoint_privkey: opener_htlc_basepoint_privkey,
     };
-    let signature = config.sign_counterparty_commitment(&state, &holder);
+    let (signature, htlc_signature) = config.sign_counterparty_commitment(&state, &holder);
+    assert!(htlc_signature.is_empty()); // There are no HTLCs in the initial commitment transaction.
 
     let channel_id = ChannelId::v1_from_funding_outpoint(config.funding_outpoint);
 
@@ -1334,7 +1343,7 @@ fn verify_funding_signed(
 
     state
         .config
-        .verify_counterparty_signature(&state.commitment, &state.holder, &fs.signature)
+        .verify_counterparty_signature(&state.commitment, &state.holder, &fs.signature, &[])
         .then_some(())
         .ok_or(Violation::InvalidCounterpartySignature(fs.channel_id))
 }
@@ -3336,19 +3345,28 @@ mod tests {
     }
 
     fn send_funding_created_and_recv_funding_signed_instructions() -> Vec<Instruction> {
+        let opener_htlc_basepoint_privkey =
+            SecretKey::from_str("1111111111111111111111111111111111111111111111111111111111111111")
+                .unwrap()
+                .secret_bytes();
+
         let mut instrs = create_and_broadcast_tx_instructions();
         instrs.extend(vec![
+            Instruction {
+                operation: Operation::LoadPrivateKey(opener_htlc_basepoint_privkey),
+                inputs: vec![],
+            },
             Instruction {
                 operation: Operation::LoadChannelId([0xbb; 32]),
                 inputs: vec![],
             },
             Instruction {
                 operation: Operation::SendFundingCreated,
-                inputs: vec![6, 0, 8],
+                inputs: vec![6, 0, 8, 9],
             },
             Instruction {
                 operation: Operation::RecvFundingSigned,
-                inputs: vec![9],
+                inputs: vec![10],
             },
         ]);
         instrs
@@ -3414,12 +3432,17 @@ mod tests {
                 "1552dfba4f6cf29a62a0af13c8d6981d36d0ef8d61ba10fb0fe90da7634d7e13",
             )
             .unwrap(),
+            htlc_basepoint_privkey: SecretKey::from_str(
+                "4444444444444444444444444444444444444444444444444444444444444444",
+            )
+            .unwrap(),
         };
 
         assert!(state.config.verify_counterparty_signature(
             &state.commitment,
             &holder,
-            &fc.signature
+            &fc.signature,
+            &[]
         ));
 
         let pending = executor
@@ -3668,13 +3691,13 @@ mod tests {
                 operation: Operation::SendChannelReady {
                     include_alias: false,
                 },
-                inputs: vec![10, 1, 11],
+                inputs: vec![11, 1, 12],
             },
             Instruction {
                 operation: Operation::SendChannelReady {
                     include_alias: true,
                 },
-                inputs: vec![10, 3, 11],
+                inputs: vec![11, 3, 12],
             },
         ]);
 
@@ -4004,7 +4027,7 @@ mod tests {
             },
             Instruction {
                 operation: Operation::SendFundingCreated,
-                inputs: vec![6, 0, 9],
+                inputs: vec![6, 0, 2, 9],
             },
             Instruction {
                 operation: Operation::RecvFundingSigned,

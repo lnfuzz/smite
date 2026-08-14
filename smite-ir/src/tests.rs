@@ -650,7 +650,7 @@ fn postcard_roundtrip() {
             },
             Instruction {
                 operation: Operation::SendFundingCreated,
-                inputs: vec![11, 0, 3],
+                inputs: vec![11, 0, 8, 3],
             },
         ],
     };
@@ -801,18 +801,22 @@ fn displays_send_funding_created_recv_funding_signed_program() {
         },
         // funding_created parameters.
         Instruction {
+            operation: Operation::LoadPrivateKey(key(2)),
+            inputs: vec![],
+        },
+        Instruction {
             operation: Operation::LoadChannelId([0xbb; 32]),
             inputs: vec![],
         },
         // Build and send funding_created.
         Instruction {
             operation: Operation::SendFundingCreated,
-            inputs: vec![4, 0, 5],
+            inputs: vec![4, 0, 5, 6],
         },
         // receive funding_signed.
         Instruction {
             operation: Operation::RecvFundingSigned,
-            inputs: vec![6],
+            inputs: vec![7],
         },
     ];
 
@@ -829,9 +833,10 @@ fn displays_send_funding_created_recv_funding_signed_program() {
         "v2 = LoadAmount(10000000)".into(),
         "v3 = LoadFeeratePerKw(15000)".into(),
         "v4 = CreateFundingTransaction(v1, v1, v2, v3)".into(),
-        format!("v5 = LoadChannelId(0x{b32})"),
-        "v6 = SendFundingCreated(v4, v0, v5)".into(),
-        "v7 = RecvFundingSigned(v6)".into(),
+        format!("v5 = LoadPrivateKey(0x{z31}02)"),
+        format!("v6 = LoadChannelId(0x{b32})"),
+        "v7 = SendFundingCreated(v4, v0, v5, v6)".into(),
+        "v8 = RecvFundingSigned(v7)".into(),
     ];
 
     assert_eq!(lines.len(), expected.len(), "line count mismatch");

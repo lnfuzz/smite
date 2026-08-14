@@ -27,7 +27,8 @@ impl Generator for FundingFlowGenerator {
         let revocation_basepoint = builder.generate_fresh(VariableType::Point, rng);
         let payment_basepoint = builder.generate_fresh(VariableType::Point, rng);
         let delayed_payment_basepoint = builder.generate_fresh(VariableType::Point, rng);
-        let htlc_basepoint = builder.generate_fresh(VariableType::Point, rng);
+        let htlc_basepoint_privkey = builder.generate_fresh(VariableType::PrivateKey, rng);
+        let htlc_basepoint = builder.append(Operation::DerivePoint, &[htlc_basepoint_privkey]);
         let first_per_commitment_point = builder.generate_fresh(VariableType::Point, rng);
 
         // Channel parameters.
@@ -100,7 +101,12 @@ impl Generator for FundingFlowGenerator {
         // Build and send funding_created.
         let sent_funding_created = builder.append(
             Operation::SendFundingCreated,
-            &[funding_transaction, funding_privkey, temporary_channel_id],
+            &[
+                funding_transaction,
+                funding_privkey,
+                htlc_basepoint_privkey,
+                temporary_channel_id,
+            ],
         );
 
         // Receive funding_signed.
