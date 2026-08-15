@@ -5,7 +5,7 @@
 # Usage: ./scripts/coverage-report.sh <target> <scenario> <corpus-dir> [output-dir]
 #
 # Targets:   lnd, cln, ldk, eclair
-# Scenarios: encrypted_bytes, noise, init
+# Scenarios: encrypted_bytes, noise, ir, init
 #
 # This script:
 # 1. Builds (if needed) a coverage-instrumented Docker image
@@ -19,7 +19,7 @@ if [ $# -lt 3 ]; then
     echo ""
     echo "Arguments:"
     echo "  target      Target implementation (lnd, cln, ldk, eclair)"
-    echo "  scenario    Scenario name (encrypted_bytes, noise, init)"
+    echo "  scenario    Scenario name (encrypted_bytes, noise, ir, init)"
     echo "  corpus-dir  Directory containing fuzz input files"
     echo "  output-dir  Output directory (default: ./<target>-<scenario>-coverage-report)"
     echo ""
@@ -135,6 +135,7 @@ run_input() {
         mkdir "$covdir"
 
         docker run --rm "${DOCKER_USER[@]}" \
+            --tmpfs /tmp:rw,exec,size=1g \
             -v "$CORPUS_DIR:/corpus:ro" \
             -v "$covdir:/covdata" \
             -e SMITE_INPUT="/corpus/$input_name" \
@@ -230,6 +231,7 @@ echo "Merging coverage data and generating report..."
 case "$TARGET" in
     lnd)
         docker run --rm "${DOCKER_USER[@]}" \
+            --tmpfs /tmp:rw,exec,size=1g \
             -v "$OUTPUT_DIR:/output" \
             -e GOCACHE=/tmp/go-cache \
             -e GOPATH=/tmp/go \
@@ -259,6 +261,7 @@ case "$TARGET" in
 
     cln|ldk)
         docker run --rm "${DOCKER_USER[@]}" \
+            --tmpfs /tmp:rw,exec,size=1g \
             -v "$OUTPUT_DIR:/output" \
             -e TARGET="$TARGET" \
             "$DOCKER_IMAGE" \
@@ -307,6 +310,7 @@ case "$TARGET" in
 
     eclair)
         docker run --rm "${DOCKER_USER[@]}" \
+            --tmpfs /tmp:rw,exec,size=1g \
             -v "$OUTPUT_DIR:/output" \
             "$DOCKER_IMAGE" \
             sh -c '

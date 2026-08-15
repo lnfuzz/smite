@@ -98,8 +98,10 @@ When AFL++ finds a crash:
 cp /tmp/smite-out/default/crashes/<crashing-input> ./crash
 
 # Reproduce in local mode (use the matching image and scenario binary)
-docker run --rm -v $PWD/crash:/input.bin -e SMITE_INPUT=/input.bin smite-$TARGET-$SCENARIO /$TARGET-scenario
+docker run --rm --tmpfs /tmp:rw,exec,size=1g -v $PWD/crash:/input.bin -e SMITE_INPUT=/input.bin smite-$TARGET-$SCENARIO /$TARGET-scenario
 ```
+
+The `--tmpfs /tmp:rw,exec,size=1g` option provides a temporary in-memory filesystem for `/tmp`, matching the `tmpfs` environment available inside the Nyx VM. This helps keep the local execution environment consistent with the one used during fuzzing.
 
 ### Coverage Report Mode
 
