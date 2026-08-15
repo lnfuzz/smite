@@ -9,19 +9,19 @@ set -o pipefail
 
 FILE=smite/src/bolt.rs
 
-order_pub_mod_msg_type() {
+order_message_type() {
     # awk '/start/,/end/ { print }' <file>
     #   Print everything between the lines matching start and end
     # grep x3
-    #   Print the last number of every line matching "pub const" (BOLT message type constant)
-    awk '/^pub mod msg_type {/,/^}/ { print }' $FILE | \
+    #   Print the BOLT message type number inside MessageType() of every line
+    awk '/^impl MessageType {/,/^}/ { print }' $FILE | \
         grep "pub const" | \
-        grep -oE '= [0-9]+;$' | \
+        grep -oE '= MessageType\([0-9]+\);$' | \
         grep -oE '[0-9]+'
 }
 
-echo "Checking pub mod msg_type { ... }"
-diff -u <(order_pub_mod_msg_type) <(order_pub_mod_msg_type | sort -n)
+echo "Checking order impl MessageType { ... }"
+diff -u <(order_message_type) <(order_message_type | sort -n)
 echo "OK"
 
 # We now know the keys are in the correct order. We can now use a
@@ -32,9 +32,10 @@ to_canonical() {
 }
 
 order_canonical_keys() {
-    # print all keys in pub mod msg_type { ... }
-    awk '/^pub mod msg_type {/,/^}/ { print }' $FILE | \
+    # print all keys in impl MessageType { ... }
+    awk '/^impl MessageType {/,/^}/ { print }' $FILE | \
         grep "pub const" | \
+        grep -v "pub const fn" | \
         awk '{ print $3 }' | \
         to_canonical
 }
@@ -74,8 +75,8 @@ order_impl_message_encode() {
 order_impl_message_decode() {
     impl_message_block | \
         awk '/^    pub fn decode/,/^    }/ { print }' | \
-        grep "msg_type::" | \
-        sed -e 's/msg_type:://' -e 's/ =>.*//' | \
+        grep "MessageType::" | \
+        sed -e 's/MessageType:://' -e 's/ =>.*//' | \
         grep -v "Unknown" | \
         to_canonical
 }
@@ -95,8 +96,8 @@ order_tests() {
 order_tests_message_type_values() {
     tests_block | \
         awk '/^    fn message_type_values\(\) {/,/^    }/ { print }' | \
-        grep -oE "msg_type::[A-Za-z0-9_]+" | \
-        sed 's/msg_type:://' | \
+        grep -oE "MessageType::[A-Za-z0-9_]+" | \
+        sed 's/MessageType:://' | \
         to_canonical
 }
 
