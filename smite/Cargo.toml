@@ -23,6 +23,9 @@ chacha20poly1305 = { version = "0.10", default-features = false, features = [
   "alloc",
 ] }
 
+# Onion routing pseudo-random byte stream (BOLT 4)
+chacha20 = { version = "0.9", default-features = false }
+
 smite-nyx-sys = { path = "../smite-nyx-sys", optional = true }
 
 # Process management (Unix only - Windows not supported)

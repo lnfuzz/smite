@@ -29,9 +29,6 @@ pub const PUBLIC_KEY_SIZE: usize = 33;
 /// Size of an encoded `short_channel_id` in bytes.
 pub const SHORT_CHANNEL_ID_SIZE: usize = 8;
 
-/// Size of payment onion routing packets in bytes.
-pub const PAYMENT_ONION_PACKET_SIZE: usize = 1366;
-
 /// Size of a per-commitment secret in bytes.
 pub const PER_COMMITMENT_SECRET_SIZE: usize = 32;
 
