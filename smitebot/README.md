@@ -244,3 +244,18 @@ smitebot corpus minimize <campaign-id> [-i <dir>]... [-o <output-dir>] [--aflpp-
 - `-i, --input <dir>`: One input directory to minimize. If multiple `-i` flags are present, all specified directories are merged before minimizing. If omitted, the campaign's runner queues are merged and minimized.
 - `-o, --output <output-dir>`: output directory; defaults to `~/.smitebot/runs/<id>/corpus-min/`
 - `--aflpp-path <path>`: AFL++ source tree, overriding the `aflpp_path` stored in `state.json` (useful when the checkout has moved)
+
+### smitebot reproduce
+
+Replays a single input against a campaign's target by running its Docker image once, with the input fed to the target the same way the fuzzer's `LocalRunner` does. The target's output is streamed to the terminal; `reproduce` interprets nothing — read the logs to see what happened. Resolves the image and target from the campaign's `state.json`; no live campaign required.
+
+```bash
+smitebot reproduce <campaign-id> -i <input>
+smitebot reproduce <campaign-id> -i <input> --attach
+```
+
+- `<campaign-id>`: directory name under `~/.smitebot/runs`
+- `-i, --input <input>`: input file to replay, e.g. a crash from a runner's `crashes/` directory
+- `--attach`: allocate an interactive TTY (`docker run -it`) so the run can be watched live
+
+The input's parent directory is bind-mounted read-only, so crash filenames containing colons (e.g. `id:000000,sig:06,...`) are handled correctly. Reproduction under Nyx is not yet supported.
