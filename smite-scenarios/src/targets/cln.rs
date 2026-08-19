@@ -20,7 +20,7 @@ use smite::bitcoin::BitcoinCli;
 use smite::process::ManagedProcess;
 
 use super::bitcoind;
-use super::{Target, TargetError, check_crash_log};
+use super::{Target, TargetError, TargetRpc, check_crash_log};
 
 /// Configuration for the CLN target.
 pub struct ClnConfig {
@@ -43,16 +43,52 @@ impl Default for ClnConfig {
 }
 
 impl ClnConfig {
-    fn bitcoind_config(&self, data_dir: &Path) -> bitcoind::BitcoindConfig {
+    fn bitcoind_config(&self) -> bitcoind::BitcoindConfig {
         bitcoind::BitcoindConfig {
             rpc_port: self.bitcoind_rpc_port,
             p2p_port: self.bitcoind_p2p_port,
-            extra_args: vec![format!(
-                "-blocknotify=lightning-cli --lightning-dir='{}' --network=regtest syncblocks",
-                data_dir.join("cln").display()
-            )],
             ..bitcoind::BitcoindConfig::default()
         }
+    }
+}
+
+/// RPC handle for interacting with CLN node target.
+#[derive(Debug, Clone)]
+pub struct ClnCli {
+    /// Path to the CLN node's data directory.
+    pub cln_dir: PathBuf,
+}
+
+impl ClnCli {
+    /// Creates a `lightning-cli` command preconfigured with the connection
+    /// arguments for this node.
+    #[must_use]
+    pub fn run(&self) -> Command {
+        let mut cmd = Command::new("lightning-cli");
+        cmd.arg(format!("--lightning-dir={}", self.cln_dir.display()))
+            .arg("--network=regtest");
+        cmd
+    }
+}
+
+impl TargetRpc for ClnCli {
+    /// RPC to make CLN poll for new blocks immediately instead of waiting for
+    /// its regular poll interval, allowing it to sync faster.
+    ///
+    /// # Panics
+    ///
+    /// - If `lightning-cli syncblocks` fails to execute or exits non-zero.
+    fn chain_sync(&mut self) {
+        let sync_out = self
+            .run()
+            .arg("syncblocks")
+            .output()
+            .expect("lightning-cli syncblocks should not fail");
+        assert!(
+            sync_out.status.success(),
+            "lightning-cli syncblocks failed: {}",
+            String::from_utf8_lossy(&sync_out.stderr)
+        );
     }
 }
 
@@ -207,12 +243,12 @@ impl Drop for ClnTarget {
 
 impl Target for ClnTarget {
     type Config = ClnConfig;
+    type Rpc = ClnCli;
 
     fn start(config: Self::Config) -> Result<Self, TargetError> {
         let (data_path, temp_dir) = bitcoind::resolve_data_dir()?;
 
-        let bitcoind_config = config.bitcoind_config(&data_path);
-        let (bitcoind, bitcoin_cli) = bitcoind::start(&bitcoind_config, &data_path)?;
+        let (bitcoind, bitcoin_cli) = bitcoind::start(&config.bitcoind_config(), &data_path)?;
         let (cln, pubkey, cln_dir) = Self::start_cln(&config, &data_path)?;
         let addr = SocketAddr::from(([127, 0, 0, 1], config.cln_p2p_port));
 
@@ -235,6 +271,12 @@ impl Target for ClnTarget {
 
     fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    fn rpc(&self) -> Self::Rpc {
+        ClnCli {
+            cln_dir: self.cln_dir.clone(),
+        }
     }
 
     fn bitcoin_cli(&self) -> &BitcoinCli {

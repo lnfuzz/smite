@@ -21,10 +21,10 @@ use crate::targets::Target;
 /// (out-of-bounds variable refs, type mismatches, `MineBlocks(0)`, etc.).
 pub struct IrScenario<T: Target, S: SnapshotSetup<T>> {
     target: T,
-    /// Executes IR programs and owns the connection, bitcoin-cli handle, and
-    /// program context. Created once before the snapshot and reused across
-    /// fuzzing runs.
-    executor: Executor<NoiseConnection, BitcoinCli>,
+    /// Executes IR programs and owns the connection, bitcoin-cli handle,
+    /// program context, and the target's RPC handle. Created once before the
+    /// snapshot and reused across fuzzing runs.
+    executor: Executor<NoiseConnection, BitcoinCli, T::Rpc>,
     // S is only used for static dispatch on S::setup(), not stored.
     _phantom: PhantomData<S>,
 }
@@ -34,7 +34,7 @@ impl<T: Target, S: SnapshotSetup<T>> Scenario for IrScenario<T, S> {
         let target = T::start(T::Config::default())?;
         let (conn, context) = S::setup(&target)?;
         let bitcoin_cli = target.bitcoin_cli().clone();
-        let executor = Executor::new(conn, bitcoin_cli, context);
+        let executor = Executor::new(conn, bitcoin_cli, target.rpc(), context);
         Ok(Self {
             target,
             executor,
