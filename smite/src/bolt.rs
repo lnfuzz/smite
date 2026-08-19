@@ -14,6 +14,7 @@ mod closing_complete;
 mod closing_sig;
 mod commitment_signed;
 mod error;
+mod features;
 mod funding_created;
 mod funding_signed;
 mod gossip_timestamp_filter;
@@ -52,6 +53,7 @@ pub use closing_complete::{ClosingComplete, ClosingTlvs};
 pub use closing_sig::ClosingSig;
 pub use commitment_signed::{CommitmentSigned, CommitmentSignedTlvs};
 pub use error::Error;
+pub use features::{FeatureBit, Features};
 pub use funding_created::FundingCreated;
 pub use funding_signed::FundingSigned;
 pub use gossip_timestamp_filter::GossipTimestampFilter;
@@ -62,7 +64,7 @@ pub use open_channel2::{OpenChannel2, OpenChannel2Tlvs};
 pub use ping::Ping;
 pub use pong::Pong;
 pub use revoke_and_ack::RevokeAndAck;
-pub use shutdown::Shutdown;
+pub use shutdown::{Shutdown, is_acceptable_shutdown_script, is_standard_shutdown_script};
 pub use tlv::{TlvRecord, TlvStream};
 pub use tx_abort::TxAbort;
 pub use tx_ack_rbf::{TxAckRbf, TxAckRbfTlvs};
@@ -72,9 +74,9 @@ pub use tx_init_rbf::{TxInitRbf, TxInitRbfTlvs};
 pub use tx_remove_input::TxRemoveInput;
 pub use tx_remove_output::TxRemoveOutput;
 pub use types::{
-    BigSize, CHANNEL_ID_SIZE, COMPACT_SIGNATURE_SIZE, ChannelId, MAX_MESSAGE_SIZE,
-    PAYMENT_ONION_PACKET_SIZE, PER_COMMITMENT_SECRET_SIZE, PUBLIC_KEY_SIZE, SHA256_HASH_SIZE,
-    SHORT_CHANNEL_ID_SIZE, ShortChannelId, TXID_SIZE, Tu32, Tu64,
+    BigSize, CHANNEL_ID_SIZE, COMPACT_SIGNATURE_SIZE, ChannelId, ChannelTypeVariant,
+    MAX_MESSAGE_SIZE, PAYMENT_ONION_PACKET_SIZE, PER_COMMITMENT_SECRET_SIZE, PUBLIC_KEY_SIZE,
+    SHA256_HASH_SIZE, SHORT_CHANNEL_ID_SIZE, ShortChannelId, TXID_SIZE, Tu32, Tu64,
 };
 pub use update_add_htlc::{UpdateAddHtlc, UpdateAddHtlcTlvs};
 pub use update_fail_htlc::{UpdateFailHtlc, UpdateFailHtlcTlvs};

@@ -9,8 +9,8 @@ use bitcoin::{OutPoint, ScriptBuf, Txid};
 use smite::bitcoin::{BitcoinCli, TxBlockPosition, Utxo};
 use smite::bolt::{
     AcceptChannel, AnnouncementSignatures, ChannelAnnouncement, ChannelId, ChannelReady,
-    ChannelReadyTlvs, ChannelUpdate, FundingCreated, FundingSigned, Message, NodeAnnouncement,
-    OpenChannel, OpenChannelTlvs, Pong, ShortChannelId, Shutdown, msg_type,
+    ChannelReadyTlvs, ChannelUpdate, Features, FundingCreated, FundingSigned, Message,
+    NodeAnnouncement, OpenChannel, OpenChannelTlvs, Pong, ShortChannelId, Shutdown, msg_type,
 };
 use smite::channel_tx::{
     ChannelConfig, ChannelPartyConfig, ChannelState, FundingTransaction, HolderIdentity, Side,
@@ -133,8 +133,8 @@ pub struct ProgramContext {
     pub chain_hash: [u8; 32],
     /// Current block height at snapshot time.
     pub block_height: u32,
-    /// Target's advertised feature bits from init message.
-    pub target_features: Vec<u8>,
+    /// Features negotiated between the target node and Smite.
+    pub negotiated_features: Features,
 }
 
 /// Abstraction over a Noise-encrypted connection, allowing mock implementations
@@ -481,6 +481,7 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                     AcceptChannelOracle.evaluate(&AcceptChannelContext {
                         accept_channel: &ac,
                         negotiation: self.negotiations.get(&ac.temporary_channel_id),
+                        negotiated_features: &self.context.negotiated_features,
                     })?;
                     record_recv_accept_channel(&mut self.negotiations, &ac);
                     Some(Variable::AcceptChannel(ac))
@@ -932,7 +933,7 @@ fn build_funding_created(
     let config = ChannelConfig {
         funding_outpoint,
         funding_satoshis: open_channel.funding_satoshis,
-        channel_type: open_channel.tlvs.channel_type.clone().unwrap_or_default(),
+        channel_type: Features::from(open_channel.tlvs.channel_type.clone().unwrap_or_default()),
         opener,
         acceptor,
         minimum_depth: accept_channel.minimum_depth,
@@ -1557,7 +1558,11 @@ mod tests {
             target_pubkey: sample_pubkey(1),
             chain_hash: [0xcc; 32],
             block_height: 800_000,
-            target_features: vec![],
+            negotiated_features: Features::from_bits(&[
+                Features::OPTION_STATIC_REMOTEKEY,
+                Features::OPTION_ANCHORS,
+                Features::OPTION_CHANNEL_TYPE,
+            ]),
         }
     }
 
