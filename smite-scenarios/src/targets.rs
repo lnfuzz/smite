@@ -7,10 +7,10 @@ mod ldk;
 mod lnd;
 
 pub use bitcoind::INITIAL_BLOCKS;
-pub use cln::{ClnConfig, ClnTarget};
-pub use eclair::{EclairConfig, EclairTarget};
-pub use ldk::{LdkConfig, LdkTarget};
-pub use lnd::{LndConfig, LndTarget};
+pub use cln::{ClnCli, ClnConfig, ClnTarget};
+pub use eclair::{EclairCli, EclairConfig, EclairTarget};
+pub use ldk::{LdkConfig, LdkRpc, LdkTarget};
+pub use lnd::{LndCli, LndConfig, LndTarget};
 use smite::bitcoin::BitcoinCli;
 use smite::scenarios::TargetError;
 
@@ -42,6 +42,13 @@ pub fn check_crash_log() -> Result<(), TargetError> {
     Ok(())
 }
 
+/// Abstraction over target RPC operations for executing commands on a running
+/// target, allowing target-specific implementations.
+pub trait TargetRpc {
+    /// Notifies the target of newly mined blocks so it updates its chain view.
+    fn chain_sync(&mut self);
+}
+
 /// A Lightning implementation that can be fuzzed.
 ///
 /// This trait abstracts over different Lightning implementations (LND, CLN, LDK, etc.),
@@ -49,6 +56,9 @@ pub fn check_crash_log() -> Result<(), TargetError> {
 pub trait Target: Sized {
     /// Configuration for this target.
     type Config: Default;
+
+    /// RPC handle for this target.
+    type Rpc: TargetRpc;
 
     /// Start the target and any dependencies (e.g., bitcoind).
     ///
@@ -62,6 +72,9 @@ pub trait Target: Sized {
 
     /// Target's P2P listen address.
     fn addr(&self) -> SocketAddr;
+
+    /// Target's RPC handle for executing commands.
+    fn rpc(&self) -> Self::Rpc;
 
     /// `bitcoin-cli` wrapper for the regtest `bitcoind` instance.
     fn bitcoin_cli(&self) -> &BitcoinCli;

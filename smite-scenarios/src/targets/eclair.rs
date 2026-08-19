@@ -16,7 +16,7 @@ use smite::bitcoin::BitcoinCli;
 use smite::process::ManagedProcess;
 
 use super::bitcoind;
-use super::{Target, TargetError, check_crash_log};
+use super::{Target, TargetError, TargetRpc, check_crash_log};
 
 /// API password for Eclair's REST API.
 const API_PASSWORD: &str = "fuzzpass";
@@ -62,6 +62,16 @@ impl EclairConfig {
             ..bitcoind::BitcoindConfig::default()
         }
     }
+}
+
+/// RPC handle for interacting with eclair node target.
+#[derive(Debug, Clone)]
+pub struct EclairCli;
+
+impl TargetRpc for EclairCli {
+    /// Eclair receives new blocks directly from bitcoind over ZMQ, so no manual
+    /// chain synchronization is required.
+    fn chain_sync(&mut self) {}
 }
 
 /// Eclair Lightning node target.
@@ -197,6 +207,7 @@ impl EclairTarget {
 
 impl Target for EclairTarget {
     type Config = EclairConfig;
+    type Rpc = EclairCli;
 
     fn start(config: Self::Config) -> Result<Self, TargetError> {
         let (data_path, temp_dir) = bitcoind::resolve_data_dir()?;
@@ -223,6 +234,10 @@ impl Target for EclairTarget {
 
     fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    fn rpc(&self) -> Self::Rpc {
+        EclairCli
     }
 
     fn bitcoin_cli(&self) -> &BitcoinCli {
