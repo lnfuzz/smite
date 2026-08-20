@@ -1,8 +1,9 @@
 //! BOLT 2 `accept_channel` oracle, for the v1 outbound channel funding flow.
 
 use super::Oracle;
-use crate::bolt::{AcceptChannel, OpenChannel};
+use crate::bolt::{AcceptChannel, Features, OpenChannel, PublicNonce};
 use crate::channel_tx::CommitmentCost;
+use crate::musig::is_valid_public_nonce;
 use crate::pending_channel::PendingChannel;
 use crate::violation::Violation;
 
@@ -12,6 +13,9 @@ use bitcoin::Amount;
 // https://github.com/lightning/bolts/blob/master/02-peer-protocol.md#requirements-8
 const MAX_ACCEPTED_HTLCS_LIMIT: u16 = 483;
 const MIN_DUST_LIMIT_SATOSHIS: u64 = 354;
+
+/// `announce_channel` bit of `open_channel.channel_flags` (BOLT 2).
+const ANNOUNCE_CHANNEL_FLAG: u8 = 0b0000_0001;
 
 /// Context for `AcceptChannelOracle`
 pub struct AcceptChannelContext<'a> {
@@ -105,7 +109,12 @@ fn verify_accepted_open_channel(open_channel: &OpenChannel) -> Result<(), String
     // Check that the channel type was included.
     // TODO: Check option_channel_type in negotiated features since it is
     // assumed to be supported.
-    let Some(channel_type) = open_channel.tlvs.channel_type.as_deref() else {
+    let Some(channel_type) = open_channel
+        .tlvs
+        .channel_type
+        .as_deref()
+        .map(Features::from)
+    else {
         return Err("open_channel does not include a channel_type".to_string());
     };
 
@@ -128,12 +137,46 @@ fn verify_accepted_open_channel(open_channel: &OpenChannel) -> Result<(), String
         ));
     }
 
+    // Simple taproot channels cannot be gossiped and need a `MuSig2` nonce for
+    // the acceptor to sign the first commitment against, so a target accepting
+    // an `open_channel` without them has skipped a required check.
+    if channel_type.supports_feature(Features::OPTION_SIMPLE_TAPROOT) {
+        if open_channel.channel_flags & ANNOUNCE_CHANNEL_FLAG != 0 {
+            return Err(
+                "open_channel announces a simple taproot channel, which cannot be gossiped"
+                    .to_string(),
+            );
+        }
+        verify_next_local_nonce("open_channel", open_channel.tlvs.next_local_nonce)?;
+    }
+
     // Check the initial commitment satisfies the channel reserve.
     verify_initial_commitment(
         open_channel,
-        channel_type,
+        &channel_type,
         open_channel.channel_reserve_satoshis,
     )
+}
+
+/// Verifies that a simple taproot channel message carries a usable `MuSig2`
+/// verification nonce.
+fn verify_next_local_nonce(
+    message: &str,
+    next_local_nonce: Option<PublicNonce>,
+) -> Result<(), String> {
+    let Some(nonce) = next_local_nonce else {
+        return Err(format!(
+            "{message} negotiates a simple taproot channel but omits next_local_nonce"
+        ));
+    };
+
+    if !is_valid_public_nonce(&nonce) {
+        return Err(format!(
+            "{message} next_local_nonce is not two valid compressed secp256k1 points"
+        ));
+    }
+
+    Ok(())
 }
 
 /// Verifies the `accept_channel` against the BOLT 2 requirements it must meet,
@@ -150,13 +193,23 @@ fn verify_accept_channel(
     open_channel: &OpenChannel,
 ) -> Result<(), String> {
     // Check that the channel type was included.
-    let Some(channel_type) = accept_channel.tlvs.channel_type.as_deref() else {
+    let Some(channel_type) = accept_channel
+        .tlvs
+        .channel_type
+        .as_deref()
+        .map(Features::from)
+    else {
         return Err("accept_channel does not include a channel_type".to_string());
     };
 
     // Check that the channel type matches the one in open_channel.
     if open_channel.tlvs.channel_type != accept_channel.tlvs.channel_type {
         return Err("accept_channel channel_type does not match open_channel".to_string());
+    }
+
+    // The acceptor must publish the nonce we sign its commitment against.
+    if channel_type.supports_feature(Features::OPTION_SIMPLE_TAPROOT) {
+        verify_next_local_nonce("accept_channel", accept_channel.tlvs.next_local_nonce)?;
     }
 
     // Check the acceptor's channel reserve covers the opener's dust limit.
@@ -197,7 +250,7 @@ fn verify_accept_channel(
     // Check the initial commitment satisfies the channel reserve.
     verify_initial_commitment(
         open_channel,
-        channel_type,
+        &channel_type,
         accept_channel.channel_reserve_satoshis,
     )
 }
@@ -206,20 +259,17 @@ fn verify_accept_channel(
 /// channel reserve requirement, returning an error if it breaches either, or
 /// `Ok(())` if both are met.
 ///
-/// NOTE: This check is safe from false positives for `zero_fee_commitments`
-/// and `option_simple_taproot`, although the reported error may be misleading:
+/// NOTE: This check is safe from false positives for `zero_fee_commitments`,
+/// although the reported error may be misleading:
 ///
 /// - `zero_fee_commitments` requires `feerate_per_kw == 0`, which we currently
 ///   do not enforce. A non-zero feerate may cause the error to be reported here
 ///   even though it is invalid for this channel type.
-/// - `option_simple_taproot` has a different commitment fee (968-byte weight),
-///   but we calculate it using the lower 724-byte weight. This may allow some
-///   invalid cases through, but cannot cause a false positive.
-/// - Anchor costs are only included when `option_anchors` is negotiated, so
-///   they are not unnecessarily subtracted for these channel types.
+/// - Anchor costs are only included when the channel type carries anchor
+///   outputs, so they are not unnecessarily subtracted for other types.
 fn verify_initial_commitment(
     open_channel: &OpenChannel,
-    channel_type: &[u8],
+    channel_type: &Features,
     channel_reserve_satoshis: u64,
 ) -> Result<(), String> {
     // Check that the opener can afford the proposed feerate.
@@ -286,8 +336,8 @@ mod tests {
             first_per_commitment_point: key,
             channel_flags: 1,
             tlvs: OpenChannelTlvs {
-                upfront_shutdown_script: None,
                 channel_type: Some(vec![0x10, 0x00]),
+                ..Default::default()
             },
         }
     }
@@ -311,6 +361,7 @@ mod tests {
             htlc_basepoint: key,
             first_per_commitment_point: key,
             tlvs: AcceptChannelTlvs {
+                next_local_nonce: None,
                 upfront_shutdown_script: None,
                 channel_type: Some(vec![0x10, 0x00]),
             },
@@ -576,5 +627,87 @@ mod tests {
         negotiation.funding_built = true;
 
         assert_pass(&accept_channel(), Some(&negotiation));
+    }
+
+    /// A `channel_type` negotiating `option_simple_taproot`, as wire bytes.
+    fn simple_taproot_channel_type() -> Vec<u8> {
+        Features::from_bits(&[Features::OPTION_SIMPLE_TAPROOT]).into_bytes()
+    }
+
+    /// A well-formed taproot negotiation: both sides carry a valid nonce and
+    /// the channel is unannounced.
+    fn taproot_negotiation() -> (OpenChannel, AcceptChannel) {
+        let nonce = crate::musig::derive_nonce(&[b"test"], &pubkey(1)).public_nonce();
+
+        let mut oc = open_channel();
+        oc.tlvs.channel_type = Some(simple_taproot_channel_type());
+        oc.tlvs.next_local_nonce = Some(nonce);
+        oc.channel_flags = 0;
+        // Taproot commitments are heavier, so keep the feerate affordable.
+        oc.feerate_per_kw = 2_500;
+
+        let mut ac = accept_channel();
+        ac.tlvs.channel_type = Some(simple_taproot_channel_type());
+        ac.tlvs.next_local_nonce = Some(nonce);
+
+        (oc, ac)
+    }
+
+    #[test]
+    fn conforming_taproot_negotiation_passes() {
+        let (oc, ac) = taproot_negotiation();
+        assert_pass(&ac, Some(&pending_negotiation(oc)));
+    }
+
+    #[test]
+    fn taproot_open_channel_without_a_nonce() {
+        let (mut oc, ac) = taproot_negotiation();
+        oc.tlvs.next_local_nonce = None;
+        assert_fail(
+            &ac,
+            Some(&pending_negotiation(oc)),
+            "open_channel negotiates a simple taproot channel but omits next_local_nonce",
+        );
+    }
+
+    #[test]
+    fn taproot_open_channel_with_a_malformed_nonce() {
+        let (mut oc, ac) = taproot_negotiation();
+        oc.tlvs.next_local_nonce = Some(PublicNonce([0x00; crate::bolt::PUBLIC_NONCE_SIZE]));
+        assert_fail(
+            &ac,
+            Some(&pending_negotiation(oc)),
+            "open_channel next_local_nonce is not two valid compressed secp256k1 points",
+        );
+    }
+
+    /// Taproot channels cannot be gossiped, so a target must reject an
+    /// `open_channel` that sets `announce_channel`.
+    #[test]
+    fn taproot_open_channel_that_announces_the_channel() {
+        let (mut oc, ac) = taproot_negotiation();
+        oc.channel_flags |= ANNOUNCE_CHANNEL_FLAG;
+        assert_fail(&ac, Some(&pending_negotiation(oc)), "cannot be gossiped");
+    }
+
+    #[test]
+    fn taproot_accept_channel_without_a_nonce() {
+        let (oc, mut ac) = taproot_negotiation();
+        ac.tlvs.next_local_nonce = None;
+        assert_fail(
+            &ac,
+            Some(&pending_negotiation(oc)),
+            "accept_channel negotiates a simple taproot channel but omits next_local_nonce",
+        );
+    }
+
+    /// A non-taproot channel must not be required to carry a nonce.
+    #[test]
+    fn non_taproot_negotiation_does_not_require_a_nonce() {
+        let oc = open_channel();
+        let ac = accept_channel();
+        assert!(oc.tlvs.next_local_nonce.is_none());
+        assert!(ac.tlvs.next_local_nonce.is_none());
+        assert_pass(&ac, Some(&pending_negotiation(oc)));
     }
 }

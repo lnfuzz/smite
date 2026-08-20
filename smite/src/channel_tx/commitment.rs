@@ -1,6 +1,9 @@
 //! BOLT 3 commitment transaction construction and signing.
 
-use super::funding::build_funding_witness_script;
+use super::funding::{build_funding_scriptpubkey, build_funding_witness_script};
+use super::taproot;
+use crate::bolt::{Features, PublicNonce};
+use crate::musig::{FundingKeys, MusigError, PartialSignature, SecretNonce};
 
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::sha256::Hash as Sha256;
@@ -9,7 +12,7 @@ use bitcoin::opcodes::all as opcodes;
 use bitcoin::script::Builder;
 use bitcoin::secp256k1::ecdsa::Signature;
 use bitcoin::secp256k1::{Message, PublicKey, Scalar, Secp256k1, SecretKey};
-use bitcoin::sighash::{EcdsaSighashType, SighashCache};
+use bitcoin::sighash::{EcdsaSighashType, Prevouts, SighashCache, TapSighashType};
 use bitcoin::transaction::Version;
 use bitcoin::{
     Amount, CompressedPublicKey, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
@@ -24,8 +27,8 @@ const COMMITMENT_TX_BASE_WEIGHT_NON_ANCHOR: u64 = 724;
 /// Weight of an anchor commitment transaction without HTLCs.
 const COMMITMENT_TX_BASE_WEIGHT_ANCHOR: u64 = 1124;
 
-/// `option_anchors` feature bits (BOLT 9, bits 22/23).
-const OPTION_ANCHORS_FEATURE_BITS: &[usize] = &[22, 23];
+/// Weight of a simple taproot commitment transaction without HTLCs.
+const COMMITMENT_TX_BASE_WEIGHT_TAPROOT: u64 = 968;
 
 /// Errors that can occur when constructing or validating commitment transactions.
 #[derive(Debug, thiserror::Error)]
@@ -77,7 +80,7 @@ pub struct ChannelConfig {
     pub funding_satoshis: u64,
     /// Channel type feature bits. The commitment format (anchor / legacy) is
     /// derived from the bits set here.
-    pub channel_type: Vec<u8>,
+    pub channel_type: Features,
     /// Opener's static keys and parameters.
     pub opener: ChannelPartyConfig,
     /// Acceptor's static keys and parameters.
@@ -150,6 +153,11 @@ pub struct ChannelState {
     /// after the block height at which they receive `funding_created`, so they
     /// may never observe it and never send `channel_ready`.
     pub was_funding_mined_prematurely: bool,
+    /// The public `MuSig2` nonce the holder gave the counterparty to sign
+    /// against, for simple taproot channels. Needed to verify the counterparty's
+    /// partial signature over the holder's commitment. `None` for every other
+    /// channel type.
+    pub holder_verification_nonce: Option<PublicNonce>,
 }
 
 impl Side {
@@ -179,6 +187,7 @@ impl ChannelState {
         commitment: CommitmentState,
         is_funding_outpoint_valid: bool,
         was_funding_mined_prematurely: bool,
+        holder_verification_nonce: Option<PublicNonce>,
     ) -> Self {
         Self {
             config,
@@ -188,6 +197,7 @@ impl ChannelState {
             acceptor_next_per_commitment_point: None,
             is_funding_outpoint_valid,
             was_funding_mined_prematurely,
+            holder_verification_nonce,
         }
     }
 
@@ -228,6 +238,14 @@ impl ChannelState {
 }
 
 impl ChannelConfig {
+    /// Returns whether this is a simple taproot channel, which funds a P2TR
+    /// output and commits with `MuSig2` rather than a 2-of-2 P2WSH.
+    #[must_use]
+    pub fn is_simple_taproot(&self) -> bool {
+        self.channel_type
+            .supports_feature(Features::OPTION_SIMPLE_TAPROOT)
+    }
+
     /// Returns the config for the given channel side.
     fn party(&self, side: &Side) -> &ChannelPartyConfig {
         match side {
@@ -284,6 +302,69 @@ impl ChannelConfig {
     ) -> Signature {
         let sighash = self.build_commitment_sighash(state, holder.counterparty_side());
         sign(&sighash, &holder.funding_privkey)
+    }
+
+    /// Builds the `MuSig2` partial signature for the counterparty's commitment
+    /// transaction, for a simple taproot channel.
+    ///
+    /// `signing_nonce` is a fresh nonce that must be sent alongside the
+    /// signature; `counterparty_verification_nonce` is the nonce the peer sent
+    /// in its `accept_channel` (or `open_channel`, when we are the acceptor).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MusigError`] if either nonce is malformed or the funding keys
+    /// cannot be aggregated.
+    pub fn partial_sign_counterparty_commitment(
+        &self,
+        state: &CommitmentState,
+        holder: &HolderIdentity,
+        signing_nonce: SecretNonce,
+        counterparty_verification_nonce: &PublicNonce,
+    ) -> Result<PartialSignature, MusigError> {
+        let sighash = self.build_commitment_sighash(state, holder.counterparty_side());
+        self.funding_keys()?.partial_sign(
+            &sighash,
+            &holder.funding_privkey,
+            signing_nonce,
+            counterparty_verification_nonce,
+        )
+    }
+
+    /// Verifies a `MuSig2` partial signature received from the counterparty for
+    /// the holder's commitment transaction.
+    ///
+    /// `counterparty_signing_nonce` is the nonce carried alongside the
+    /// signature; `holder_verification_nonce` is the nonce we sent earlier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MusigError`] if either nonce is malformed or the funding keys
+    /// cannot be aggregated. A well-formed but incorrect signature yields
+    /// `Ok(false)`.
+    pub fn verify_counterparty_partial_signature(
+        &self,
+        state: &CommitmentState,
+        holder: &HolderIdentity,
+        signature: &PartialSignature,
+        counterparty_signing_nonce: &PublicNonce,
+        holder_verification_nonce: &PublicNonce,
+    ) -> Result<bool, MusigError> {
+        let sighash = self.build_commitment_sighash(state, &holder.side);
+        let counterparty = self.party(holder.counterparty_side());
+
+        self.funding_keys()?.verify_partial(
+            &sighash,
+            signature,
+            &counterparty.funding_pubkey,
+            counterparty_signing_nonce,
+            holder_verification_nonce,
+        )
+    }
+
+    /// Builds the `MuSig2` key aggregation context for the funding output.
+    fn funding_keys(&self) -> Result<FundingKeys, MusigError> {
+        FundingKeys::new(&self.opener.funding_pubkey, &self.acceptor.funding_pubkey)
     }
 
     /// Verifies a signature received from the counterparty for the holder's
@@ -359,6 +440,31 @@ impl ChannelConfig {
             output: outputs,
         };
 
+        // Simple taproot channels spend the funding output through the taproot
+        // key path, so the digest is the BIP 341 one over the funding prevout
+        // rather than the BIP 143 one over a witness script.
+        if self.is_simple_taproot() {
+            let funding_spk = build_funding_scriptpubkey(
+                &self.opener.funding_pubkey,
+                &self.acceptor.funding_pubkey,
+                &self.channel_type,
+            )
+            .expect("two valid funding pubkeys always aggregate");
+            let funding_output = TxOut {
+                value: Amount::from_sat(self.funding_satoshis),
+                script_pubkey: funding_spk,
+            };
+
+            return SighashCache::new(&tx)
+                .taproot_key_spend_signature_hash(
+                    0,
+                    &Prevouts::All(&[funding_output]),
+                    TapSighashType::Default,
+                )
+                .expect("input index 0 is always in bounds for a single input transaction")
+                .to_byte_array();
+        }
+
         // Funding output witness script.
         let funding_witness_script = build_funding_witness_script(
             &self.opener.funding_pubkey,
@@ -383,7 +489,8 @@ impl ChannelConfig {
     /// `local_side` selects whose commitment outputs are built: the
     /// opener's or the acceptor's.
     fn build_commitment_outputs(&self, state: &CommitmentState, local_side: &Side) -> Vec<TxOut> {
-        let anchor = supports_option_anchors(&self.channel_type);
+        let anchor = has_anchor_outputs(&self.channel_type);
+        let taproot = self.is_simple_taproot();
 
         // Fee and balances.
         let commitment_cost = CommitmentCost::new(state.feerate_per_kw, &self.channel_type);
@@ -410,11 +517,19 @@ impl ChannelConfig {
             let revocationpubkey =
                 derive_revocation_pubkey(&remote.revocation_basepoint, &local_per_commitment_point);
 
-            let to_local_spk = build_to_local_scriptpubkey(
-                &local_delayedpubkey,
-                &revocationpubkey,
-                remote.to_self_delay,
-            );
+            let to_local_spk = if taproot {
+                taproot::to_local_scriptpubkey(
+                    &local_delayedpubkey,
+                    &revocationpubkey,
+                    remote.to_self_delay,
+                )
+            } else {
+                build_to_local_scriptpubkey(
+                    &local_delayedpubkey,
+                    &revocationpubkey,
+                    remote.to_self_delay,
+                )
+            };
 
             outputs.push(TxOut {
                 value: Amount::from_sat(to_local_value),
@@ -422,14 +537,26 @@ impl ChannelConfig {
             });
 
             if anchor {
+                // Taproot anchors key on the party's main output key, which is
+                // revealed when the commitment is spent; `MuSig2` no longer
+                // reveals the funding key that segwit v0 anchors use.
+                let anchor_spk = if taproot {
+                    taproot::anchor_scriptpubkey(&local_delayedpubkey)
+                } else {
+                    build_anchor_scriptpubkey(&local.funding_pubkey)
+                };
                 outputs.push(TxOut {
                     value: Amount::from_sat(ANCHOR_OUTPUT_VALUE),
-                    script_pubkey: build_anchor_scriptpubkey(&local.funding_pubkey),
+                    script_pubkey: anchor_spk,
                 });
             }
         }
         if to_remote_value >= local.dust_limit_satoshis {
-            let to_remote_spk = build_to_remote_scriptpubkey(&remote.payment_basepoint, anchor);
+            let to_remote_spk = if taproot {
+                taproot::to_remote_scriptpubkey(&remote.payment_basepoint)
+            } else {
+                build_to_remote_scriptpubkey(&remote.payment_basepoint, anchor)
+            };
 
             outputs.push(TxOut {
                 value: Amount::from_sat(to_remote_value),
@@ -437,9 +564,14 @@ impl ChannelConfig {
             });
 
             if anchor {
+                let anchor_spk = if taproot {
+                    taproot::anchor_scriptpubkey(&remote.payment_basepoint)
+                } else {
+                    build_anchor_scriptpubkey(&remote.funding_pubkey)
+                };
                 outputs.push(TxOut {
                     value: Amount::from_sat(ANCHOR_OUTPUT_VALUE),
-                    script_pubkey: build_anchor_scriptpubkey(&remote.funding_pubkey),
+                    script_pubkey: anchor_spk,
                 });
             }
         }
@@ -471,7 +603,7 @@ impl CommitmentState {
 impl CommitmentCost {
     /// Calculates the total cost of a commitment transaction.
     #[must_use]
-    pub fn new(feerate_per_kw: u32, channel_type: &[u8]) -> CommitmentCost {
+    pub fn new(feerate_per_kw: u32, channel_type: &Features) -> CommitmentCost {
         CommitmentCost {
             fee_sat: commit_tx_fee_sat(feerate_per_kw, channel_type),
             anchor_cost_sat: total_anchors_sat(channel_type),
@@ -485,9 +617,20 @@ impl CommitmentCost {
     }
 }
 
+/// Returns whether the commitment carries anchor outputs.
+///
+/// Simple taproot channels inherit anchor semantics without setting the anchor
+/// bits, so the taproot bit implies them.
+fn has_anchor_outputs(channel_type: &Features) -> bool {
+    channel_type.supports_feature(Features::OPTION_ANCHORS)
+        || channel_type.supports_feature(Features::OPTION_SIMPLE_TAPROOT)
+}
+
 /// Get the fee cost of a commitment tx in satoshis.
-fn commit_tx_fee_sat(feerate_per_kw: u32, channel_type: &[u8]) -> u64 {
-    let commitment_weight = if supports_option_anchors(channel_type) {
+fn commit_tx_fee_sat(feerate_per_kw: u32, channel_type: &Features) -> u64 {
+    let commitment_weight = if channel_type.supports_feature(Features::OPTION_SIMPLE_TAPROOT) {
+        COMMITMENT_TX_BASE_WEIGHT_TAPROOT
+    } else if has_anchor_outputs(channel_type) {
         COMMITMENT_TX_BASE_WEIGHT_ANCHOR
     } else {
         COMMITMENT_TX_BASE_WEIGHT_NON_ANCHOR
@@ -497,8 +640,11 @@ fn commit_tx_fee_sat(feerate_per_kw: u32, channel_type: &[u8]) -> u64 {
 }
 
 /// Get the anchor cost of a commitment tx in satoshis.
-fn total_anchors_sat(channel_type: &[u8]) -> u64 {
-    if supports_option_anchors(channel_type) {
+///
+/// This must follow [`has_anchor_outputs`]: whenever the commitment carries
+/// anchors, the opener pays for them.
+fn total_anchors_sat(channel_type: &Features) -> u64 {
+    if has_anchor_outputs(channel_type) {
         ANCHOR_OUTPUT_VALUE * 2
     } else {
         0
@@ -526,24 +672,6 @@ fn compute_obscuring_factor(
     let mut buf = [0u8; 8];
     buf[2..].copy_from_slice(&hash[26..32]);
     u64::from_be_bytes(buf)
-}
-
-/// Checks whether `option_anchors` (BOLT 9, bits 22/23) is set in a
-/// big-endian `channel_type` feature bitfield.
-///
-/// Per BOLT 9, even bit (22) = required, odd bit (23) = optional.
-/// Either bit indicates anchor support.
-fn supports_option_anchors(channel_type: &[u8]) -> bool {
-    let byte_offset = OPTION_ANCHORS_FEATURE_BITS[0] / 8;
-    let len = channel_type.len();
-    if len <= byte_offset {
-        return false;
-    }
-
-    let required_mask = 1 << (OPTION_ANCHORS_FEATURE_BITS[0] % 8);
-    let optional_mask = 1 << (OPTION_ANCHORS_FEATURE_BITS[1] % 8);
-
-    channel_type[len - 1 - byte_offset] & (required_mask | optional_mask) != 0
 }
 
 /// Derives a public key from a basepoint and per-commitment point per BOLT 3.
@@ -688,25 +816,12 @@ mod tests {
         assert_eq!(factor, 0x2bb0_3852_1914);
     }
 
-    #[test]
-    fn supports_option_anchors_detection() {
-        // Required (bit 22), optional (bit 23).
-        assert!(supports_option_anchors(&[0x40, 0x00, 0x00]));
-        assert!(supports_option_anchors(&[0x80, 0x00, 0x00]));
-        // No support.
-        assert!(!supports_option_anchors(&[0x00, 0x00, 0x40]));
-        assert!(!supports_option_anchors(&[0x00, 0x00, 0x80]));
-        assert!(!supports_option_anchors(&[]));
-        assert!(!supports_option_anchors(&[0xff, 0xff]));
-        assert!(!supports_option_anchors(&[0x00, 0x10]));
-    }
-
     fn bolt3_commitment_params(
         feerate_per_kw: u32,
         to_opener_msat: u64,
         to_acceptor_msat: u64,
         dust_limit_satoshis: u64,
-        channel_type: Vec<u8>,
+        channel_type: Features,
     ) -> (
         ChannelConfig,
         CommitmentState,
@@ -794,7 +909,7 @@ mod tests {
     #[test]
     fn simple_commitment_tx_with_no_htlcs_legacy() {
         let (chan_config, commitment_params, opener_holder, acceptor_holder) =
-            bolt3_commitment_params(15_000, 7_000_000_000, 3_000_000_000, 546, vec![]);
+            bolt3_commitment_params(15_000, 7_000_000_000, 3_000_000_000, 546, Features::new());
 
         // Opener signs own commitment.
         assert_eq!(
@@ -830,7 +945,7 @@ mod tests {
     #[test]
     fn commitment_tx_with_two_outputs_untrimmed_minimum_feerate_legacy() {
         let (chan_config, commitment_params, opener_holder, acceptor_holder) =
-            bolt3_commitment_params(4_915, 6_988_000_000, 3_000_000_000, 546, vec![]);
+            bolt3_commitment_params(4_915, 6_988_000_000, 3_000_000_000, 546, Features::new());
 
         // Opener signs own commitment.
         assert_eq!(
@@ -866,7 +981,13 @@ mod tests {
     #[test]
     fn commitment_tx_with_two_outputs_untrimmed_maximum_feerate_legacy() {
         let (chan_config, commitment_params, opener_holder, acceptor_holder) =
-            bolt3_commitment_params(9_651_180, 6_988_000_000, 3_000_000_000, 546, vec![]);
+            bolt3_commitment_params(
+                9_651_180,
+                6_988_000_000,
+                3_000_000_000,
+                546,
+                Features::new(),
+            );
 
         // Opener signs own commitment.
         assert_eq!(
@@ -902,7 +1023,13 @@ mod tests {
     #[test]
     fn commitment_tx_with_one_output_untrimmed_minimum_feerate_legacy() {
         let (chan_config, commitment_params, opener_holder, acceptor_holder) =
-            bolt3_commitment_params(9_651_181, 6_988_000_000, 3_000_000_000, 546, vec![]);
+            bolt3_commitment_params(
+                9_651_181,
+                6_988_000_000,
+                3_000_000_000,
+                546,
+                Features::new(),
+            );
 
         // Opener signs own commitment.
         assert_eq!(
@@ -938,7 +1065,13 @@ mod tests {
     #[test]
     fn commitment_tx_with_fee_greater_than_funder_amount_legacy() {
         let (chan_config, commitment_params, opener_holder, acceptor_holder) =
-            bolt3_commitment_params(9_651_936, 6_988_000_000, 3_000_000_000, 546, vec![]);
+            bolt3_commitment_params(
+                9_651_936,
+                6_988_000_000,
+                3_000_000_000,
+                546,
+                Features::new(),
+            );
 
         // Opener signs own commitment.
         assert_eq!(
@@ -976,7 +1109,7 @@ mod tests {
     #[test]
     fn commitment_tx_with_balance_msat_not_multiple_of_1000_legacy() {
         let (chan_config, commitment_params, opener_holder, acceptor_holder) =
-            bolt3_commitment_params(15_000, 6_999_999_000, 3_000_000_123, 546, vec![]);
+            bolt3_commitment_params(15_000, 6_999_999_000, 3_000_000_123, 546, Features::new());
 
         // Opener signs own commitment.
         assert_eq!(
@@ -1014,7 +1147,7 @@ mod tests {
     #[test]
     fn commitment_tx_with_equal_output_values_orders_by_script_pubkey_legacy() {
         let (chan_config, commitment_params, opener_holder, acceptor_holder) =
-            bolt3_commitment_params(15_000, 5_005_430_000, 4_994_570_000, 546, vec![]);
+            bolt3_commitment_params(15_000, 5_005_430_000, 4_994_570_000, 546, Features::new());
 
         // Opener signs own commitment.
         assert_eq!(
@@ -1058,7 +1191,7 @@ mod tests {
                 7_000_000_000,
                 3_000_000_000,
                 546,
-                vec![0x40, 0x00, 0x00],
+                Features::from_bits(&[Features::OPTION_ANCHORS]),
             );
 
         // Opener signs own commitment.
@@ -1095,7 +1228,13 @@ mod tests {
     #[test]
     fn simple_commitment_tx_with_no_htlc_and_single_anchor() {
         let (chan_config, commitment_params, opener_holder, acceptor_holder) =
-            bolt3_commitment_params(15_000, 10_000_000_000, 0, 546, vec![0x40, 0x00, 0x00]);
+            bolt3_commitment_params(
+                15_000,
+                10_000_000_000,
+                0,
+                546,
+                Features::from_bits(&[Features::OPTION_ANCHORS]),
+            );
 
         // Opener signs own commitment.
         assert_eq!(
@@ -1136,7 +1275,7 @@ mod tests {
                 6_988_000_000,
                 3_000_000_000,
                 4_001,
-                vec![0x40, 0x00, 0x00],
+                Features::from_bits(&[Features::OPTION_ANCHORS]),
             );
 
         // Opener signs own commitment.
@@ -1178,7 +1317,7 @@ mod tests {
                 6_988_000_000,
                 3_000_000_000,
                 4_001,
-                vec![0x40, 0x00, 0x00],
+                Features::from_bits(&[Features::OPTION_ANCHORS]),
             );
 
         // Opener signs own commitment.
@@ -1222,7 +1361,7 @@ mod tests {
                 6_999_999_000,
                 3_000_000_123,
                 546,
-                vec![0x40, 0x00, 0x00],
+                Features::from_bits(&[Features::OPTION_ANCHORS]),
             );
 
         // Opener signs own commitment.
@@ -1266,7 +1405,7 @@ mod tests {
                 5_008_760_000,
                 4_991_240_000,
                 546,
-                vec![0x40, 0x00, 0x00],
+                Features::from_bits(&[Features::OPTION_ANCHORS]),
             );
 
         // Opener signs own commitment.
@@ -1329,7 +1468,7 @@ mod tests {
         );
     }
 
-    fn sample_chan_config(funding_satoshis: u64, channel_type: Vec<u8>) -> ChannelConfig {
+    fn sample_chan_config(funding_satoshis: u64, channel_type: Features) -> ChannelConfig {
         let sample_key =
             pubkey("03b28f7c5a9d1e4f8c6a7b2d3e9f1048576a1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e");
         let sample_party = || ChannelPartyConfig {
@@ -1360,7 +1499,7 @@ mod tests {
     fn new_initial_from_funding_msat_overflow() {
         let sample_key =
             pubkey("03b28f7c5a9d1e4f8c6a7b2d3e9f1048576a1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e");
-        let chan_config = sample_chan_config(u64::MAX, vec![]);
+        let chan_config = sample_chan_config(u64::MAX, Features::new());
         let result = chan_config.new_initial_commitment(0, 15_000, sample_key, sample_key);
         assert!(matches!(result, Err(CommitmentError::FundingMsatOverflow)));
     }
@@ -1369,7 +1508,7 @@ mod tests {
     fn new_initial_from_funding_push_exceeds_funding() {
         let sample_key =
             pubkey("03b28f7c5a9d1e4f8c6a7b2d3e9f1048576a1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e");
-        let chan_config = sample_chan_config(1_000, vec![]);
+        let chan_config = sample_chan_config(1_000, Features::new());
         let result = chan_config.new_initial_commitment(2_000_000, 15_000, sample_key, sample_key);
         assert!(matches!(result, Err(CommitmentError::PushExceedsFunding)));
     }
@@ -1377,28 +1516,32 @@ mod tests {
     #[test]
     fn opener_balance_after_commitment_cost_total_sat_checks() {
         let feerate_per_kw: u32 = 15_000;
-        let anchor_channel_type = [0x40, 0x00, 0x00];
+        let legacy = Features::new();
+        let anchor = Features::from_bits(&[Features::OPTION_ANCHORS]);
         // Legacy fee: 15000 * 724 / 1000 = 10_860 sat
         // Anchor fee: 15000 * 1124 / 1000 = 16_860 sat; anchor_cost = 660 sat
 
         // Comfortably affordable
         let opener_balance_sat: u64 = 20_000;
         assert_eq!(
-            opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &[]).total_sat()),
+            opener_balance_sat
+                .checked_sub(CommitmentCost::new(feerate_per_kw, &legacy).total_sat()),
             Some(9_140),
         );
 
         // Exact zero opener balance
         let opener_balance_sat: u64 = 10_860;
         assert_eq!(
-            opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &[]).total_sat()),
+            opener_balance_sat
+                .checked_sub(CommitmentCost::new(feerate_per_kw, &legacy).total_sat()),
             Some(0),
         );
 
         // Balance does not cover the fee
         let opener_balance_sat: u64 = 10_000;
         assert_eq!(
-            opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &[]).total_sat()),
+            opener_balance_sat
+                .checked_sub(CommitmentCost::new(feerate_per_kw, &legacy).total_sat()),
             None
         );
 
@@ -1406,8 +1549,132 @@ mod tests {
         let opener_balance_sat: u64 = 17_500;
         assert_eq!(
             opener_balance_sat
-                .checked_sub(CommitmentCost::new(feerate_per_kw, &anchor_channel_type).total_sat()),
+                .checked_sub(CommitmentCost::new(feerate_per_kw, &anchor).total_sat()),
             None,
+        );
+    }
+
+    /// A `channel_type` negotiating `option_simple_taproot`.
+    fn simple_taproot_channel_type() -> Features {
+        Features::from_bits(&[Features::OPTION_SIMPLE_TAPROOT])
+    }
+
+    /// The opener's partial signature over the acceptor's commitment verifies
+    /// from the acceptor's side of the same `MuSig2` session. This exercises the
+    /// whole taproot path: taproot commitment outputs, the BIP 341 key-spend
+    /// sighash, and `MuSig2` signing.
+    #[test]
+    fn taproot_partial_signature_round_trips_between_both_sides() {
+        let (chan_config, commitment_params, opener_holder, acceptor_holder) =
+            bolt3_commitment_params(
+                2_500,
+                7_000_000_000,
+                3_000_000_000,
+                546,
+                simple_taproot_channel_type(),
+            );
+
+        // The acceptor publishes a verification nonce in `accept_channel`; the
+        // opener signs with a fresh nonce sent alongside the signature.
+        let acceptor_verification =
+            crate::musig::derive_nonce(&[b"acceptor"], &chan_config.acceptor.funding_pubkey);
+        let opener_signing =
+            crate::musig::derive_nonce(&[b"opener"], &chan_config.opener.funding_pubkey);
+        let opener_signing_public = opener_signing.public_nonce();
+
+        let partial = chan_config
+            .partial_sign_counterparty_commitment(
+                &commitment_params,
+                &opener_holder,
+                opener_signing,
+                &acceptor_verification.public_nonce(),
+            )
+            .expect("signing succeeds");
+
+        assert!(
+            chan_config
+                .verify_counterparty_partial_signature(
+                    &commitment_params,
+                    &acceptor_holder,
+                    &partial,
+                    &opener_signing_public,
+                    &acceptor_verification.public_nonce(),
+                )
+                .expect("nonces parse")
+        );
+    }
+
+    /// Simple taproot channels carry anchors without setting the anchor bits.
+    /// The staging bits (180/181) are a different channel type using different
+    /// tapscript leaves, so they must not imply anchors.
+    #[test]
+    fn anchor_outputs_detection() {
+        let taproot = Features::from_bits(&[Features::OPTION_SIMPLE_TAPROOT]);
+        let anchors =
+            Features::from_bits(&[Features::OPTION_STATIC_REMOTEKEY, Features::OPTION_ANCHORS]);
+        let staging = Features::from_bits(&[Features::OPTION_SIMPLE_TAPROOT_STAGING]);
+        let static_remotekey = Features::from_bits(&[Features::OPTION_STATIC_REMOTEKEY]);
+
+        assert!(has_anchor_outputs(&taproot));
+        assert!(has_anchor_outputs(&anchors));
+
+        assert!(!has_anchor_outputs(&staging));
+        assert!(!has_anchor_outputs(&static_remotekey));
+        assert!(!has_anchor_outputs(&Features::new()));
+    }
+
+    /// A taproot commitment must not be signable with the segwit v0 digest:
+    /// the two formats produce different sighashes, so a signature made under
+    /// one channel type must not verify under the other.
+    #[test]
+    fn taproot_and_segwit_commitments_have_different_sighashes() {
+        let (taproot_config, state, opener_holder, _) = bolt3_commitment_params(
+            2_500,
+            7_000_000_000,
+            3_000_000_000,
+            546,
+            simple_taproot_channel_type(),
+        );
+        let (segwit_config, _, _, _) =
+            bolt3_commitment_params(2_500, 7_000_000_000, 3_000_000_000, 546, Features::new());
+
+        assert_ne!(
+            taproot_config.build_commitment_sighash(&state, &opener_holder.side),
+            segwit_config.build_commitment_sighash(&state, &opener_holder.side)
+        );
+    }
+
+    /// Taproot commitments carry anchors and use the 968 weight rather than the
+    /// segwit v0 anchor weight, so the fee both peers compute must differ.
+    #[test]
+    fn taproot_commitment_cost_uses_the_taproot_weight() {
+        let taproot = CommitmentCost::new(2_500, &simple_taproot_channel_type());
+        assert_eq!(taproot.fee_sat, 2_500 * 968 / 1000);
+        assert_eq!(taproot.anchor_cost_sat, ANCHOR_OUTPUT_VALUE * 2);
+    }
+
+    /// Every output of a taproot commitment is a P2TR output.
+    #[test]
+    fn taproot_commitment_outputs_are_all_p2tr() {
+        let (chan_config, state, _, _) = bolt3_commitment_params(
+            2_500,
+            7_000_000_000,
+            3_000_000_000,
+            546,
+            simple_taproot_channel_type(),
+        );
+
+        let outputs = chan_config.build_commitment_outputs(&state, &Side::Opener);
+
+        // to_local, to_remote and both anchors.
+        assert_eq!(outputs.len(), 4);
+        assert!(outputs.iter().all(|out| out.script_pubkey.is_p2tr()));
+        assert_eq!(
+            outputs
+                .iter()
+                .filter(|out| out.value == Amount::from_sat(ANCHOR_OUTPUT_VALUE))
+                .count(),
+            2
         );
     }
 }

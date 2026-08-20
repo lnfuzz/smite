@@ -2,7 +2,8 @@
 
 use crate::bolt::BoltError;
 use crate::bolt::types::{
-    BigSize, CHANNEL_ID_SIZE, COMPACT_SIGNATURE_SIZE, ChannelId, PUBLIC_KEY_SIZE, SHA256_HASH_SIZE,
+    BigSize, CHANNEL_ID_SIZE, COMPACT_SIGNATURE_SIZE, ChannelId, PARTIAL_SIGNATURE_SIZE,
+    PUBLIC_KEY_SIZE, PUBLIC_NONCE_SIZE, PartialSignatureWithNonce, PublicNonce, SHA256_HASH_SIZE,
     ShortChannelId, TXID_SIZE, Tu32, Tu64,
 };
 use bitcoin::Txid;
@@ -136,6 +137,38 @@ impl WireFormat for PublicKey {
 
     fn write(&self, out: &mut Vec<u8>) {
         self.serialize().write(out);
+    }
+}
+
+impl WireFormat for PublicNonce {
+    /// Reads a 66-byte `MuSig2` public nonce.
+    ///
+    /// The bytes are not checked to be two valid points: a peer sending a
+    /// malformed nonce is a spec violation to report, not a decode failure.
+    fn read(data: &mut &[u8]) -> Result<Self, BoltError> {
+        let bytes: [u8; PUBLIC_NONCE_SIZE] = WireFormat::read(data)?;
+        Ok(Self(bytes))
+    }
+
+    fn write(&self, out: &mut Vec<u8>) {
+        self.as_bytes().write(out);
+    }
+}
+
+impl WireFormat for PartialSignatureWithNonce {
+    /// Reads a 98-byte `partial_signature || public_nonce`.
+    fn read(data: &mut &[u8]) -> Result<Self, BoltError> {
+        let partial_signature: [u8; PARTIAL_SIGNATURE_SIZE] = WireFormat::read(data)?;
+        let public_nonce = PublicNonce::read(data)?;
+        Ok(Self {
+            partial_signature,
+            public_nonce,
+        })
+    }
+
+    fn write(&self, out: &mut Vec<u8>) {
+        self.partial_signature.write(out);
+        self.public_nonce.write(out);
     }
 }
 

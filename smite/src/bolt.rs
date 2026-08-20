@@ -14,6 +14,7 @@ mod closing_complete;
 mod closing_sig;
 mod commitment_signed;
 mod error;
+mod features;
 mod funding_created;
 mod funding_signed;
 mod gossip_timestamp_filter;
@@ -52,8 +53,9 @@ pub use closing_complete::{ClosingComplete, ClosingTlvs};
 pub use closing_sig::ClosingSig;
 pub use commitment_signed::{CommitmentSigned, CommitmentSignedTlvs};
 pub use error::Error;
-pub use funding_created::FundingCreated;
-pub use funding_signed::FundingSigned;
+pub use features::{FeatureBit, Features};
+pub use funding_created::{FundingCreated, FundingCreatedTlvs};
+pub use funding_signed::{FundingSigned, FundingSignedTlvs};
 pub use gossip_timestamp_filter::GossipTimestampFilter;
 pub use init::{Init, InitTlvs};
 pub use node_announcement::NodeAnnouncement;
@@ -73,8 +75,9 @@ pub use tx_remove_input::TxRemoveInput;
 pub use tx_remove_output::TxRemoveOutput;
 pub use types::{
     BigSize, CHANNEL_ID_SIZE, COMPACT_SIGNATURE_SIZE, ChannelId, MAX_MESSAGE_SIZE,
-    PAYMENT_ONION_PACKET_SIZE, PER_COMMITMENT_SECRET_SIZE, PUBLIC_KEY_SIZE, SHA256_HASH_SIZE,
-    SHORT_CHANNEL_ID_SIZE, ShortChannelId, TXID_SIZE, Tu32, Tu64,
+    PARTIAL_SIGNATURE_SIZE, PARTIAL_SIGNATURE_WITH_NONCE_SIZE, PAYMENT_ONION_PACKET_SIZE,
+    PER_COMMITMENT_SECRET_SIZE, PUBLIC_KEY_SIZE, PUBLIC_NONCE_SIZE, PartialSignatureWithNonce,
+    PublicNonce, SHA256_HASH_SIZE, SHORT_CHANNEL_ID_SIZE, ShortChannelId, TXID_SIZE, Tu32, Tu64,
 };
 pub use update_add_htlc::{UpdateAddHtlc, UpdateAddHtlcTlvs};
 pub use update_fail_htlc::{UpdateFailHtlc, UpdateFailHtlcTlvs};
@@ -601,6 +604,7 @@ mod tests {
             funding_txid: Txid::from_byte_array([0xcc; TXID_SIZE]),
             funding_output_index: 0,
             signature: sig,
+            tlvs: FundingCreatedTlvs::default(),
         }
     }
 
@@ -623,6 +627,7 @@ mod tests {
         FundingSigned {
             channel_id: ChannelId::new([0xbb; CHANNEL_ID_SIZE]),
             signature: sig,
+            tlvs: FundingSignedTlvs::default(),
         }
     }
 

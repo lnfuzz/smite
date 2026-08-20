@@ -14,7 +14,7 @@ use std::fmt::Write;
 use bitcoin::{opcodes::all as opcodes, script::Builder, script::PushBytes};
 use rand::{Rng, RngExt};
 use serde::{Deserialize, Serialize};
-use smite::bolt::ShortChannelId;
+use smite::bolt::{FeatureBit, Features, ShortChannelId};
 
 use super::VariableType;
 
@@ -75,11 +75,18 @@ pub enum Operation {
     ExtractAcceptChannel(AcceptChannelField),
     /// Create a BOLT 3 funding transaction for the channel funding flow.
     ///
-    /// Inputs (4):
+    /// The `channel_type` selects the funding output format: simple taproot
+    /// channels pay to a single P2TR key aggregated from both funding pubkeys,
+    /// every other type to a 2-of-2 P2WSH. It must match the `channel_type`
+    /// given to `BuildOpenChannel`, or the target will never see the funding
+    /// output it negotiated.
+    ///
+    /// Inputs (5):
     ///   0: `opener_funding_pubkey` (`Point`)
     ///   1: `acceptor_funding_pubkey` (`Point`)
     ///   2: `funding_satoshis` (`Amount`)
     ///   3: `feerate_per_kw` (`FeeratePerKw`)
+    ///   4: `channel_type` (`Features`, empty = 2-of-2 P2WSH)
     CreateFundingTransaction,
 
     // -- Build: construct a BOLT message from inputs --
@@ -518,58 +525,107 @@ impl ChannelTypeVariant {
         Self::ScriptEnforcedLeaseScidAliasZeroConf,
     ];
 
+    /// Returns whether this type requires the channel to be unannounced.
+    ///
+    /// Taproot channels cannot be gossiped, so both lnd and eclair reject an
+    /// `open_channel` that sets the `announce_channel` bit alongside one of
+    /// these types.
+    #[must_use]
+    pub fn requires_unannounced_channel(self) -> bool {
+        self.bits().iter().any(|&bit| {
+            bit == Features::OPTION_SIMPLE_TAPROOT || bit == Features::OPTION_SIMPLE_TAPROOT_STAGING
+        })
+    }
+
     /// The feature bits (even/required) contained in this channel type.
     #[must_use]
-    pub fn bits(self) -> &'static [usize] {
-        // BOLT 9 feature bits:
-        //   12 = option_static_remotekey
-        //   22 = option_anchors
-        //   40 = zero_fee_commitments
-        //   46 = option_scid_alias
-        //   50 = option_zeroconf
-        //   80 = option_simple_taproot
-        //  180 = option_simple_taproot_staging
-        // 2022 = option_script_enforced_lease
+    pub fn bits(self) -> &'static [FeatureBit] {
+        use Features as F;
         match self {
-            Self::StaticRemoteKey => &[12],
-            Self::StaticRemoteKeyScidAlias => &[12, 46],
-            Self::StaticRemoteKeyZeroConf => &[12, 50],
-            Self::StaticRemoteKeyScidAliasZeroConf => &[12, 46, 50],
-            Self::Anchors => &[12, 22],
-            Self::AnchorsScidAlias => &[12, 22, 46],
-            Self::AnchorsZeroConf => &[12, 22, 50],
-            Self::AnchorsScidAliasZeroConf => &[12, 22, 46, 50],
-            Self::ZeroFeeCommitments => &[40],
-            Self::ZeroFeeCommitmentsScidAlias => &[40, 46],
-            Self::ZeroFeeCommitmentsZeroConf => &[40, 50],
-            Self::ZeroFeeCommitmentsScidAliasZeroConf => &[40, 46, 50],
-            Self::SimpleTaproot => &[80],
-            Self::SimpleTaprootScidAlias => &[80, 46],
-            Self::SimpleTaprootZeroConf => &[80, 50],
-            Self::SimpleTaprootScidAliasZeroConf => &[80, 46, 50],
-            Self::SimpleTaprootStaging => &[180],
-            Self::SimpleTaprootStagingScidAlias => &[180, 46],
-            Self::SimpleTaprootStagingZeroConf => &[180, 50],
-            Self::SimpleTaprootStagingScidAliasZeroConf => &[180, 46, 50],
-            Self::ScriptEnforcedLease => &[12, 22, 2022],
-            Self::ScriptEnforcedLeaseScidAlias => &[12, 22, 2022, 46],
-            Self::ScriptEnforcedLeaseZeroConf => &[12, 22, 2022, 50],
-            Self::ScriptEnforcedLeaseScidAliasZeroConf => &[12, 22, 2022, 46, 50],
+            Self::StaticRemoteKey => &[F::OPTION_STATIC_REMOTEKEY],
+            Self::StaticRemoteKeyScidAlias => &[F::OPTION_STATIC_REMOTEKEY, F::OPTION_SCID_ALIAS],
+            Self::StaticRemoteKeyZeroConf => &[F::OPTION_STATIC_REMOTEKEY, F::OPTION_ZEROCONF],
+            Self::StaticRemoteKeyScidAliasZeroConf => &[
+                F::OPTION_STATIC_REMOTEKEY,
+                F::OPTION_SCID_ALIAS,
+                F::OPTION_ZEROCONF,
+            ],
+            Self::Anchors => &[F::OPTION_STATIC_REMOTEKEY, F::OPTION_ANCHORS],
+            Self::AnchorsScidAlias => &[
+                F::OPTION_STATIC_REMOTEKEY,
+                F::OPTION_ANCHORS,
+                F::OPTION_SCID_ALIAS,
+            ],
+            Self::AnchorsZeroConf => &[
+                F::OPTION_STATIC_REMOTEKEY,
+                F::OPTION_ANCHORS,
+                F::OPTION_ZEROCONF,
+            ],
+            Self::AnchorsScidAliasZeroConf => &[
+                F::OPTION_STATIC_REMOTEKEY,
+                F::OPTION_ANCHORS,
+                F::OPTION_SCID_ALIAS,
+                F::OPTION_ZEROCONF,
+            ],
+            Self::ZeroFeeCommitments => &[F::ZERO_FEE_COMMITMENTS],
+            Self::ZeroFeeCommitmentsScidAlias => &[F::ZERO_FEE_COMMITMENTS, F::OPTION_SCID_ALIAS],
+            Self::ZeroFeeCommitmentsZeroConf => &[F::ZERO_FEE_COMMITMENTS, F::OPTION_ZEROCONF],
+            Self::ZeroFeeCommitmentsScidAliasZeroConf => &[
+                F::ZERO_FEE_COMMITMENTS,
+                F::OPTION_SCID_ALIAS,
+                F::OPTION_ZEROCONF,
+            ],
+            Self::SimpleTaproot => &[F::OPTION_SIMPLE_TAPROOT],
+            Self::SimpleTaprootScidAlias => &[F::OPTION_SIMPLE_TAPROOT, F::OPTION_SCID_ALIAS],
+            Self::SimpleTaprootZeroConf => &[F::OPTION_SIMPLE_TAPROOT, F::OPTION_ZEROCONF],
+            Self::SimpleTaprootScidAliasZeroConf => &[
+                F::OPTION_SIMPLE_TAPROOT,
+                F::OPTION_SCID_ALIAS,
+                F::OPTION_ZEROCONF,
+            ],
+            Self::SimpleTaprootStaging => &[F::OPTION_SIMPLE_TAPROOT_STAGING],
+            Self::SimpleTaprootStagingScidAlias => {
+                &[F::OPTION_SIMPLE_TAPROOT_STAGING, F::OPTION_SCID_ALIAS]
+            }
+            Self::SimpleTaprootStagingZeroConf => {
+                &[F::OPTION_SIMPLE_TAPROOT_STAGING, F::OPTION_ZEROCONF]
+            }
+            Self::SimpleTaprootStagingScidAliasZeroConf => &[
+                F::OPTION_SIMPLE_TAPROOT_STAGING,
+                F::OPTION_SCID_ALIAS,
+                F::OPTION_ZEROCONF,
+            ],
+            Self::ScriptEnforcedLease => &[
+                F::OPTION_STATIC_REMOTEKEY,
+                F::OPTION_ANCHORS,
+                F::OPTION_SCRIPT_ENFORCED_LEASE,
+            ],
+            Self::ScriptEnforcedLeaseScidAlias => &[
+                F::OPTION_STATIC_REMOTEKEY,
+                F::OPTION_ANCHORS,
+                F::OPTION_SCRIPT_ENFORCED_LEASE,
+                F::OPTION_SCID_ALIAS,
+            ],
+            Self::ScriptEnforcedLeaseZeroConf => &[
+                F::OPTION_STATIC_REMOTEKEY,
+                F::OPTION_ANCHORS,
+                F::OPTION_SCRIPT_ENFORCED_LEASE,
+                F::OPTION_ZEROCONF,
+            ],
+            Self::ScriptEnforcedLeaseScidAliasZeroConf => &[
+                F::OPTION_STATIC_REMOTEKEY,
+                F::OPTION_ANCHORS,
+                F::OPTION_SCRIPT_ENFORCED_LEASE,
+                F::OPTION_SCID_ALIAS,
+                F::OPTION_ZEROCONF,
+            ],
         }
     }
 
     /// Encodes the channel type as a BOLT feature bitmap (big-endian bytes).
     #[must_use]
-    #[allow(clippy::missing_panics_doc)] // bits() is always non-empty
     pub fn encode(self) -> Vec<u8> {
-        let bits = self.bits();
-        let max_bit = *bits.iter().max().expect("non-empty bits");
-        let num_bytes = max_bit / 8 + 1;
-        let mut out = vec![0u8; num_bytes];
-        for &bit in bits {
-            out[num_bytes - 1 - bit / 8] |= 1 << (bit % 8);
-        }
-        out
+        Features::from_bits(self.bits()).into_bytes()
     }
 }
 
@@ -791,6 +847,7 @@ impl Operation {
                 VariableType::Point,        // acceptor_funding_pubkey
                 VariableType::Amount,       // funding_satoshis
                 VariableType::FeeratePerKw, // feerate_per_kw
+                VariableType::Features,     // channel_type
             ],
             Self::SendMessage => vec![VariableType::Message],
             Self::SendOpenChannel => vec![VariableType::OpenChannelMessage],

@@ -5,9 +5,13 @@
 
 mod commitment;
 mod funding;
+mod taproot;
 
 pub use commitment::{
     ChannelConfig, ChannelPartyConfig, ChannelState, CommitmentCost, CommitmentError,
     CommitmentPartyState, CommitmentState, HolderIdentity, Side,
 };
-pub use funding::{FundingTransaction, InsufficientFunds, build_funding_transaction};
+pub use funding::{
+    FundingError, FundingTransaction, InsufficientFunds, build_funding_scriptpubkey,
+    build_funding_transaction,
+};

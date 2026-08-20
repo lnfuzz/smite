@@ -2,7 +2,7 @@
 
 use super::BoltError;
 use super::tlv::TlvStream;
-use super::types::{CHAIN_HASH_SIZE, ChannelId};
+use super::types::{CHAIN_HASH_SIZE, ChannelId, PublicNonce};
 use super::wire::WireFormat;
 use bitcoin::secp256k1::PublicKey;
 
@@ -11,6 +11,9 @@ const TLV_UPFRONT_SHUTDOWN_SCRIPT: u64 = 0;
 
 /// TLV type for channel type.
 const TLV_CHANNEL_TYPE: u64 = 1;
+
+/// TLV type for the `MuSig2` verification nonce of simple taproot channels.
+const TLV_NEXT_LOCAL_NONCE: u64 = 4;
 
 /// BOLT 2 `open_channel` message (type 32).
 ///
@@ -64,6 +67,9 @@ pub struct OpenChannelTlvs {
     pub upfront_shutdown_script: Option<Vec<u8>>,
     /// The channel type represented as feature bits
     pub channel_type: Option<Vec<u8>>,
+    /// The `MuSig2` nonce the initiator will use to verify incoming commitment
+    /// signatures. Required for simple taproot channels.
+    pub next_local_nonce: Option<PublicNonce>,
 }
 
 impl OpenChannel {
@@ -97,6 +103,11 @@ impl OpenChannel {
         }
         if let Some(channel_type) = &self.tlvs.channel_type {
             tlv_stream.add(TLV_CHANNEL_TYPE, channel_type.clone());
+        }
+        if let Some(next_local_nonce) = &self.tlvs.next_local_nonce {
+            let mut value = Vec::new();
+            next_local_nonce.write(&mut value);
+            tlv_stream.add(TLV_NEXT_LOCAL_NONCE, value);
         }
         out.extend(tlv_stream.encode());
 
@@ -132,10 +143,14 @@ impl OpenChannel {
         let channel_flags = WireFormat::read(&mut cursor)?;
 
         // Decode TLVs (remaining bytes)
-        // Type 0 (`upfront_shutdown_script`) is an even type defined by BOLT 2,
-        // so we must whitelist it as known.
-        let tlv_stream = TlvStream::decode_with_known(cursor, &[TLV_UPFRONT_SHUTDOWN_SCRIPT])?;
-        let tlvs = OpenChannelTlvs::from_stream(&tlv_stream);
+        // Types 0 (`upfront_shutdown_script`) and 4 (`next_local_nonce`) are
+        // even types defined by BOLT 2 and the simple taproot channels
+        // extension, so we must whitelist them as known.
+        let tlv_stream = TlvStream::decode_with_known(
+            cursor,
+            &[TLV_UPFRONT_SHUTDOWN_SCRIPT, TLV_NEXT_LOCAL_NONCE],
+        )?;
+        let tlvs = OpenChannelTlvs::from_stream(&tlv_stream)?;
 
         Ok(Self {
             chain_hash,
@@ -163,20 +178,27 @@ impl OpenChannel {
 
 impl OpenChannelTlvs {
     /// Extracts open channel TLVs from a parsed TLV stream.
-    fn from_stream(stream: &TlvStream) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns a `BoltError` if the `next_local_nonce` TLV has an invalid
+    /// length.
+    fn from_stream(stream: &TlvStream) -> Result<Self, BoltError> {
         let upfront_shutdown_script = stream.get(TLV_UPFRONT_SHUTDOWN_SCRIPT).map(Vec::from);
         let channel_type = stream.get(TLV_CHANNEL_TYPE).map(Vec::from);
+        let next_local_nonce = stream.get_as::<PublicNonce>(TLV_NEXT_LOCAL_NONCE)?;
 
-        Self {
+        Ok(Self {
             upfront_shutdown_script,
             channel_type,
-        }
+            next_local_nonce,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::PUBLIC_KEY_SIZE;
+    use super::super::{PUBLIC_KEY_SIZE, PUBLIC_NONCE_SIZE};
     use super::*;
     use bitcoin::secp256k1::{Secp256k1, SecretKey};
 
@@ -459,6 +481,7 @@ mod tests {
         let original = sample_open_channel(Some(OpenChannelTlvs {
             upfront_shutdown_script: Some(vec![0xab; 22]),
             channel_type: Some(vec![0x01, 0x02]),
+            next_local_nonce: Some(PublicNonce([0xcd; PUBLIC_NONCE_SIZE])),
         }));
 
         let encoded = original.encode();
@@ -469,8 +492,8 @@ mod tests {
     #[test]
     fn encode_with_channel_type() {
         let open = sample_open_channel(Some(OpenChannelTlvs {
-            upfront_shutdown_script: None,
             channel_type: Some(vec![0x01, 0x02]),
+            ..Default::default()
         }));
 
         let encoded = open.encode();
@@ -489,6 +512,7 @@ mod tests {
             // P2WPKH like script
             upfront_shutdown_script: Some(script),
             channel_type: Some(vec![0x01]),
+            ..Default::default()
         }));
 
         let encoded = open.encode();
@@ -537,5 +561,45 @@ mod tests {
         let tlvs = OpenChannelTlvs::default();
         assert!(tlvs.upfront_shutdown_script.is_none());
         assert!(tlvs.channel_type.is_none());
+        assert!(tlvs.next_local_nonce.is_none());
+    }
+
+    /// Simple taproot channels require the initiator's `MuSig2` verification
+    /// nonce in TLV type 4.
+    #[test]
+    fn encode_with_next_local_nonce() {
+        let open = sample_open_channel(Some(OpenChannelTlvs {
+            next_local_nonce: Some(PublicNonce([0xcd; PUBLIC_NONCE_SIZE])),
+            ..Default::default()
+        }));
+
+        let encoded = open.encode();
+        // 319 fixed + TLV: type(1) + len(1) + value(66) = 68
+        assert_eq!(encoded.len(), 319 + 68);
+
+        let decoded = OpenChannel::decode(&encoded).unwrap();
+        assert_eq!(
+            decoded.tlvs.next_local_nonce,
+            Some(PublicNonce([0xcd; PUBLIC_NONCE_SIZE]))
+        );
+    }
+
+    /// The nonce TLV is an even type, so it must be whitelisted as known
+    /// rather than rejected as an unknown even type.
+    #[test]
+    fn decode_rejects_next_local_nonce_of_wrong_length() {
+        let open = sample_open_channel(None);
+        let mut encoded = open.encode();
+
+        // TLV type 4, length 2 -- too short for a 66-byte nonce.
+        encoded.extend_from_slice(&[0x04, 0x02, 0xaa, 0xbb]);
+
+        assert_eq!(
+            OpenChannel::decode(&encoded),
+            Err(BoltError::Truncated {
+                expected: PUBLIC_NONCE_SIZE,
+                actual: 2
+            })
+        );
     }
 }

@@ -7,7 +7,10 @@ use bitcoin::secp256k1::PublicKey;
 use bitcoin::transaction::{InputWeightPrediction, Version, predict_weight};
 use bitcoin::{Amount, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
 
+use super::taproot;
 use crate::bitcoin::Utxo;
+use crate::bolt::Features;
+use crate::musig::{FundingKeys, MusigError};
 
 /// Error returned when available UTXOs cannot cover the funding amount plus
 /// estimated miner fee.
@@ -22,6 +25,19 @@ pub struct InsufficientFunds {
     pub available: Amount,
 }
 
+/// Errors that can occur while building a funding transaction.
+#[derive(Debug, thiserror::Error)]
+pub enum FundingError {
+    /// The selected UTXOs cannot cover the funding amount and fees.
+    #[error(transparent)]
+    InsufficientFunds(#[from] InsufficientFunds),
+
+    /// The taproot funding key could not be derived from the two
+    /// `funding_pubkey`s.
+    #[error("taproot funding output: {0}")]
+    Musig(#[from] MusigError),
+}
+
 /// A constructed funding transaction along with the index of the 2-of-2
 /// funding output within it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,15 +48,19 @@ pub struct FundingTransaction {
     pub vout: u32,
 }
 
-/// Builds a funding transaction with a 2-of-2 P2WSH output between the opener
-/// and acceptor.
+/// Builds a funding transaction paying to the channel's funding output.
+///
+/// The output is a 2-of-2 P2WSH, or a single-key P2TR when `channel_type`
+/// negotiates `option_simple_taproot`.
 ///
 /// Coins are selected for spending in the order the `utxos` are provided.
 ///
 /// # Errors
 ///
-/// Returns [`InsufficientFunds`] if the provided inputs do not contain enough
-/// value to cover `funding_satoshis` and the required transaction fees.
+/// Returns [`FundingError::InsufficientFunds`] if the provided inputs do not
+/// contain enough value to cover `funding_satoshis` and the required
+/// transaction fees, or [`FundingError::Musig`] if a taproot funding key
+/// cannot be derived from the two `funding_pubkey`s.
 ///
 /// # Panics
 ///
@@ -51,9 +71,10 @@ pub fn build_funding_transaction(
     acceptor_funding_pubkey: &PublicKey,
     funding_satoshis: u64,
     feerate_per_kw: u32,
+    channel_type: &Features,
     utxos: Vec<Utxo>,
     change_spk: ScriptBuf,
-) -> Result<FundingTransaction, InsufficientFunds> {
+) -> Result<FundingTransaction, FundingError> {
     // Amounts exceeding Bitcoin's maximum supply can never be funded. The
     // error's `available` field reports Bitcoin's total supply cap.
     let funding_amt = Amount::from_sat(funding_satoshis);
@@ -61,7 +82,8 @@ pub fn build_funding_transaction(
         return Err(InsufficientFunds {
             required: funding_amt,
             available: Amount::MAX_MONEY,
-        });
+        }
+        .into());
     }
 
     // Return early if no UTXOs are available, since the funding transaction
@@ -70,11 +92,12 @@ pub fn build_funding_transaction(
         return Err(InsufficientFunds {
             required: funding_amt,
             available: Amount::ZERO,
-        });
+        }
+        .into());
     }
 
     let funding_spk =
-        build_funding_witness_script(opener_funding_pubkey, acceptor_funding_pubkey).to_p2wsh();
+        build_funding_scriptpubkey(opener_funding_pubkey, acceptor_funding_pubkey, channel_type)?;
 
     let mut inputs = Vec::new();
     let mut input_weights = Vec::new();
@@ -123,7 +146,8 @@ pub fn build_funding_transaction(
         return Err(InsufficientFunds {
             required: funding_amt + expected_fee_no_change,
             available: total,
-        });
+        }
+        .into());
     }
 
     // Add remaining funds after accounting for fees as a change output,
@@ -171,18 +195,50 @@ fn predict_tx_fee(
 impl FundingTransaction {
     /// Returns whether the referenced funding output matches the negotiated
     /// output script and amount.
+    ///
+    /// A mismatch is not an error here: mutators can make the transaction
+    /// disagree with the negotiation, and the caller records that so it knows
+    /// the target will never see the channel confirm.
     #[must_use]
     pub fn matches_funding_output(
         &self,
         opener_funding_pubkey: &PublicKey,
         acceptor_funding_pubkey: &PublicKey,
         funding_satoshis: u64,
+        channel_type: &Features,
     ) -> bool {
-        let expected_spk =
-            build_funding_witness_script(opener_funding_pubkey, acceptor_funding_pubkey).to_p2wsh();
+        let Ok(expected_spk) = build_funding_scriptpubkey(
+            opener_funding_pubkey,
+            acceptor_funding_pubkey,
+            channel_type,
+        ) else {
+            return false;
+        };
         self.tx.output.get(self.vout as usize).is_some_and(|out| {
             out.script_pubkey == expected_spk && out.value.to_sat() == funding_satoshis
         })
+    }
+}
+
+/// Builds the funding output `script_pubkey` for the negotiated channel type.
+///
+/// Simple taproot channels pay to a single P2TR key aggregated from both
+/// `funding_pubkey`s; every other channel type pays to a 2-of-2 P2WSH.
+///
+/// # Errors
+///
+/// Returns [`MusigError`] if the taproot funding key cannot be derived, which
+/// cannot happen for two valid public keys.
+pub fn build_funding_scriptpubkey(
+    opener_funding_pubkey: &PublicKey,
+    acceptor_funding_pubkey: &PublicKey,
+    channel_type: &Features,
+) -> Result<ScriptBuf, MusigError> {
+    if channel_type.supports_feature(Features::OPTION_SIMPLE_TAPROOT) {
+        let keys = FundingKeys::new(opener_funding_pubkey, acceptor_funding_pubkey)?;
+        Ok(taproot::funding_scriptpubkey(keys.aggregate_pubkey()))
+    } else {
+        Ok(build_funding_witness_script(opener_funding_pubkey, acceptor_funding_pubkey).to_p2wsh())
     }
 }
 
@@ -212,6 +268,22 @@ mod tests {
     use bitcoin::ecdsa::Signature;
     use bitcoin::secp256k1::{Secp256k1, SecretKey};
     use bitcoin::sighash::{EcdsaSighashType, SighashCache};
+
+    /// Unwraps the [`FundingError::InsufficientFunds`] variant, failing the
+    /// test on any other error.
+    fn expect_insufficient_funds(err: FundingError) -> InsufficientFunds {
+        match err {
+            FundingError::InsufficientFunds(e) => e,
+            other @ FundingError::Musig(_) => {
+                panic!("expected InsufficientFunds, got {other:?}")
+            }
+        }
+    }
+
+    /// A `channel_type` negotiating `option_simple_taproot`.
+    fn simple_taproot_channel_type() -> Features {
+        Features::from_bits(&[Features::OPTION_SIMPLE_TAPROOT])
+    }
 
     fn pubkey(hex_str: &str) -> PublicKey {
         let bytes = hex::decode(hex_str).expect("valid hex");
@@ -296,6 +368,7 @@ mod tests {
             &pubkey("030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c1"),
             10_000_000,
             15_000,
+            &Features::new(),
             utxos.clone(),
             change_spk,
         )
@@ -362,6 +435,7 @@ mod tests {
             &pubkey("030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c1"),
             10_000_000,
             15_000,
+            &Features::new(),
             utxos.clone(),
             change_spk,
         )
@@ -423,6 +497,7 @@ mod tests {
             &pubkey("030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c1"),
             10_000_000,
             15_000,
+            &Features::new(),
             utxos.clone(),
             change_spk,
         )
@@ -512,6 +587,7 @@ mod tests {
             &pubkey("030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c1"),
             15_000_000,
             15_000,
+            &Features::new(),
             utxos.clone(),
             change_spk,
         )
@@ -558,11 +634,12 @@ mod tests {
             &pubkey("030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c1"),
             10_000_000,
             15_000,
+            &Features::new(),
             vec![],
             change_spk,
         )
         .unwrap_err();
-        assert!(matches!(err, InsufficientFunds { .. }));
+        let err = expect_insufficient_funds(err);
         assert_eq!(err.required, Amount::from_sat(10_000_000));
         assert_eq!(err.available, Amount::from_sat(0));
     }
@@ -581,11 +658,12 @@ mod tests {
             &pubkey("030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c1"),
             0,
             0,
+            &Features::new(),
             vec![],
             change_spk,
         )
         .unwrap_err();
-        assert!(matches!(err, InsufficientFunds { .. }));
+        let err = expect_insufficient_funds(err);
         assert_eq!(err.required, Amount::from_sat(0));
         assert_eq!(err.available, Amount::from_sat(0));
     }
@@ -617,11 +695,12 @@ mod tests {
             &pubkey("030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c1"),
             10_000_000,
             15_000,
+            &Features::new(),
             utxos,
             change_spk,
         )
         .unwrap_err();
-        assert!(matches!(err, InsufficientFunds { .. }));
+        let err = expect_insufficient_funds(err);
         assert_eq!(err.required, Amount::from_sat(10_012_060));
         assert_eq!(err.available, Amount::from_sat(1_000));
     }
@@ -655,11 +734,12 @@ mod tests {
             &pubkey("030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c1"),
             u64::MAX,
             15_000,
+            &Features::new(),
             utxos,
             change_spk,
         )
         .unwrap_err();
-        assert!(matches!(err, InsufficientFunds { .. }));
+        let err = expect_insufficient_funds(err);
         assert_eq!(err.required, Amount::from_sat(u64::MAX));
         assert_eq!(err.available, Amount::MAX_MONEY);
     }
@@ -694,6 +774,7 @@ mod tests {
             &pubkey("030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c1"),
             10_000_000,
             15_000,
+            &Features::new(),
             utxos,
             change_spk,
         );
@@ -751,6 +832,7 @@ mod tests {
             &acceptor_funding_pubkey,
             funding_satoshis,
             15_000,
+            &Features::new(),
             utxos,
             change_spk,
         )
@@ -762,6 +844,7 @@ mod tests {
             &opener_funding_pubkey,
             &acceptor_funding_pubkey,
             funding_satoshis,
+            &Features::new(),
         ));
 
         // A different funding pubkey yields a different script and does not match.
@@ -771,6 +854,7 @@ mod tests {
             &opener_funding_pubkey,
             &other_pubkey,
             funding_satoshis,
+            &Features::new(),
         ));
 
         // A mismatched funding amount does not match.
@@ -778,7 +862,82 @@ mod tests {
         assert!(!funding.matches_funding_output(
             &opener_funding_pubkey,
             &acceptor_funding_pubkey,
-            other_amount
+            other_amount,
+            &Features::new(),
         ));
+    }
+
+    /// The spec's funding test vector: a simple taproot channel funds a P2TR
+    /// output keyed on the `MuSig2` aggregate of both `funding_pubkey`s, not a
+    /// 2-of-2 P2WSH.
+    #[test]
+    fn taproot_channel_type_funds_a_p2tr_output() {
+        let local = pubkey("03b7203dec7c13896b6ff1f58b24f84458c441720a12b5a57426397e22f0a8c78b");
+        let remote = pubkey("02956e6845a6f346f97c5e028c0f8ab38a76b0124fd7184deab60f682b3e657fdb");
+
+        // `option_simple_taproot` alone: BOLT 9 bit 80.
+        let taproot_type = simple_taproot_channel_type();
+        let spk = build_funding_scriptpubkey(&local, &remote, &taproot_type)
+            .expect("valid funding pubkeys");
+
+        assert!(spk.is_p2tr());
+        assert_eq!(
+            hex::encode(spk.as_bytes()),
+            "5120d0ebb4909d563a7ae1213fddede4ae54132fba0ef0b97ee3f8469191fecd348e"
+        );
+
+        // Without the taproot bit the output stays a 2-of-2 P2WSH.
+        assert!(
+            build_funding_scriptpubkey(&local, &remote, &Features::new())
+                .expect("valid funding pubkeys")
+                .is_p2wsh()
+        );
+    }
+
+    /// The funding transaction pays to the taproot script, and
+    /// `matches_funding_output` only agrees when given the same channel type.
+    #[test]
+    fn taproot_funding_output_matches_only_its_own_channel_type() {
+        let local = pubkey("023da092f6980e58d2c037173180e9a465476026ee50f96695963e8efe436f54eb");
+        let remote = pubkey("030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c1");
+        let taproot_type = simple_taproot_channel_type();
+
+        let utxos = vec![Utxo {
+            amount: Amount::from_sat(5_000_000_000),
+            outpoint: OutPoint {
+                txid: "fd2105607605d2302994ffea703b09f66b6351816ee737a93e42a841ea20bbad"
+                    .parse()
+                    .expect("valid txid"),
+                vout: 0,
+            },
+            script_pubkey: ScriptBuf::from(
+                hex::decode("0014a10d9257489e685dda030662390dc177852faf13")
+                    .expect("valid P2WPKH scriptpubkey hex"),
+            ),
+        }];
+        let change_spk = ScriptBuf::from(
+            hex::decode("00143ca33c2e4446f4a305f23c80df8ad1afdcf652f9")
+                .expect("valid P2WPKH scriptpubkey hex"),
+        );
+
+        let funding = build_funding_transaction(
+            &local,
+            &remote,
+            10_000_000,
+            15_000,
+            &taproot_type,
+            utxos,
+            change_spk,
+        )
+        .expect("inputs should cover funding amount and fees");
+
+        assert!(
+            funding.tx.output[funding.vout as usize]
+                .script_pubkey
+                .is_p2tr()
+        );
+        assert!(funding.matches_funding_output(&local, &remote, 10_000_000, &taproot_type));
+        // The same transaction does not satisfy a non-taproot negotiation.
+        assert!(!funding.matches_funding_output(&local, &remote, 10_000_000, &Features::new()));
     }
 }

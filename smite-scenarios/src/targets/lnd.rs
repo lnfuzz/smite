@@ -112,6 +112,7 @@ impl LndTarget {
         let mut cmd = Command::new("lnd");
         cmd.arg("--noseedbackup")
             .arg("--debuglevel=info")
+            .arg("--protocol.simple-taproot-chans")
             .arg("--bitcoin.active")
             .arg("--bitcoin.regtest")
             .arg("--bitcoin.node=bitcoind")

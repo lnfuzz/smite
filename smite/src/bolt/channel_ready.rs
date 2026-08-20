@@ -2,12 +2,15 @@
 
 use super::BoltError;
 use super::tlv::TlvStream;
-use super::types::{ChannelId, ShortChannelId};
+use super::types::{ChannelId, PublicNonce, ShortChannelId};
 use super::wire::WireFormat;
 use bitcoin::secp256k1::PublicKey;
 
 /// TLV type for short channel ID alias.
 const TLV_SHORT_CHANNEL_ID: u64 = 1;
+
+/// TLV type for the `MuSig2` verification nonce of simple taproot channels.
+const TLV_NEXT_LOCAL_NONCE: u64 = 4;
 
 /// BOLT 2 `channel_ready` message (type 36).
 ///
@@ -29,6 +32,9 @@ pub struct ChannelReadyTlvs {
     /// An alias SCID for this channel, used for forwarding before confirmation
     /// and for private channels instead of the real `short_channel_id`.
     pub short_channel_id: Option<ShortChannelId>,
+    /// A fresh `MuSig2` verification nonce, replacing the one consumed by the
+    /// funding flow. Required for simple taproot channels.
+    pub next_local_nonce: Option<PublicNonce>,
 }
 
 impl ChannelReady {
@@ -45,6 +51,11 @@ impl ChannelReady {
             let mut value = Vec::new();
             scid.write(&mut value);
             tlv_stream.add(TLV_SHORT_CHANNEL_ID, value);
+        }
+        if let Some(next_local_nonce) = &self.tlvs.next_local_nonce {
+            let mut value = Vec::new();
+            next_local_nonce.write(&mut value);
+            tlv_stream.add(TLV_NEXT_LOCAL_NONCE, value);
         }
         out.extend(tlv_stream.encode());
 
@@ -64,7 +75,9 @@ impl ChannelReady {
         let second_per_commitment_point = WireFormat::read(&mut cursor)?;
 
         // Decode TLVs (remaining bytes)
-        let tlv_stream = TlvStream::decode(cursor)?;
+        // Type 4 (`next_local_nonce`) is an even type defined by the simple
+        // taproot channels extension, so we must whitelist it as known.
+        let tlv_stream = TlvStream::decode_with_known(cursor, &[TLV_NEXT_LOCAL_NONCE])?;
         let tlvs = ChannelReadyTlvs::from_stream(&tlv_stream)?;
 
         Ok(Self {
@@ -80,16 +93,21 @@ impl ChannelReadyTlvs {
     ///
     /// # Errors
     ///
-    /// Returns a `BoltError` if the short channel ID TLV has invalid length.
+    /// Returns a `BoltError` if the short channel ID or `next_local_nonce`
+    /// TLV has an invalid length.
     fn from_stream(stream: &TlvStream) -> Result<Self, BoltError> {
         let short_channel_id = stream.get_as::<ShortChannelId>(TLV_SHORT_CHANNEL_ID)?;
-        Ok(Self { short_channel_id })
+        let next_local_nonce = stream.get_as::<PublicNonce>(TLV_NEXT_LOCAL_NONCE)?;
+        Ok(Self {
+            short_channel_id,
+            next_local_nonce,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::{CHANNEL_ID_SIZE, PUBLIC_KEY_SIZE};
+    use super::super::{CHANNEL_ID_SIZE, PUBLIC_KEY_SIZE, PUBLIC_NONCE_SIZE};
     use super::*;
     use bitcoin::secp256k1::{Secp256k1, SecretKey};
 
@@ -160,6 +178,7 @@ mod tests {
     fn roundtrip_with_tlvs() {
         let original = sample_channel_ready(Some(ChannelReadyTlvs {
             short_channel_id: Some(ShortChannelId::from_u64(1_029_637_663_919_046_661)),
+            next_local_nonce: Some(PublicNonce([0xcd; PUBLIC_NONCE_SIZE])),
         }));
 
         let encoded = original.encode();
@@ -171,6 +190,7 @@ mod tests {
     fn encode_with_short_channel_id() {
         let msg = sample_channel_ready(Some(ChannelReadyTlvs {
             short_channel_id: Some(ShortChannelId::from_u64(1_029_637_663_919_046_661)),
+            ..Default::default()
         }));
 
         let encoded = msg.encode();
