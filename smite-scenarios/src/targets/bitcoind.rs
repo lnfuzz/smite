@@ -133,13 +133,20 @@ pub fn start(
 /// Creates wallet and generates initial blocks.
 fn setup_wallet(cli: &BitcoinCli) -> Result<(), TargetError> {
     // Create wallet
-    let _ = cli
+    let status = cli
         .run()
         .arg("createwallet")
         .arg("default")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .status()?;
+
+    // command fails if wallet already exists (i.e. SMITE_DATA_DIR was mounted)
+    if !status.success() {
+        return Err(TargetError::StartFailed(
+            "failed to create wallet (does it already exist?)".into(),
+        ));
+    }
 
     // Generate initial blocks
     let status = cli
