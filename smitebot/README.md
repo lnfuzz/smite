@@ -247,15 +247,13 @@ smitebot corpus minimize <campaign-id> [-i <dir>]... [-o <output-dir>] [--aflpp-
 
 ### smitebot reproduce
 
-Replays a single input against a campaign's target by running its Docker image once, with the input fed to the target the same way the fuzzer's `LocalRunner` does. The target's output is streamed to the terminal; `reproduce` interprets nothing — read the logs to see what happened. Resolves the image and target from the campaign's `state.json`; no live campaign required.
+Replays a single input against a campaign's target and streams the target's output to the terminal; `reproduce` interprets nothing — read the logs to see what happened. Resolves the image and target from the campaign's `state.json`; no live campaign required.
 
 ```bash
 smitebot reproduce <campaign-id> -i <input>
-smitebot reproduce <campaign-id> -i <input> --attach
 ```
 
 - `<campaign-id>`: directory name under `~/.smitebot/runs`
 - `-i, --input <input>`: input file to replay, e.g. a crash from a runner's `crashes/` directory
-- `--attach`: allocate an interactive TTY (`docker run -it`) so the run can be watched live
 
-The input's parent directory is bind-mounted read-only, so crash filenames containing colons (e.g. `id:000000,sig:06,...`) are handled correctly. Reproduction under Nyx is not yet supported.
+If the image's digest no longer matches the one recorded for the campaign (e.g. it was rebuilt under the same tag), a warning is logged. Reproduction under Nyx is not yet supported.
