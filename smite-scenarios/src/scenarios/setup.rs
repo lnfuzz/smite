@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use smite::bolt::{Init, InitTlvs, Message};
+use smite::bolt::{FeatureBit, Features, Init, InitTlvs, Message};
 use smite::noise::NoiseConnection;
 use smite::scenarios::ScenarioError;
 
@@ -30,49 +30,34 @@ pub trait SnapshotSetup<T: Target> {
     fn setup(target: &T) -> Result<(NoiseConnection, ProgramContext), ScenarioError>;
 }
 
-/// Clears a feature bit from a feature vector.
-///
-/// Feature vectors are encoded as big-endian byte arrays where bit N lives in
-/// byte `features[len - 1 - N/8]` at position `N % 8`.
-fn clear_feature_bit(features: &mut [u8], bit: usize) {
-    let byte_index = features.len().checked_sub(1 + bit / 8);
-    if let Some(i) = byte_index {
-        features[i] &= !(1 << (bit % 8));
-    }
-}
-
-/// Gossip-related feature bits (BOLT 9): `gossip_queries` (6/7),
-/// `gossip_queries_ex` (10/11). Stripped so the target doesn't send
-/// `gossip_timestamp_filter` or other gossip noise during execution.
-const GOSSIP_FEATURE_BITS: &[usize] = &[6, 7, 10, 11];
-
-/// Feature bits that force a dual-funded flow when both peers support them:
-/// `option_dual_fund` (28/29). Eclair in particular will not allow
-/// single-funded flows if either of these feature bits is set, so we strip them
-/// when fuzzing the single-funded flow.
-const DUAL_FUNDING_FEATURE_BITS: &[usize] = &[28, 29];
-
-/// Peer storage feature bits: `option_provide_storage` (42/43). When enabled,
-/// peers may send `peer_storage` and `peer_storage_retrieval` messages at
-/// arbitrary times. Disabling these bits eliminates peer storage noise.
-const PEER_STORAGE_FEATURE_BITS: &[usize] = &[42, 43];
+/// Features stripped from our echoed `init` so the target stays on the single
+/// funded flow and doesn't emit unrelated noise:
+/// - `gossip_queries` (6/7), `gossip_queries_ex` (10/11): Stripped so the
+///   target doesn't send `gossip_timestamp_filter` or other gossip noise during
+///   execution.
+/// - `option_dual_fund` (28/29): Eclair in particular will not allow
+///   single-funded flows if either of these feature bits is set.
+/// - `option_provide_storage` (42/43): When enabled, peers may send
+///   `peer_storage` and `peer_storage_retrieval` messages at arbitrary times.
+const STRIPPED_FEATURES: &[FeatureBit] = &[
+    Features::GOSSIP_QUERIES,
+    Features::GOSSIP_QUERIES_EX,
+    Features::OPTION_DUAL_FUND,
+    Features::OPTION_PROVIDE_STORAGE,
+];
 
 /// Creates an `init` that echoes the received features with bits stripped that
 /// would steer the target away from the single-funded `open_channel` flow.
 fn init_for_single_funded(received: &Init) -> Init {
-    let mut globalfeatures = received.globalfeatures.clone();
-    let mut features = received.features.clone();
-    for &bit in GOSSIP_FEATURE_BITS
-        .iter()
-        .chain(DUAL_FUNDING_FEATURE_BITS)
-        .chain(PEER_STORAGE_FEATURE_BITS)
-    {
-        clear_feature_bit(&mut globalfeatures, bit);
-        clear_feature_bit(&mut features, bit);
+    let mut globalfeatures = Features::from(received.globalfeatures.clone());
+    let mut features = Features::from(received.features.clone());
+    for &bit in STRIPPED_FEATURES {
+        globalfeatures.clear_feature(bit);
+        features.clear_feature(bit);
     }
     Init {
-        globalfeatures,
-        features,
+        globalfeatures: globalfeatures.into_bytes(),
+        features: features.into_bytes(),
         tlvs: InitTlvs::default(),
     }
 }
