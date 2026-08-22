@@ -244,3 +244,16 @@ smitebot corpus minimize <campaign-id> [-i <dir>]... [-o <output-dir>] [--aflpp-
 - `-i, --input <dir>`: One input directory to minimize. If multiple `-i` flags are present, all specified directories are merged before minimizing. If omitted, the campaign's runner queues are merged and minimized.
 - `-o, --output <output-dir>`: output directory; defaults to `~/.smitebot/runs/<id>/corpus-min/`
 - `--aflpp-path <path>`: AFL++ source tree, overriding the `aflpp_path` stored in `state.json` (useful when the checkout has moved)
+
+### smitebot reproduce
+
+Replays a single input against a campaign's target and streams the target's output to the terminal; `reproduce` interprets nothing — read the logs to see what happened. Resolves the image and target from the campaign's `state.json`; no live campaign required.
+
+```bash
+smitebot reproduce <campaign-id> -i <input>
+```
+
+- `<campaign-id>`: directory name under `~/.smitebot/runs`
+- `-i, --input <input>`: input file to replay, e.g. a crash from a runner's `crashes/` directory
+
+If the image's digest no longer matches the one recorded for the campaign (e.g. it was rebuilt under the same tag), a warning is logged. Reproduction under Nyx is not yet supported.

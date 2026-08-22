@@ -16,7 +16,7 @@ use crate::commands::build::{BuildInputs, run_build};
 use crate::config::CampaignConfig;
 use crate::state::{CampaignState, RunnerState, Status};
 use crate::tmux;
-use crate::utils::{setup_nyx, shell_quote};
+use crate::utils::{command_stdout, docker_image_id, setup_nyx, shell_quote};
 
 /// How long to wait for `fuzzer_stats` before treating alive runners as started.
 ///
@@ -592,15 +592,6 @@ fn build_ir_mutator(smite_dir: &Path) -> bool {
 }
 
 /// Runs a command and returns its trimmed stdout on success.
-fn command_stdout(cmd: &mut Command) -> Option<String> {
-    let output = cmd.output().ok()?;
-    if output.status.success() {
-        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    } else {
-        None
-    }
-}
-
 /// Returns the smite repository git hash, or `None` if not a git repo.
 fn smite_git_hash(smite_dir: &Path) -> Option<String> {
     command_stdout(
@@ -608,15 +599,6 @@ fn smite_git_hash(smite_dir: &Path) -> Option<String> {
             .arg("-C")
             .arg(smite_dir)
             .args(["rev-parse", "HEAD"]),
-    )
-}
-
-/// Returns the Docker image ID hash for a locally built image.
-fn docker_image_id(image: &str) -> Option<String> {
-    command_stdout(
-        Command::new("docker")
-            .args(["inspect", "--format={{.Id}}"])
-            .arg(image),
     )
 }
 

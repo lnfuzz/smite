@@ -107,6 +107,27 @@ pub fn pin_to_cpu(cpu: usize) -> Result<(), String> {
     Ok(())
 }
 
+/// Runs `cmd` and returns its trimmed stdout, or `None` if it fails to spawn or
+/// exits unsuccessfully.
+pub fn command_stdout(cmd: &mut Command) -> Option<String> {
+    let output = cmd.output().ok()?;
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        None
+    }
+}
+
+/// Returns a local Docker image's ID (content digest), or `None` if the image is
+/// not present. The value matches the `image_digest` recorded in `state.json`.
+pub fn docker_image_id(image: &str) -> Option<String> {
+    command_stdout(
+        Command::new("docker")
+            .args(["inspect", "--format={{.Id}}"])
+            .arg(image),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
