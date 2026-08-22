@@ -91,7 +91,11 @@ RUN cc -shared -fPIC -DENABLE_NYX -DNO_PT_NYX \
     smite-nyx-sys/src/jvm-crash-handler.c -o /jvm-crash-handler.so
 
 # Runtime image.
-FROM eclipse-temurin:21-jre
+#
+# Uses the full JDK (not -jre) so `jcmd` is available: after warmup the harness
+# runs `jcmd <pid> Compiler.directives_add` to freeze the JIT (block new
+# compilation while keeping warmed code) before the snapshot.
+FROM eclipse-temurin:21
 ARG SCENARIO
 
 # Install curl for Eclair readiness polling in EclairTarget::query_info().
