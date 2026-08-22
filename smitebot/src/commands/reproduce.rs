@@ -14,6 +14,7 @@ use clap::Args;
 
 use crate::config::Target;
 use crate::state::CampaignState;
+use crate::utils::docker_image_id;
 
 /// Command handler for `smitebot reproduce`.
 pub struct ReproduceCommand;
@@ -29,7 +30,7 @@ pub struct ReproduceArgs {
 }
 
 impl ReproduceCommand {
-    /// Replays `input` against the campaign's Docker target.
+    /// Replays `input` against the campaign's target in Docker.
     ///
     /// Returns `true` once the container has run to completion regardless of its
     /// exit status (the target's output, not the exit code, is the result), and
@@ -117,33 +118,14 @@ impl ReproduceCommand {
     }
 }
 
-/// Returns the local Docker image's ID (content digest), or `None` if the image
-/// is not present.
-///
-/// Mirrors `start`'s `docker_image_id` (same `--format={{.Id}}`), so the value
-/// compares directly against the `image_digest` stored in `state.json`; both
-/// should fold into a shared helper (see the state-loading refactor follow-up).
-fn docker_image_id(image: &str) -> Option<String> {
-    let output = Command::new("docker")
-        .args(["inspect", "--format={{.Id}}"])
-        .arg(image)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let id = String::from_utf8(output.stdout).ok()?.trim().to_string();
-    (!id.is_empty()).then_some(id)
-}
-
 /// Builds the `docker run` argument list for a single reproduction.
 ///
 /// Mirrors `scripts/coverage-report.sh`: mount the input's parent directory
 /// read-only at `/corpus` and point `SMITE_INPUT` at `/corpus/<basename>`; the
 /// per-target entrypoint is `/<target>-scenario`.
 fn docker_run_args(image: &str, target: Target, parent: &Path, basename: &str) -> Vec<String> {
-    // ponytail: paths under ~/.smitebot are UTF-8 in practice; `display()`
-    // lossiness would only bite a non-UTF-8 corpus path, a non-goal for v1.
+    // Corpus paths under ~/.smitebot are UTF-8 in practice; `display()`'s lossy
+    // conversion is acceptable for v1.
     vec![
         "run".to_string(),
         "--rm".to_string(),
