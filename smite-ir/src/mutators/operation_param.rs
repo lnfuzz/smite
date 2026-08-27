@@ -82,6 +82,13 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
             *v = rng.random_range(1..=16);
             true
         }
+        Operation::ReorgChain(v) => {
+            // One or two block reorgs occur naturally on mainnet and are
+            // therefore the shallow reorgs a Lightning node is expected to
+            // handle.
+            *v = rng.random_range(1..=2);
+            true
+        }
         Operation::ExtractAcceptChannel(field) => mutate_extract_field(field, rng),
         Operation::BuildNodeAnnouncement { rgb_color, alias } => {
             // Randomly mutate rgb_color or alias bytes in place; never change

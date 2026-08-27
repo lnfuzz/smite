@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::str::FromStr;
 
-use bitcoin::consensus::encode::serialize_hex;
-use bitcoin::{Address, Amount, Network, OutPoint, ScriptBuf, Transaction, Txid};
+use bitcoin::consensus::encode::{deserialize_hex, serialize_hex};
+use bitcoin::{Address, Amount, Block, Network, OutPoint, ScriptBuf, Transaction, Txid};
 use serde::{Deserialize, Serialize};
 
 /// A spendable UTXO used as a transaction input.
@@ -47,6 +47,24 @@ pub struct TxBlockPosition {
     pub block_height: u32,
     /// The transaction's index within its block.
     pub tx_index: u32,
+}
+
+/// The transactions [`BitcoinCli::reorg_chain`] left unconfirmed.
+///
+/// Both fields list transactions in the order their blocks confirmed them, and
+/// within a block in the order it held them, so a transaction always precedes
+/// any transaction that spends it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReorgedTxs {
+    /// Txids of every non-coinbase transaction in the disconnected blocks. All
+    /// of them are unconfirmed again, whether or not they made it back into
+    /// the mempool.
+    pub disconnected_txids: Vec<Txid>,
+    /// The disconnected transactions the mempool refused to take back, as
+    /// `(txid, raw_hex)`. Typically transactions mined straight out of a
+    /// private mempool because they violate mempool policy, so nothing will
+    /// re-confirm them unless they are mined directly again.
+    pub rejected_txs: Vec<(Txid, String)>,
 }
 
 /// Parsed response from `getrawtransaction <txid> 1`.
@@ -134,19 +152,31 @@ impl BitcoinCli {
     ///
     /// # Panics
     ///
-    /// - If `bitcoin-cli getrawmempool`, `getnewaddress`, or `generateblock`
-    ///   fails to execute or exits non-zero.
+    /// - If `bitcoin-cli getrawmempool` or `getnewaddress` fails to execute or
+    ///   exits non-zero.
     /// - If `getrawmempool` does not return valid JSON.
     /// - If `getnewaddress` does not return a valid regtest address.
-    /// - If any transaction in `private_mempool` is consensus-invalid.
-    /// - If the combined transaction list contains a duplicate rawtx/txid or is
-    ///   not topologically ordered.
+    /// - For anything [`generate_block_to`](Self::generate_block_to) panics on,
+    ///   the block's transactions.
     fn mine_block_including(&self, private_mempool: &[String]) {
         let mut txs = self.get_raw_mempool();
         txs.extend_from_slice(private_mempool);
+
+        self.generate_block_to(&self.get_new_address(), &txs);
+    }
+
+    /// Mines a single block carrying exactly `txs`, in the given order, paying
+    /// newly generated bitcoin to `address`.
+    ///
+    /// # Panics
+    ///
+    /// - If `bitcoin-cli generateblock` fails to execute or exits non-zero.
+    /// - If any transaction in `txs` is consensus-invalid.
+    /// - If `txs` contains a duplicate rawtx/txid or is not topologically
+    ///   ordered.
+    fn generate_block_to(&self, address: &Address, txs: &[String]) {
         let txs_json = serde_json::to_string(&txs).expect("tx list serializes to valid JSON");
 
-        let address = self.get_new_address();
         let gen_out = self
             .run()
             .arg("generateblock")
@@ -179,6 +209,118 @@ impl BitcoinCli {
             String::from_utf8_lossy(&out.stderr)
         );
         serde_json::from_slice(&out.stdout).expect("getrawmempool should return valid JSON")
+    }
+
+    /// Disconnects the top `depth` blocks with `invalidateblock` and mines
+    /// `depth + 1` empty blocks in their place, so the chain is only ever
+    /// rewritten by a branch that is longer than the one it replaces.
+    ///
+    /// The replacement blocks carry no transactions, so everything the
+    /// disconnected blocks confirmed is unconfirmed again. Bitcoin Core takes
+    /// back into the mempool the transactions that pass mempool policy; the
+    /// ones it rejects come back in [`ReorgedTxs::rejected_txs`] for the
+    /// caller to queue for direct mining. The coinbases are discarded by
+    /// consensus and are not returned.
+    ///
+    /// # Panics
+    ///
+    /// - If `bitcoin-cli getbestblockhash`, `getblock`, `invalidateblock`, or
+    ///   `generateblock` fails to execute or exits non-zero.
+    /// - If `getbestblockhash` or `getblock` does not return valid UTF-8.
+    /// - If `getblock` does not return a deserializable block.
+    #[must_use]
+    pub fn reorg_chain(&self, depth: u8) -> ReorgedTxs {
+        // Get the tip block hash of the fully validated chain.
+        let tip_hash_out = self
+            .run()
+            .arg("getbestblockhash")
+            .output()
+            .expect("bitcoin-cli getbestblockhash should not fail");
+        assert!(
+            tip_hash_out.status.success(),
+            "bitcoin-cli getbestblockhash failed: {}",
+            String::from_utf8_lossy(&tip_hash_out.stderr)
+        );
+
+        // Walk backwards from the tip to collect transactions from the blocks
+        // that will be disconnected.
+        let mut current_hash = String::from_utf8(tip_hash_out.stdout)
+            .expect("getbestblockhash should return valid UTF-8")
+            .trim()
+            .to_string();
+        let mut base_block_hash = current_hash.clone();
+        let mut disconnected_txs = Vec::new();
+
+        for _ in 0..depth {
+            let block = self.get_block(&current_hash);
+            base_block_hash = current_hash;
+            current_hash = block.header.prev_blockhash.to_string();
+
+            // Prepend non-coinbase transactions to restore block order, while
+            // preserving transaction order within each block.
+            disconnected_txs.splice(0..0, block.txdata.into_iter().skip(1));
+        }
+
+        // Invalidate the lowest block to disconnect it and all blocks above it.
+        let invalidate_out = self
+            .run()
+            .arg("invalidateblock")
+            .arg(base_block_hash)
+            .output()
+            .expect("bitcoin-cli invalidateblock should not fail");
+        assert!(
+            invalidate_out.status.success(),
+            "bitcoin-cli invalidateblock failed: {}",
+            String::from_utf8_lossy(&invalidate_out.stderr)
+        );
+
+        // Mine a new branch one block longer than the disconnected branch. Each
+        // block contains only its coinbase, leaving the mempool untouched.
+        let address = self.get_new_address();
+        for _ in 0..=depth {
+            self.generate_block_to(&address, &[]);
+        }
+
+        // Collect disconnected transactions that were not restored to the mempool.
+        let mempool = self.get_raw_mempool();
+        let mut disconnected_txids = Vec::with_capacity(disconnected_txs.len());
+        let mut rejected_txs = Vec::new();
+        for tx in disconnected_txs {
+            let txid = tx.compute_txid();
+            if !mempool.contains(&txid.to_string()) {
+                rejected_txs.push((txid, serialize_hex(&tx)));
+            }
+            disconnected_txids.push(txid);
+        }
+
+        ReorgedTxs {
+            disconnected_txids,
+            rejected_txs,
+        }
+    }
+
+    /// Returns the block with the given hash.
+    ///
+    /// # Panics
+    ///
+    /// - If `bitcoin-cli getblock` fails to execute or exits non-zero.
+    /// - If the output is not valid UTF-8 containing hex-encoded block data.
+    fn get_block(&self, blockhash: &str) -> Block {
+        let out = self
+            .run()
+            .arg("getblock")
+            .arg(blockhash)
+            .arg("0") // return the serialized, hex-encoded data for blockhash.
+            .output()
+            .expect("bitcoin-cli getblock should not fail");
+        assert!(
+            out.status.success(),
+            "bitcoin-cli getblock failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let block_hex = String::from_utf8(out.stdout).expect("getblock should return valid UTF-8");
+        deserialize_hex(block_hex.trim()).expect("getblock should return a valid block")
     }
 
     /// Returns the wallet's spendable UTXOs, sorted deterministically.

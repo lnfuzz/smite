@@ -9,6 +9,7 @@ use super::*;
 use generators::{
     AnyGenerator, ChannelAnnouncementGenerator, ChannelReadyGenerator, ChannelUpdateGenerator,
     FundingCreatedGenerator, FundingFlowGenerator, NodeAnnouncementGenerator, OpenChannelGenerator,
+    ReorgChainGenerator,
 };
 use minimizers::{CommonSubexpressionEliminator, DeadCodeEliminator, Minimizer};
 use mutators::{
@@ -670,16 +671,22 @@ fn mine_blocks_operation() {
 }
 
 #[test]
-fn displays_mine_blocks_program() {
+fn displays_mine_and_reorg_blocks_program() {
     let program = Program {
-        instructions: vec![Instruction {
-            operation: Operation::MineBlocks(6),
-            inputs: vec![],
-        }],
+        instructions: vec![
+            Instruction {
+                operation: Operation::MineBlocks(6),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::ReorgChain(2),
+                inputs: vec![],
+            },
+        ],
     };
     let text = program.to_string();
     let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines, vec!["MineBlocks(6)"]);
+    assert_eq!(lines, vec!["MineBlocks(6)", "ReorgChain(2)"]);
 }
 
 #[test]
@@ -886,7 +893,8 @@ fn any_generator_all_is_complete() {
             | AnyGenerator::OpenChannel(_)
             | AnyGenerator::FundingCreated(_)
             | AnyGenerator::ChannelReady(_)
-            | AnyGenerator::FundingFlow(_) => 7,
+            | AnyGenerator::FundingFlow(_)
+            | AnyGenerator::ReorgChain(_) => 8,
         }
     };
     assert_eq!(AnyGenerator::ALL.len(), variant_count(AnyGenerator::ALL[0]));
@@ -1351,6 +1359,65 @@ fn generated_funding_flow_program_structure() {
     );
 }
 
+fn generate_reorg_chain_program(seed: u64) -> Program {
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut builder = ProgramBuilder::new();
+    ReorgChainGenerator.generate(&mut builder, &mut rng);
+    builder.build()
+}
+
+// If ReorgChainGenerator completes without panicking, every instruction has
+// correct input types (enforced by ProgramBuilder::append).
+#[test]
+fn generated_reorg_chain_program_is_type_correct() {
+    for seed in 0..100 {
+        generate_reorg_chain_program(seed);
+    }
+}
+
+#[test]
+fn generated_reorg_chain_program_structure() {
+    let program = generate_reorg_chain_program(0);
+    let ops: Vec<_> = program.instructions.iter().map(|i| &i.operation).collect();
+
+    // Must be MineBlocks followed by ReorgChain, and nothing else.
+    assert_eq!(
+        ops.len(),
+        2,
+        "expected exactly two instructions, got {ops:?}"
+    );
+    assert!(
+        matches!(ops[0], Operation::MineBlocks(_)),
+        "first instruction should be MineBlocks",
+    );
+    assert!(
+        matches!(ops[1], Operation::ReorgChain(_)),
+        "last instruction should be ReorgChain",
+    );
+}
+
+// The reorg depth must stay shallow: deeper reorgs do not occur naturally on
+// mainnet and would only cost execution time.
+#[test]
+fn generated_reorg_chain_program_respects_bounds() {
+    for seed in 0..100 {
+        let program = generate_reorg_chain_program(seed);
+        for instruction in &program.instructions {
+            match instruction.operation {
+                Operation::MineBlocks(blocks) => assert!(
+                    (1..=16).contains(&blocks),
+                    "seed {seed}: MineBlocks({blocks}) out of range",
+                ),
+                Operation::ReorgChain(depth) => assert!(
+                    (1..=2).contains(&depth),
+                    "seed {seed}: ReorgChain({depth}) out of range",
+                ),
+                ref op => panic!("seed {seed}: unexpected operation {op}"),
+            }
+        }
+    }
+}
+
 fn generate_channel_announcement_program(seed: u64) -> Program {
     let mut rng = SmallRng::seed_from_u64(seed);
     let mut builder = ProgramBuilder::new();
@@ -1493,6 +1560,14 @@ fn generated_channel_ready_program_postcard_roundtrip() {
 #[test]
 fn generated_funding_flow_program_postcard_roundtrip() {
     let program = generate_funding_flow_program(42);
+    let bytes = postcard::to_allocvec(&program).expect("postcard serialization");
+    let decoded: Program = postcard::from_bytes(&bytes).expect("postcard deserialization");
+    assert_eq!(program, decoded);
+}
+
+#[test]
+fn generated_reorg_chain_program_postcard_roundtrip() {
+    let program = generate_reorg_chain_program(42);
     let bytes = postcard::to_allocvec(&program).expect("postcard serialization");
     let decoded: Program = postcard::from_bytes(&bytes).expect("postcard deserialization");
     assert_eq!(program, decoded);
@@ -1752,7 +1827,7 @@ fn param_mutator_changes_values() {
 fn param_mutator_changes_mined_num_blocks() {
     let original = Program {
         instructions: vec![Instruction {
-            operation: Operation::MineBlocks(42),
+            operation: Operation::MineBlocks(8),
             inputs: vec![],
         }],
     };
@@ -1775,6 +1850,37 @@ fn param_mutator_changes_mined_num_blocks() {
     }
     assert!(
         diff_count > 90,
+        "OperationParamMutator has an unexpected bias"
+    );
+}
+
+#[test]
+fn param_mutator_changes_reorg_num_blocks() {
+    let original = Program {
+        instructions: vec![Instruction {
+            operation: Operation::ReorgChain(2),
+            inputs: vec![],
+        }],
+    };
+    let mut program = original.clone();
+    let mutator = OperationParamMutator;
+    let mut rng = SmallRng::seed_from_u64(0);
+
+    let mut diff_count = 0;
+    for _ in 0..100 {
+        mutator.mutate(&mut program, &mut rng);
+        // Make sure that ReorgChain contains a value within the clamped range of
+        // blocks to be reorged.
+        let Operation::ReorgChain(depth) = program.instructions[0].operation else {
+            panic!("OperationParamMutator changed the operation type");
+        };
+        assert!((1..=2).contains(&depth));
+        if program != original {
+            diff_count += 1;
+        }
+    }
+    assert!(
+        diff_count > 35,
         "OperationParamMutator has an unexpected bias"
     );
 }

@@ -12,6 +12,7 @@ mod funding_created;
 mod funding_flow;
 mod node_announcement;
 mod open_channel;
+mod reorg_chain;
 
 pub use channel_announcement::ChannelAnnouncementGenerator;
 pub use channel_ready::ChannelReadyGenerator;
@@ -20,6 +21,7 @@ pub use funding_created::FundingCreatedGenerator;
 pub use funding_flow::FundingFlowGenerator;
 pub use node_announcement::NodeAnnouncementGenerator;
 pub use open_channel::OpenChannelGenerator;
+pub use reorg_chain::ReorgChainGenerator;
 
 use rand::Rng;
 
@@ -42,6 +44,7 @@ pub enum AnyGenerator {
     FundingCreated(FundingCreatedGenerator),
     ChannelReady(ChannelReadyGenerator),
     FundingFlow(FundingFlowGenerator),
+    ReorgChain(ReorgChainGenerator),
 }
 
 impl AnyGenerator {
@@ -54,6 +57,7 @@ impl AnyGenerator {
         Self::FundingCreated(FundingCreatedGenerator),
         Self::ChannelReady(ChannelReadyGenerator),
         Self::FundingFlow(FundingFlowGenerator),
+        Self::ReorgChain(ReorgChainGenerator),
     ];
 }
 
@@ -67,6 +71,7 @@ impl Generator for AnyGenerator {
             Self::FundingCreated(generator) => generator.generate(builder, rng),
             Self::ChannelReady(generator) => generator.generate(builder, rng),
             Self::FundingFlow(generator) => generator.generate(builder, rng),
+            Self::ReorgChain(generator) => generator.generate(builder, rng),
         }
     }
 }

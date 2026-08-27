@@ -230,6 +230,8 @@ pub enum Operation {
     RecvChannelReady,
     /// Mines the given number of blocks on the Bitcoin network.
     MineBlocks(u8),
+    /// Reorganizes the given number of blocks at the tip of the Bitcoin chain.
+    ReorgChain(u8),
     /// Sign wallet inputs of the transaction and broadcast it via `bitcoin-cli`.
     /// Input: `FundingTransaction`.
     BroadcastTransaction,
@@ -689,6 +691,7 @@ impl fmt::Display for Operation {
             Self::LoadTargetPubkeyFromContext => write!(f, "LoadTargetPubkeyFromContext()"),
             Self::LoadChainHashFromContext => write!(f, "LoadChainHashFromContext()"),
             Self::MineBlocks(v) => write!(f, "MineBlocks({v})"),
+            Self::ReorgChain(v) => write!(f, "ReorgChain({v})"),
             // Operations with inputs: parens added by Program::Display.
             Self::DerivePoint => write!(f, "DerivePoint"),
             Self::ExtractAcceptChannel(field) => write!(f, "Extract{field}"),
@@ -752,6 +755,7 @@ impl Operation {
             | Self::SendChannelReady { .. }
             | Self::RecvChannelReady
             | Self::MineBlocks(_)
+            | Self::ReorgChain(_)
             | Self::BroadcastTransaction => None,
             Self::SendOpenChannel => Some(VariableType::SentOpenChannel),
             Self::SendFundingCreated => Some(VariableType::SentFundingCreated),
@@ -782,7 +786,8 @@ impl Operation {
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadChainHashFromContext
             | Self::RecvChannelReady
-            | Self::MineBlocks(_) => vec![],
+            | Self::MineBlocks(_)
+            | Self::ReorgChain(_) => vec![],
 
             Self::DerivePoint => vec![VariableType::PrivateKey],
             Self::ExtractAcceptChannel(_) => vec![VariableType::AcceptChannel],
@@ -921,6 +926,7 @@ impl Operation {
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
             | Self::MineBlocks(_)
+            | Self::ReorgChain(_)
             | Self::BroadcastTransaction
             | Self::LookupShortChannelId => vec![],
 
@@ -945,6 +951,7 @@ impl Operation {
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
             | Self::MineBlocks(_)
+            | Self::ReorgChain(_)
             | Self::CreateFundingTransaction
             | Self::BroadcastTransaction
             | Self::LookupShortChannelId => true,
@@ -996,7 +1003,8 @@ impl Operation {
             | Self::ExtractAcceptChannel(_)
             | Self::BuildNodeAnnouncement { .. }
             | Self::SendChannelReady { .. }
-            | Self::MineBlocks(_) => true,
+            | Self::MineBlocks(_)
+            | Self::ReorgChain(_) => true,
 
             Self::LoadTargetPubkeyFromContext
             | Self::LoadChainHashFromContext
