@@ -154,8 +154,10 @@ fn verify_accept_channel(
         return Err("accept_channel does not include a channel_type".to_string());
     };
 
-    // Check that the channel type matches the one in open_channel.
-    if open_channel.tlvs.channel_type != accept_channel.tlvs.channel_type {
+    // Check that the channel type matches the one in open_channel. Convert
+    // feature vectors to minimal form before comparing.
+    let open_channel_type = open_channel.tlvs.channel_type.as_deref();
+    if open_channel_type.map(trim_features) != Some(trim_features(channel_type)) {
         return Err("accept_channel channel_type does not match open_channel".to_string());
     }
 
@@ -200,6 +202,13 @@ fn verify_accept_channel(
         channel_type,
         accept_channel.channel_reserve_satoshis,
     )
+}
+
+/// Strips the leading zero padding from a feature vector, yielding the smallest
+/// bitmap that represents the same set of feature bits.
+fn trim_features(features: &[u8]) -> &[u8] {
+    let padding = features.iter().take_while(|byte| **byte == 0).count();
+    &features[padding..]
 }
 
 /// Verifies that the initial commitment can cover its fee and satisfies the
@@ -493,6 +502,26 @@ mod tests {
             Some(&pending_negotiation(open_channel())),
             "invalid accept_channel: accept_channel channel_type does not match open_channel",
         );
+    }
+
+    #[test]
+    fn accept_channel_channel_type_padded_differently_than_open_channel() {
+        let mut oc = open_channel();
+        oc.tlvs.channel_type = Some(vec![0x00, 0x00, 0x10, 0x00]);
+        let mut ac = accept_channel();
+        ac.tlvs.channel_type = Some(vec![0x10, 0x00]);
+
+        assert_pass(&ac, Some(&pending_negotiation(oc)));
+    }
+
+    #[test]
+    fn accept_channel_empty_channel_type_padded_differently_than_open_channel() {
+        let mut oc = open_channel();
+        oc.tlvs.channel_type = Some(vec![0x00]);
+        let mut ac = accept_channel();
+        ac.tlvs.channel_type = Some(vec![]);
+
+        assert_pass(&ac, Some(&pending_negotiation(oc)));
     }
 
     #[test]
