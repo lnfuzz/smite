@@ -20,6 +20,28 @@ use super::funding::FundingTransaction;
 /// input count to a single `CompactSize` byte.
 pub const MAX_INPUTS: usize = 252;
 
+/// Weight of the transaction fields the initiator alone pays for (BOLT 2):
+/// `(input_count + output_count + version + locktime) * 4 + segwit marker and
+/// flag`.
+const COMMON_FIELDS_WEIGHT: u64 = (1 + 1 + 4 + 4) * 4 + 2;
+
+/// Weight of one input's non-witness fields: `txid + vout + scriptSig length +
+/// sequence`, all outside the witness and so multiplied by four.
+const INPUT_WEIGHT: u64 = (32 + 4 + 1 + 4) * 4;
+
+/// Weight of one output's fixed fields: `value + script length`.
+const OUTPUT_BASE_WEIGHT: u64 = (8 + 1) * 4;
+
+/// Witness weight charged per input we contribute.
+///
+/// BOLT 3 Appendix G charges `max(num_inputs * 107, actual witness weight)`,
+/// where 107 is the minimum witness weight. Our wallet inputs are P2WPKH,
+/// whose witness is `1` element count `+ 1 + 72` signature `+ 1 + 33` pubkey =
+/// 108 weight units, so the maximum is always the actual weight. Using it
+/// directly keeps the estimate on the paying side of the requirement: the peer
+/// fails the negotiation when our feerate falls short, never when it exceeds.
+const WITNESS_WEIGHT_PER_INPUT: u64 = 108;
+
 /// Maximum outputs in the constructed transaction (BOLT 2).
 pub const MAX_OUTPUTS: usize = 252;
 
@@ -184,6 +206,44 @@ impl SharedTransaction {
             .values()
             .filter(|i| i.contributor == contributor)
             .fold(0u64, |acc, i| acc.saturating_add(i.value()))
+    }
+
+    /// Fee we are responsible for at `feerate_per_kw`, in satoshis.
+    ///
+    /// BOLT 2 splits fee responsibility: the initiator pays for the common
+    /// transaction fields, and each peer pays for the inputs and outputs it
+    /// contributed. `pending_output_script_lens` covers outputs we are about to
+    /// add but have not added yet, which is what makes a change output's value
+    /// computable before it exists.
+    ///
+    /// Rounds up. BOLT 3 Appendix G's worked example has weight 609 at 253
+    /// sat/kw and states a fee of 155, not the 154 that truncating would give;
+    /// underpaying by a single satoshi makes the peer fail the negotiation.
+    #[must_use]
+    pub fn local_fee_sat(&self, feerate_per_kw: u32, pending_output_script_lens: &[usize]) -> u64 {
+        let local_inputs = self
+            .inputs
+            .values()
+            .filter(|i| i.contributor == Contributor::Local)
+            .count() as u64;
+
+        let output_weight = self
+            .outputs
+            .values()
+            .filter(|o| o.contributor == Contributor::Local)
+            .map(|o| o.script_pubkey.len() as u64)
+            .chain(pending_output_script_lens.iter().map(|len| *len as u64))
+            .map(|script_len| OUTPUT_BASE_WEIGHT + script_len * 4)
+            .sum::<u64>();
+
+        let weight = COMMON_FIELDS_WEIGHT
+            + local_inputs * INPUT_WEIGHT
+            + output_weight
+            + local_inputs * WITNESS_WEIGHT_PER_INPUT;
+
+        weight
+            .saturating_mul(u64::from(feerate_per_kw))
+            .div_ceil(1000)
     }
 
     /// Assembles the transaction both peers must agree on.
@@ -557,6 +617,105 @@ e37d3280b2e60e0000000017a9147ecd1b519326bc13b0ec716e469b58ed02b112a087f0006bee00
         assert!(shared.remove_input(20).is_none());
         assert!(shared.remove_output(44).is_some());
         assert!(shared.remove_output(9999).is_none());
+    }
+
+    // -- Fee responsibility --
+
+    #[test]
+    fn local_fee_matches_bolt3_appendix_g_opener() {
+        // Appendix G's opener contributes one input, the funding output and a
+        // change output, at 253 sat/kw, and owes 155 sat.
+        let prevtx = hex::decode(APPENDIX_G_PREVTX).expect("valid hex");
+        let mut shared = SharedTransaction::new(APPENDIX_G_LOCKTIME);
+        shared.add_input(
+            20,
+            SharedInput::from_prevtx(&prevtx, 0, MAX_SEQUENCE, Contributor::Local),
+        );
+        shared.add_output(
+            44,
+            SharedOutput {
+                value: APPENDIX_G_FUNDING_SATS,
+                script_pubkey: script(APPENDIX_G_FUNDING_SPK),
+                contributor: Contributor::Local,
+            },
+        );
+
+        // The change output is not added yet; its script length is what makes
+        // its own value computable.
+        let change_script = script(APPENDIX_G_OPENER_CHANGE_SPK);
+        assert_eq!(shared.local_fee_sat(253, &[change_script.len()]), 155);
+    }
+
+    #[test]
+    fn local_fee_rounds_up() {
+        let prevtx = hex::decode(APPENDIX_G_PREVTX).expect("valid hex");
+        let mut shared = SharedTransaction::new(0);
+        shared.add_input(
+            0,
+            SharedInput::from_prevtx(&prevtx, 0, MAX_SEQUENCE, Contributor::Local),
+        );
+
+        // Weight 42 + 164 + 108 = 314. At 1 sat/kw that is 0.314 sat, which
+        // must round up to 1 rather than down to 0.
+        assert_eq!(shared.local_fee_sat(1, &[]), 1);
+        // And 314 * 1000 / 1000 divides exactly.
+        assert_eq!(shared.local_fee_sat(1000, &[]), 314);
+    }
+
+    #[test]
+    fn local_fee_ignores_the_peers_contributions() {
+        let prevtx = hex::decode(APPENDIX_G_PREVTX).expect("valid hex");
+        let mut shared = SharedTransaction::new(0);
+        shared.add_input(
+            0,
+            SharedInput::from_prevtx(&prevtx, 0, MAX_SEQUENCE, Contributor::Local),
+        );
+        let ours = shared.local_fee_sat(253, &[]);
+
+        // Each peer pays for what it contributed, so adding theirs must not
+        // change what we owe.
+        shared.add_input(
+            1,
+            SharedInput::from_prevtx(&prevtx, 1, MAX_SEQUENCE, Contributor::Remote),
+        );
+        shared.add_output(
+            3,
+            SharedOutput {
+                value: 10_000,
+                script_pubkey: script(APPENDIX_G_ACCEPTER_CHANGE_SPK),
+                contributor: Contributor::Remote,
+            },
+        );
+
+        assert_eq!(shared.local_fee_sat(253, &[]), ours);
+    }
+
+    #[test]
+    fn local_fee_covers_the_common_fields_with_no_contributions() {
+        // The initiator pays for version, locktime and the two counts even
+        // when it contributes nothing else: weight 42 at 1000 sat/kw.
+        assert_eq!(SharedTransaction::new(0).local_fee_sat(1000, &[]), 42);
+    }
+
+    #[test]
+    fn local_fee_grows_with_each_input_and_output() {
+        let prevtx = hex::decode(APPENDIX_G_PREVTX).expect("valid hex");
+        let mut shared = SharedTransaction::new(0);
+        let base = shared.local_fee_sat(1000, &[]);
+
+        shared.add_input(
+            0,
+            SharedInput::from_prevtx(&prevtx, 0, MAX_SEQUENCE, Contributor::Local),
+        );
+        let with_input = shared.local_fee_sat(1000, &[]);
+        assert_eq!(with_input - base, INPUT_WEIGHT + WITNESS_WEIGHT_PER_INPUT);
+
+        let change_script = script(APPENDIX_G_OPENER_CHANGE_SPK);
+        let with_output = shared.local_fee_sat(1000, &[change_script.len()]);
+        assert_eq!(
+            with_output - with_input,
+            OUTPUT_BASE_WEIGHT + change_script.len() as u64 * 4,
+        );
     }
 
     // -- tx_signatures ordering --
