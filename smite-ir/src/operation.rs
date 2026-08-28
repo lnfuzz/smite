@@ -382,6 +382,46 @@ pub enum Operation {
     ///
     /// Input: `SentInteractiveTx`.
     RecvInteractiveTx,
+    /// Reconstruct the shared funding transaction from the negotiation, with
+    /// inputs and outputs sorted by ascending `serial_id` per BOLT 2.
+    ///
+    /// Produces an empty transaction when the negotiation is unknown, which
+    /// keeps the result well-typed for a mutated program without inventing a
+    /// channel the target never opened.
+    ///
+    /// Input: `channel_id` (`ChannelId`).
+    BuildFundingTransactionV2,
+    /// Build and send the v2 `commitment_signed` (BOLT 2, type 132) for the
+    /// initial commitment, and start tracking the channel.
+    ///
+    /// BOLT 2 requires the first `commitment_signed` of a v2 open to carry no
+    /// HTLCs.
+    ///
+    /// Inputs (3):
+    ///   0: `funding_transaction` (`FundingTransaction`)
+    ///   1: `opener_funding_privkey` (`PrivateKey`)
+    ///   2: `channel_id` (`ChannelId`)
+    SendCommitmentSigned,
+    /// Receive the peer's `commitment_signed` and verify its signature against
+    /// the holder's initial commitment.
+    /// Produces the `ChannelId` carried in the message.
+    /// Input: `SentCommitmentSigned`.
+    RecvCommitmentSigned,
+    /// Receive the peer's `tx_signatures`, recording its witnesses.
+    ///
+    /// This is a no-op unless the negotiation is one where the peer signs
+    /// first, so a program that owes the first signature does not block
+    /// waiting for a message the peer is waiting on us to send.
+    ///
+    /// Input: `channel_id` (`ChannelId`).
+    RecvTxSignatures,
+    /// Sign the shared funding transaction and send `tx_signatures` carrying
+    /// one witness per input we contributed, ordered by its `serial_id`.
+    ///
+    /// Inputs (2):
+    ///   0: `channel_id` (`ChannelId`)
+    ///   1: `funding_transaction` (`FundingTransaction`)
+    SendTxSignatures,
 }
 
 /// Where a `tx_add_output`'s value and script come from.
@@ -979,6 +1019,11 @@ impl fmt::Display for Operation {
             }
             Self::SendTxComplete => write!(f, "SendTxComplete"),
             Self::RecvInteractiveTx => write!(f, "RecvInteractiveTx"),
+            Self::BuildFundingTransactionV2 => write!(f, "BuildFundingTransactionV2"),
+            Self::SendCommitmentSigned => write!(f, "SendCommitmentSigned"),
+            Self::RecvCommitmentSigned => write!(f, "RecvCommitmentSigned"),
+            Self::RecvTxSignatures => write!(f, "RecvTxSignatures"),
+            Self::SendTxSignatures => write!(f, "SendTxSignatures"),
         }
     }
 }
@@ -1002,11 +1047,17 @@ impl Operation {
             Self::LoadBytes(_) | Self::LoadShutdownScript(_) => Some(VariableType::Bytes),
             Self::LoadFeatures(_) | Self::LoadChannelType(_) => Some(VariableType::Features),
             Self::LoadPrivateKey(_) => Some(VariableType::PrivateKey),
-            Self::LoadChannelId(_) | Self::RecvFundingSigned => Some(VariableType::ChannelId),
+            Self::LoadChannelId(_)
+            | Self::RecvFundingSigned
+            | Self::RecvCommitmentSigned
+            | Self::DeriveTemporaryChannelIdV2
+            | Self::DeriveChannelIdV2 => Some(VariableType::ChannelId),
             Self::LoadTargetPubkeyFromContext | Self::DerivePoint => Some(VariableType::Point),
             Self::LoadChainHashFromContext => Some(VariableType::ChainHash),
             Self::ExtractAcceptChannel(field) => Some(field.output_type()),
-            Self::CreateFundingTransaction => Some(VariableType::FundingTransaction),
+            Self::CreateFundingTransaction | Self::BuildFundingTransactionV2 => {
+                Some(VariableType::FundingTransaction)
+            }
             Self::BuildOpenChannel => Some(VariableType::OpenChannelMessage),
             Self::BuildChannelAnnouncement
             | Self::BuildNodeAnnouncement { .. }
@@ -1017,11 +1068,10 @@ impl Operation {
             | Self::RecvChannelReady
             | Self::MineBlocks(_)
             | Self::BroadcastTransaction
-            | Self::RecvInteractiveTx => None,
+            | Self::RecvInteractiveTx
+            | Self::RecvTxSignatures
+            | Self::SendTxSignatures => None,
             Self::SendOpenChannel => Some(VariableType::SentOpenChannel),
-            Self::DeriveTemporaryChannelIdV2 | Self::DeriveChannelIdV2 => {
-                Some(VariableType::ChannelId)
-            }
             Self::ExtractAcceptChannel2(field) => Some(field.output_type()),
             Self::BuildOpenChannel2 { .. } => Some(VariableType::OpenChannel2Message),
             Self::SendOpenChannel2 => Some(VariableType::SentOpenChannel2),
@@ -1031,6 +1081,7 @@ impl Operation {
             | Self::SendTxRemoveInput { .. }
             | Self::SendTxRemoveOutput { .. }
             | Self::SendTxComplete => Some(VariableType::SentInteractiveTx),
+            Self::SendCommitmentSigned => Some(VariableType::SentCommitmentSigned),
             Self::SendFundingCreated => Some(VariableType::SentFundingCreated),
             Self::SendShutdown => Some(VariableType::SentShutdown),
             Self::RecvAcceptChannel => Some(VariableType::AcceptChannel),
@@ -1040,6 +1091,9 @@ impl Operation {
     /// Returns the expected variable types for each input position.
     #[must_use]
     #[allow(clippy::too_many_lines)]
+    // Arms that happen to share a type list are kept apart: the per-position
+    // comments name different protocol fields, which merging would lose.
+    #[allow(clippy::match_same_arms)]
     pub fn input_types(&self) -> Vec<VariableType> {
         match self {
             Self::LoadAmount(_)
@@ -1172,6 +1226,19 @@ impl Operation {
                 VariableType::Bytes,     // script
             ],
             Self::RecvInteractiveTx => vec![VariableType::SentInteractiveTx],
+            Self::BuildFundingTransactionV2 | Self::RecvTxSignatures => {
+                vec![VariableType::ChannelId]
+            }
+            Self::SendCommitmentSigned => vec![
+                VariableType::FundingTransaction, // funding_transaction
+                VariableType::PrivateKey,         // opener_funding_privkey
+                VariableType::ChannelId,          // channel_id
+            ],
+            Self::RecvCommitmentSigned => vec![VariableType::SentCommitmentSigned],
+            Self::SendTxSignatures => vec![
+                VariableType::ChannelId,          // channel_id
+                VariableType::FundingTransaction, // funding_transaction
+            ],
             Self::SendOpenChannel2 => vec![VariableType::OpenChannel2Message],
             Self::RecvAcceptChannel2 => vec![VariableType::SentOpenChannel2],
 
@@ -1253,7 +1320,12 @@ impl Operation {
             | Self::SendTxRemoveInput { .. }
             | Self::SendTxRemoveOutput { .. }
             | Self::SendTxComplete
-            | Self::RecvInteractiveTx => vec![],
+            | Self::RecvInteractiveTx
+            | Self::BuildFundingTransactionV2
+            | Self::SendCommitmentSigned
+            | Self::RecvCommitmentSigned
+            | Self::RecvTxSignatures
+            | Self::SendTxSignatures => vec![],
 
             Self::RecvAcceptChannel => AcceptChannelField::ALL
                 .iter()
@@ -1291,7 +1363,12 @@ impl Operation {
             | Self::SendTxRemoveInput { .. }
             | Self::SendTxRemoveOutput { .. }
             | Self::SendTxComplete
-            | Self::RecvInteractiveTx => true,
+            | Self::RecvInteractiveTx
+            | Self::BuildFundingTransactionV2
+            | Self::SendCommitmentSigned
+            | Self::RecvCommitmentSigned
+            | Self::RecvTxSignatures
+            | Self::SendTxSignatures => true,
             Self::LoadAmount(_)
             | Self::LoadShortChannelId(_)
             | Self::BuildChannelAnnouncement
@@ -1374,7 +1451,12 @@ impl Operation {
             | Self::SendOpenChannel2
             | Self::RecvAcceptChannel2
             | Self::SendTxComplete
-            | Self::RecvInteractiveTx => false,
+            | Self::RecvInteractiveTx
+            | Self::BuildFundingTransactionV2
+            | Self::SendCommitmentSigned
+            | Self::RecvCommitmentSigned
+            | Self::RecvTxSignatures
+            | Self::SendTxSignatures => false,
         }
     }
 }

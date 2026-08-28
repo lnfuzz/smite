@@ -34,6 +34,9 @@ impl Mutator for OperationParamMutator {
 }
 
 /// Returns `true` if the operation was changed.
+// One arm per mutable operation, so this grows with the IR rather than with
+// any one mutation's complexity.
+#[allow(clippy::too_many_lines)]
 fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
     match op {
         Operation::LoadAmount(v) => {
@@ -75,13 +78,11 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
             mutate_channel_type(variant, rng);
             true
         }
+        // Limit the number of mined blocks to keep execution times low.
+        // Reference execution timings:
+        // MineBlocks(10): 16ms, MineBlocks(100): 157ms,
+        // MineBlocks(200): 359ms, MineBlocks(255): 468ms
         Operation::MineBlocks(v) => {
-            // Limit the number of mined blocks to keep execution times low.
-            // Reference execution timings:
-            // MineBlocks(10): 16ms
-            // MineBlocks(100): 157ms
-            // MineBlocks(200): 359ms
-            // MineBlocks(255): 468ms
             *v = rng.random_range(1..=16);
             true
         }
@@ -141,7 +142,12 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         | Operation::SendOpenChannel2
         | Operation::RecvAcceptChannel2
         | Operation::SendTxComplete
-        | Operation::RecvInteractiveTx => {
+        | Operation::RecvInteractiveTx
+        | Operation::BuildFundingTransactionV2
+        | Operation::SendCommitmentSigned
+        | Operation::RecvCommitmentSigned
+        | Operation::RecvTxSignatures
+        | Operation::SendTxSignatures => {
             unreachable!("is_param_mutable returned true for {op:?}")
         }
     }

@@ -240,6 +240,9 @@ impl ProgramBuilder {
             VariableType::SentInteractiveTx => {
                 panic!("cannot generate fresh SentInteractiveTx: affine type")
             }
+            VariableType::SentCommitmentSigned => {
+                panic!("cannot generate fresh SentCommitmentSigned: affine type")
+            }
             VariableType::SentFundingCreated => {
                 panic!("cannot generate fresh SentFundingCreated: affine type")
             }

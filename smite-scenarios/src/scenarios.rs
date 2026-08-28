@@ -15,7 +15,7 @@ use smite::scenarios::ScenarioError;
 
 use std::time::Duration;
 
-use bitcoin::secp256k1::SecretKey;
+use bitcoin::secp256k1::{self, SecretKey};
 use smite::bolt::{Error, Init, Message, Ping};
 use smite::noise::NoiseConnection;
 
@@ -58,6 +58,19 @@ const EPHEMERAL_KEY: [u8; 32] = [
     0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12,
     0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12,
 ];
+
+/// Returns our own identity public key, derived from the fixed Noise static
+/// key used for every handshake.
+///
+/// # Panics
+///
+/// Panics if [`STATIC_KEY`] is not a valid secp256k1 secret key, which is a
+/// compile-time constant and so cannot vary at run time.
+#[must_use]
+pub fn local_node_id() -> secp256k1::PublicKey {
+    let secret = SecretKey::from_slice(&STATIC_KEY).expect("valid static key");
+    secp256k1::PublicKey::from_secret_key(&secp256k1::Secp256k1::new(), &secret)
+}
 
 /// Perform a Noise handshake with a target and receive its `Init` message.
 ///

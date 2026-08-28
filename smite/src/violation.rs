@@ -45,4 +45,10 @@ pub enum Violation {
     /// holder's initial commitment transaction.
     #[error("invalid counterparty signature for channel_id {0}")]
     InvalidCounterpartySignature(ChannelId),
+
+    /// The target's `commitment_signed` for a channel establishment v2 open
+    /// carried HTLC signatures. BOLT 2 requires the first commitment of a v2
+    /// open to have no HTLCs, so there is nothing for them to sign.
+    #[error("unexpected htlc signatures in commitment_signed for channel_id {0}")]
+    UnexpectedHtlcSignatures(ChannelId),
 }

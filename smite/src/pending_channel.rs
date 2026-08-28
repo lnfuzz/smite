@@ -33,6 +33,15 @@ pub struct PendingChannelV2 {
     /// The transaction being built by interactive construction, accumulating
     /// both peers' contributions.
     pub shared_tx: SharedTransaction,
+    /// Progress through the interactive transaction exchange.
+    pub tx_negotiation: TxNegotiation,
+    /// Progress through the commitment and signature exchange that follows it.
+    pub commitment_exchange: CommitmentExchange,
+}
+
+/// How far the interactive transaction exchange has progressed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TxNegotiation {
     /// Whether we have sent `tx_complete` since our last contribution.
     pub sent_tx_complete: bool,
     /// Whether the peer's most recent message was `tx_complete`. The
@@ -41,6 +50,17 @@ pub struct PendingChannelV2 {
     pub peer_sent_tx_complete: bool,
     /// Whether either peer has aborted the negotiation.
     pub aborted: bool,
+}
+
+/// How far the commitment and signature exchange has progressed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CommitmentExchange {
+    /// Whether we have sent `commitment_signed` for this funding transaction.
+    pub sent_commitment_signed: bool,
+    /// Whether the peer's `commitment_signed` has arrived and verified.
+    pub received_commitment_signed: bool,
+    /// Whether the peer's `tx_signatures` has arrived.
+    pub received_tx_signatures: bool,
 }
 
 impl PendingChannelV2 {
@@ -54,9 +74,8 @@ impl PendingChannelV2 {
             accept_channel2: None,
             channel_id: None,
             shared_tx,
-            sent_tx_complete: false,
-            peer_sent_tx_complete: false,
-            aborted: false,
+            tx_negotiation: TxNegotiation::default(),
+            commitment_exchange: CommitmentExchange::default(),
         }
     }
 
@@ -64,7 +83,7 @@ impl PendingChannelV2 {
     /// the negotiation.
     #[must_use]
     pub fn tx_negotiation_complete(&self) -> bool {
-        self.sent_tx_complete && self.peer_sent_tx_complete
+        self.tx_negotiation.sent_tx_complete && self.tx_negotiation.peer_sent_tx_complete
     }
 
     /// Total funding output value: the sum of both peers' contributions, per

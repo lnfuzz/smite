@@ -121,6 +121,7 @@ fn setup_with_init<T: Target>(
 
     let context = ProgramContext {
         target_pubkey: *target.pubkey(),
+        local_pubkey: super::local_node_id(),
         chain_hash: REGTEST_CHAIN_HASH,
         // All targets gate startup on `INITIAL_BLOCKS` being mined, so
         // this is the floor. Dynamic per-target queries can replace it
