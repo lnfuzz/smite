@@ -8,7 +8,8 @@ use smite::bolt::{MAX_MESSAGE_SIZE, ShortChannelId};
 use super::*;
 use generators::{
     AnyGenerator, ChannelAnnouncementGenerator, ChannelReadyGenerator, ChannelUpdateGenerator,
-    FundingCreatedGenerator, FundingFlowGenerator, NodeAnnouncementGenerator, OpenChannelGenerator,
+    DualFundingFlowGenerator, FundingCreatedGenerator, FundingFlowGenerator,
+    NodeAnnouncementGenerator, OpenChannelGenerator,
 };
 use minimizers::{CommonSubexpressionEliminator, DeadCodeEliminator, Minimizer};
 use mutators::{
@@ -17,6 +18,7 @@ use mutators::{
 };
 use operation::{
     AcceptChannel2Field, AcceptChannelField, ChannelTypeVariant, ShutdownScriptVariant,
+    TxOutputRole,
 };
 
 /// Helper to build a private key with a single distinguishing byte.
@@ -940,7 +942,8 @@ fn any_generator_all_is_complete() {
             | AnyGenerator::OpenChannel(_)
             | AnyGenerator::FundingCreated(_)
             | AnyGenerator::ChannelReady(_)
-            | AnyGenerator::FundingFlow(_) => 7,
+            | AnyGenerator::FundingFlow(_)
+            | AnyGenerator::DualFundingFlow(_) => 8,
         }
     };
     assert_eq!(AnyGenerator::ALL.len(), variant_count(AnyGenerator::ALL[0]));
@@ -1316,6 +1319,155 @@ fn generated_channel_ready_program_structure() {
     assert!(
         derive_count >= 1,
         "expected at least one DerivePoint, got {derive_count}"
+    );
+}
+
+fn generate_dual_funding_flow_program(seed: u64) -> Program {
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut builder = ProgramBuilder::new();
+    DualFundingFlowGenerator.generate(&mut builder, &mut rng);
+    builder.build()
+}
+
+// If DualFundingFlowGenerator completes without panicking, every instruction
+// has correct input types and every affine variable is consumed exactly once
+// (both enforced by ProgramBuilder::append).
+#[test]
+fn generated_dual_funding_flow_program_is_type_correct() {
+    for seed in 0..100 {
+        generate_dual_funding_flow_program(seed);
+    }
+}
+
+#[test]
+fn generated_dual_funding_flow_program_follows_the_bolt2_order() {
+    let program = generate_dual_funding_flow_program(0);
+    let ops: Vec<_> = program.instructions.iter().map(|i| &i.operation).collect();
+
+    let position = |pred: fn(&Operation) -> bool| {
+        ops.iter()
+            .position(|op| pred(op))
+            .unwrap_or_else(|| panic!("operation missing from the generated program"))
+    };
+
+    // BOLT 2: open_channel2, accept_channel2, interactive tx, both
+    // commitment_signed, both tx_signatures, then channel_ready.
+    let send_open = position(|op| matches!(op, Operation::SendOpenChannel2));
+    let recv_accept = position(|op| matches!(op, Operation::RecvAcceptChannel2));
+    let first_add_input = position(|op| matches!(op, Operation::SendTxAddInput { .. }));
+    let funding_output = position(|op| {
+        matches!(
+            op,
+            Operation::SendTxAddOutput {
+                role: TxOutputRole::Funding,
+                ..
+            }
+        )
+    });
+    let tx_complete = position(|op| matches!(op, Operation::SendTxComplete));
+    let build_funding = position(|op| matches!(op, Operation::BuildFundingTransactionV2));
+    let send_commitment = position(|op| matches!(op, Operation::SendCommitmentSigned));
+    let recv_commitment = position(|op| matches!(op, Operation::RecvCommitmentSigned));
+    let recv_signatures = position(|op| matches!(op, Operation::RecvTxSignatures));
+    let send_signatures = position(|op| matches!(op, Operation::SendTxSignatures));
+    let broadcast = position(|op| matches!(op, Operation::BroadcastTransaction));
+    let send_ready = position(|op| matches!(op, Operation::SendChannelReady { .. }));
+
+    let order = [
+        send_open,
+        recv_accept,
+        first_add_input,
+        funding_output,
+        tx_complete,
+        build_funding,
+        send_commitment,
+        recv_commitment,
+        recv_signatures,
+        send_signatures,
+        broadcast,
+        send_ready,
+    ];
+    assert!(
+        order.windows(2).all(|w| w[0] < w[1]),
+        "instructions are out of protocol order: {order:?}",
+    );
+
+    assert!(
+        matches!(ops[ops.len() - 1], Operation::RecvChannelReady),
+        "last instruction should be RecvChannelReady",
+    );
+}
+
+#[test]
+fn generated_dual_funding_flow_pairs_every_send_with_a_receive() {
+    for seed in 0..20 {
+        let program = generate_dual_funding_flow_program(seed);
+        let ops: Vec<_> = program.instructions.iter().map(|i| &i.operation).collect();
+
+        // Interactive transaction construction is turn-based, so each message
+        // we send earns exactly one reply.
+        let sends = ops
+            .iter()
+            .filter(|op| {
+                matches!(
+                    op,
+                    Operation::SendTxAddInput { .. }
+                        | Operation::SendTxAddOutput { .. }
+                        | Operation::SendTxComplete
+                )
+            })
+            .count();
+        let receives = ops
+            .iter()
+            .filter(|op| matches!(op, Operation::RecvInteractiveTx))
+            .count();
+        assert_eq!(
+            sends, receives,
+            "seed {seed}: unpaired interactive tx messages"
+        );
+    }
+}
+
+#[test]
+fn generated_dual_funding_flow_uses_even_serial_ids() {
+    for seed in 0..20 {
+        let program = generate_dual_funding_flow_program(seed);
+        for instr in &program.instructions {
+            // BOLT 2 requires the initiator to use even serial ids.
+            let (Operation::SendTxAddInput { serial_id, .. }
+            | Operation::SendTxAddOutput { serial_id, .. }) = instr.operation
+            else {
+                continue;
+            };
+            assert_eq!(
+                serial_id % 2,
+                0,
+                "seed {seed}: odd serial_id {serial_id} from the initiator",
+            );
+        }
+    }
+}
+
+#[test]
+fn generated_dual_funding_flow_reuses_the_second_per_commitment_point() {
+    let program = generate_dual_funding_flow_program(0);
+
+    let open_channel2 = program
+        .instructions
+        .iter()
+        .find(|i| matches!(i.operation, Operation::BuildOpenChannel2 { .. }))
+        .expect("open_channel2 built");
+    let channel_ready = program
+        .instructions
+        .iter()
+        .find(|i| matches!(i.operation, Operation::SendChannelReady { .. }))
+        .expect("channel_ready sent");
+
+    // Implementations may cross-check the point committed to in open_channel2
+    // against the one channel_ready carries, so both must be the same variable.
+    assert_eq!(
+        open_channel2.inputs[17], channel_ready.inputs[1],
+        "second_per_commitment_point differs between open_channel2 and channel_ready",
     );
 }
 

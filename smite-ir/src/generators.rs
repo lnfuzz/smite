@@ -8,6 +8,7 @@
 mod channel_announcement;
 mod channel_ready;
 mod channel_update;
+mod dual_funding_flow;
 mod funding_created;
 mod funding_flow;
 mod node_announcement;
@@ -16,6 +17,7 @@ mod open_channel;
 pub use channel_announcement::ChannelAnnouncementGenerator;
 pub use channel_ready::ChannelReadyGenerator;
 pub use channel_update::ChannelUpdateGenerator;
+pub use dual_funding_flow::DualFundingFlowGenerator;
 pub use funding_created::FundingCreatedGenerator;
 pub use funding_flow::FundingFlowGenerator;
 pub use node_announcement::NodeAnnouncementGenerator;
@@ -42,6 +44,7 @@ pub enum AnyGenerator {
     FundingCreated(FundingCreatedGenerator),
     ChannelReady(ChannelReadyGenerator),
     FundingFlow(FundingFlowGenerator),
+    DualFundingFlow(DualFundingFlowGenerator),
 }
 
 impl AnyGenerator {
@@ -54,6 +57,7 @@ impl AnyGenerator {
         Self::FundingCreated(FundingCreatedGenerator),
         Self::ChannelReady(ChannelReadyGenerator),
         Self::FundingFlow(FundingFlowGenerator),
+        Self::DualFundingFlow(DualFundingFlowGenerator),
     ];
 }
 
@@ -67,6 +71,7 @@ impl Generator for AnyGenerator {
             Self::FundingCreated(generator) => generator.generate(builder, rng),
             Self::ChannelReady(generator) => generator.generate(builder, rng),
             Self::FundingFlow(generator) => generator.generate(builder, rng),
+            Self::DualFundingFlow(generator) => generator.generate(builder, rng),
         }
     }
 }
