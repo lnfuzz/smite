@@ -5,7 +5,9 @@ use rand::{Rng, RngExt};
 use smite::bolt::{MAX_MESSAGE_SIZE, ShortChannelId};
 
 use super::Mutator;
-use crate::operation::{AcceptChannelField, ChannelTypeVariant, ShutdownScriptVariant};
+use crate::operation::{
+    AcceptChannel2Field, AcceptChannelField, ChannelTypeVariant, ShutdownScriptVariant,
+};
 use crate::{Operation, Program};
 
 /// Mutates the embedded parameter of a randomly chosen `is_param_mutable`
@@ -82,7 +84,7 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
             *v = rng.random_range(1..=16);
             true
         }
-        Operation::ExtractAcceptChannel(field) => mutate_extract_field(field, rng),
+        Operation::ExtractAcceptChannel(field) => mutate_accept_channel_field(field, rng),
         Operation::BuildNodeAnnouncement { rgb_color, alias } => {
             // Randomly mutate rgb_color or alias bytes in place; never change
             // their lengths (array types prevent it).
@@ -97,6 +99,14 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
             // Toggle the SCID alias TLV. Flipping always changes the value;
             // a random bool could repeat it and waste the mutation.
             *include_alias = !*include_alias;
+            true
+        }
+        Operation::ExtractAcceptChannel2(field) => mutate_accept_channel2_field(field, rng),
+        Operation::BuildOpenChannel2 {
+            require_confirmed_inputs,
+        } => {
+            // Toggle the value-less `require_confirmed_inputs` TLV.
+            *require_confirmed_inputs = !*require_confirmed_inputs;
             true
         }
 
@@ -118,7 +128,11 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         | Operation::RecvFundingSigned
         | Operation::RecvChannelReady
         | Operation::BroadcastTransaction
-        | Operation::LookupShortChannelId => {
+        | Operation::LookupShortChannelId
+        | Operation::DeriveTemporaryChannelIdV2
+        | Operation::DeriveChannelIdV2
+        | Operation::SendOpenChannel2
+        | Operation::RecvAcceptChannel2 => {
             unreachable!("is_param_mutable returned true for {op:?}")
         }
     }
@@ -375,10 +389,26 @@ fn mutate_shutdown_script_bytes(variant: &mut ShutdownScriptVariant, rng: &mut i
 
 /// Returns `true` if the field was swapped, `false` if no same-type alternative
 /// field exists.
-fn mutate_extract_field(field: &mut AcceptChannelField, rng: &mut impl Rng) -> bool {
+fn mutate_accept_channel_field(field: &mut AcceptChannelField, rng: &mut impl Rng) -> bool {
     // Only swap to fields with the same output type to preserve program validity.
     let target_type = field.output_type();
     let Some(new_field) = AcceptChannelField::ALL
+        .iter()
+        .copied()
+        .filter(|f| f.output_type() == target_type && f != field)
+        .choose(rng)
+    else {
+        return false;
+    };
+    *field = new_field;
+    true
+}
+
+/// Swaps an `accept_channel2` extraction to a different field of the same
+/// output type, so the program stays type-correct.
+fn mutate_accept_channel2_field(field: &mut AcceptChannel2Field, rng: &mut impl Rng) -> bool {
+    let target_type = field.output_type();
+    let Some(new_field) = AcceptChannel2Field::ALL
         .iter()
         .copied()
         .filter(|f| f.output_type() == target_type && f != field)

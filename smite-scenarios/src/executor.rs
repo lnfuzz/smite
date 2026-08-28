@@ -8,9 +8,10 @@ use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use bitcoin::{OutPoint, ScriptBuf, Txid};
 use smite::bitcoin::{BitcoinCli, TxBlockPosition, Utxo};
 use smite::bolt::{
-    AcceptChannel, AnnouncementSignatures, ChannelAnnouncement, ChannelId, ChannelReady,
-    ChannelReadyTlvs, ChannelUpdate, FundingCreated, FundingSigned, Message, MessageType,
-    NodeAnnouncement, OpenChannel, OpenChannelTlvs, Pong, ShortChannelId, Shutdown,
+    AcceptChannel, AcceptChannel2, AnnouncementSignatures, ChannelAnnouncement, ChannelId,
+    ChannelReady, ChannelReadyTlvs, ChannelUpdate, FundingCreated, FundingSigned, Message,
+    MessageType, NodeAnnouncement, OpenChannel, OpenChannel2, OpenChannel2Tlvs, OpenChannelTlvs,
+    Pong, ShortChannelId, Shutdown,
 };
 use smite::channel_tx::{
     ChannelConfig, ChannelPartyConfig, ChannelState, FundingTransaction, HolderIdentity, Side,
@@ -18,9 +19,9 @@ use smite::channel_tx::{
 };
 use smite::noise::{ConnectionError, NoiseConnection};
 use smite::oracles::{AcceptChannelContext, AcceptChannelOracle, Oracle};
-use smite::pending_channel::PendingChannel;
+use smite::pending_channel::{PendingChannel, PendingChannelV2};
 use smite::violation::Violation;
-use smite_ir::operation::AcceptChannelField;
+use smite_ir::operation::{AcceptChannel2Field, AcceptChannelField};
 use smite_ir::{Operation, Program, Variable};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -244,6 +245,14 @@ pub struct Executor<C, B> {
     /// `temporary_channel_id`, so the funding flow can build commitments from
     /// the parameters actually sent on the wire.
     negotiations: HashMap<ChannelId, PendingChannel>,
+    /// Channel establishment v2 negotiation state, keyed by
+    /// `temporary_channel_id`.
+    negotiations_v2: HashMap<ChannelId, PendingChannelV2>,
+    /// Maps a v2 `channel_id` back to the `temporary_channel_id` keying
+    /// `negotiations_v2`. Every message after `accept_channel2` carries the v2
+    /// `channel_id`, which is only derivable once the peer's revocation
+    /// basepoint is known.
+    v2_channel_ids: HashMap<ChannelId, ChannelId>,
     /// Transactions stored outside Bitcoin Core's mempool, typically because they
     /// were rejected by mempool policy, to be included in the next `MineBlocks`
     /// operation. Each is stored as `(txid, raw_hex)`: re-signing the same
@@ -268,6 +277,8 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
             context,
             channel_states: HashMap::new(),
             negotiations: HashMap::new(),
+            negotiations_v2: HashMap::new(),
+            v2_channel_ids: HashMap::new(),
             private_mempool: Vec::new(),
             unmined_txids: HashSet::new(),
             mined_txids: HashSet::new(),
@@ -575,6 +586,61 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                     );
                     Some(Variable::ShortChannelId(scid))
                 }
+
+                // -- Channel establishment v2 --
+                Operation::DeriveTemporaryChannelIdV2 => {
+                    let revocation_basepoint = resolve_pubkey(&variables, instr.inputs[0]);
+                    Some(Variable::ChannelId(
+                        ChannelId::v2_temporary_from_revocation_basepoint(&revocation_basepoint),
+                    ))
+                }
+
+                Operation::DeriveChannelIdV2 => {
+                    let ours = resolve_pubkey(&variables, instr.inputs[0]);
+                    let theirs = resolve_pubkey(&variables, instr.inputs[1]);
+                    Some(Variable::ChannelId(
+                        ChannelId::v2_from_revocation_basepoints(&ours, &theirs),
+                    ))
+                }
+
+                Operation::ExtractAcceptChannel2(field) => {
+                    let ac = resolve_accept_channel2(&variables, instr.inputs[0]);
+                    Some(extract_field_v2(ac, *field))
+                }
+
+                Operation::BuildOpenChannel2 {
+                    require_confirmed_inputs,
+                } => {
+                    let oc =
+                        build_open_channel2(&variables, &instr.inputs, *require_confirmed_inputs);
+                    Some(Variable::OpenChannel2Message(oc))
+                }
+
+                Operation::SendOpenChannel2 => {
+                    let oc = resolve_open_channel2_message(&variables, instr.inputs[0]);
+                    record_send_open_channel2(&mut self.negotiations_v2, oc);
+                    let encoded = Message::OpenChannel2(oc.clone()).encode();
+                    log::debug!(
+                        "[{:?}] SendOpenChannel2: {} bytes",
+                        start.elapsed(),
+                        encoded.len(),
+                    );
+                    self.conn.send_message(&encoded)?;
+                    Some(Variable::SentOpenChannel2)
+                }
+
+                Operation::RecvAcceptChannel2 => {
+                    consume_sent_open_channel2(&mut variables, instr.inputs[0]);
+                    log::debug!("[{:?}] RecvAcceptChannel2: waiting", start.elapsed());
+                    let ac = recv_accept_channel2(&mut self.conn)?;
+                    log::debug!("[{:?}] RecvAcceptChannel2: received", start.elapsed());
+                    record_recv_accept_channel2(
+                        &mut self.negotiations_v2,
+                        &mut self.v2_channel_ids,
+                        &ac,
+                    );
+                    Some(Variable::AcceptChannel2(ac))
+                }
             };
 
             variables.push(result);
@@ -634,6 +700,16 @@ fn resolve_timestamp(variables: &[Option<Variable>], index: usize) -> u32 {
         Variable::Timestamp(v) => *v,
         other => panic!(
             "variable {index}: expected Timestamp, got {:?}",
+            other.var_type(),
+        ),
+    }
+}
+
+fn resolve_block_height(variables: &[Option<Variable>], index: usize) -> u32 {
+    match resolve(variables, index) {
+        Variable::BlockHeight(v) => *v,
+        other => panic!(
+            "variable {index}: expected BlockHeight, got {:?}",
             other.var_type(),
         ),
     }
@@ -753,6 +829,26 @@ fn resolve_accept_channel(variables: &[Option<Variable>], index: usize) -> &Acce
     }
 }
 
+fn resolve_open_channel2_message(variables: &[Option<Variable>], index: usize) -> &OpenChannel2 {
+    match resolve(variables, index) {
+        Variable::OpenChannel2Message(v) => v,
+        other => panic!(
+            "variable {index}: expected OpenChannel2Message, got {:?}",
+            other.var_type(),
+        ),
+    }
+}
+
+fn resolve_accept_channel2(variables: &[Option<Variable>], index: usize) -> &AcceptChannel2 {
+    match resolve(variables, index) {
+        Variable::AcceptChannel2(v) => v,
+        other => panic!(
+            "variable {index}: expected AcceptChannel2, got {:?}",
+            other.var_type(),
+        ),
+    }
+}
+
 fn resolve_funding_transaction(
     variables: &[Option<Variable>],
     index: usize,
@@ -774,6 +870,19 @@ fn consume_sent_open_channel(variables: &mut [Option<Variable>], index: usize) {
         }
         other => panic!(
             "variable {index}: expected SentOpenChannel, got {:?}",
+            other.var_type(),
+        ),
+    }
+}
+
+fn consume_sent_open_channel2(variables: &mut [Option<Variable>], index: usize) {
+    match resolve(variables, index) {
+        Variable::SentOpenChannel2 => {
+            // Consume the affine `SentOpenChannel2`.
+            variables[index] = None;
+        }
+        other => panic!(
+            "variable {index}: expected SentOpenChannel2, got {:?}",
             other.var_type(),
         ),
     }
@@ -862,6 +971,46 @@ fn build_open_channel(variables: &[Option<Variable>], inputs: &[usize]) -> OpenC
             // not negotiated is not.
             upfront_shutdown_script: Some(resolve_bytes(variables, inputs[18]).to_vec()),
             channel_type: nonempty_or_none(resolve_features(variables, inputs[19])),
+        },
+    }
+}
+
+/// Builds an `OpenChannel2` from 21 input variables (wire order).
+fn build_open_channel2(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+    require_confirmed_inputs: bool,
+) -> OpenChannel2 {
+    OpenChannel2 {
+        chain_hash: resolve_chain_hash(variables, inputs[0]),
+        temporary_channel_id: resolve_channel_id(variables, inputs[1]),
+        funding_feerate_perkw: resolve_feerate(variables, inputs[2]),
+        commitment_feerate_perkw: resolve_feerate(variables, inputs[3]),
+        funding_satoshis: resolve_amount(variables, inputs[4]),
+        dust_limit_satoshis: resolve_amount(variables, inputs[5]),
+        max_htlc_value_in_flight_msat: resolve_amount(variables, inputs[6]),
+        htlc_minimum_msat: resolve_amount(variables, inputs[7]),
+        to_self_delay: resolve_u16(variables, inputs[8]),
+        max_accepted_htlcs: resolve_u16(variables, inputs[9]),
+        locktime: resolve_block_height(variables, inputs[10]),
+        funding_pubkey: resolve_pubkey(variables, inputs[11]),
+        revocation_basepoint: resolve_pubkey(variables, inputs[12]),
+        payment_basepoint: resolve_pubkey(variables, inputs[13]),
+        delayed_payment_basepoint: resolve_pubkey(variables, inputs[14]),
+        htlc_basepoint: resolve_pubkey(variables, inputs[15]),
+        first_per_commitment_point: resolve_pubkey(variables, inputs[16]),
+        second_per_commitment_point: resolve_pubkey(variables, inputs[17]),
+        channel_flags: resolve_u8(variables, inputs[18]),
+        tlvs: OpenChannel2Tlvs {
+            // Always send the TLV: a zero-length value is the BOLT 2 opt-out
+            // signal when option_upfront_shutdown_script is negotiated, so
+            // omitting it would be a protocol violation in that case.
+            upfront_shutdown_script: Some(resolve_bytes(variables, inputs[19]).to_vec()),
+            // BOLT 2 requires `open_channel2` to set `channel_type`, but an
+            // empty `Features` still omits the TLV so the receiver's "MUST fail
+            // if channel_type is not set" path stays reachable.
+            channel_type: nonempty_or_none(resolve_features(variables, inputs[20])),
+            require_confirmed_inputs,
         },
     }
 }
@@ -1267,6 +1416,17 @@ fn recv_accept_channel(conn: &mut impl Connection) -> Result<AcceptChannel, Exec
     }
 }
 
+/// Receives and decodes an `accept_channel2` message.
+fn recv_accept_channel2(conn: &mut impl Connection) -> Result<AcceptChannel2, ExecuteError> {
+    match recv_non_ping(conn, RECV_IDLE_TIMEOUT)? {
+        Message::AcceptChannel2(ac) => Ok(ac),
+        other => Err(ExecuteError::UnexpectedMessage {
+            expected: MessageType::ACCEPT_CHANNEL2,
+            got: other.msg_type(),
+        }),
+    }
+}
+
 /// Receives and decodes a `funding_signed` message.
 fn recv_funding_signed(conn: &mut impl Connection) -> Result<FundingSigned, ExecuteError> {
     match recv_non_ping(conn, RECV_IDLE_TIMEOUT)? {
@@ -1400,6 +1560,91 @@ fn record_recv_accept_channel(
         .accept_channel = Some(accept_channel.clone());
 }
 
+/// Records a sent `open_channel2`, keyed by `temporary_channel_id`, so later
+/// steps can build the funding transaction and commitment from the values
+/// actually put on the wire.
+///
+/// A repeated `temporary_channel_id` starts a fresh negotiation, discarding the
+/// previous one: unlike v1 there is no `funding_created` marking the point of no
+/// return, and the id only has to stay unique until `accept_channel2` arrives.
+fn record_send_open_channel2(
+    negotiations: &mut HashMap<ChannelId, PendingChannelV2>,
+    open_channel2: &OpenChannel2,
+) {
+    negotiations.insert(
+        open_channel2.temporary_channel_id,
+        PendingChannelV2 {
+            open_channel2: open_channel2.clone(),
+            accept_channel2: None,
+            channel_id: None,
+        },
+    );
+}
+
+/// Pairs a received `accept_channel2` with the recorded `open_channel2` of the
+/// same `temporary_channel_id`, and derives the v2 `channel_id` that every
+/// subsequent message carries.
+///
+/// An `accept_channel2` for an unknown `temporary_channel_id` is ignored rather
+/// than fatal: a mutated program may have dropped the `open_channel2` that
+/// would have recorded it, and the message still decodes fine.
+fn record_recv_accept_channel2(
+    negotiations: &mut HashMap<ChannelId, PendingChannelV2>,
+    v2_channel_ids: &mut HashMap<ChannelId, ChannelId>,
+    accept_channel2: &AcceptChannel2,
+) {
+    let temporary_channel_id = accept_channel2.temporary_channel_id;
+    let Some(pending) = negotiations.get_mut(&temporary_channel_id) else {
+        log::debug!(
+            "accept_channel2 for unknown temporary_channel_id {temporary_channel_id}, ignoring",
+        );
+        return;
+    };
+
+    let channel_id = ChannelId::v2_from_revocation_basepoints(
+        &pending.open_channel2.revocation_basepoint,
+        &accept_channel2.revocation_basepoint,
+    );
+    pending.accept_channel2 = Some(accept_channel2.clone());
+    pending.channel_id = Some(channel_id);
+    v2_channel_ids.insert(channel_id, temporary_channel_id);
+}
+
+/// Extracts a field from a parsed `accept_channel2` message.
+fn extract_field_v2(ac: &AcceptChannel2, field: AcceptChannel2Field) -> Variable {
+    match field {
+        AcceptChannel2Field::TemporaryChannelId => Variable::ChannelId(ac.temporary_channel_id),
+        AcceptChannel2Field::FundingSatoshis => Variable::Amount(ac.funding_satoshis),
+        AcceptChannel2Field::DustLimitSatoshis => Variable::Amount(ac.dust_limit_satoshis),
+        AcceptChannel2Field::MaxHtlcValueInFlightMsat => {
+            Variable::Amount(ac.max_htlc_value_in_flight_msat)
+        }
+        AcceptChannel2Field::HtlcMinimumMsat => Variable::Amount(ac.htlc_minimum_msat),
+        AcceptChannel2Field::MinimumDepth => Variable::BlockHeight(ac.minimum_depth),
+        AcceptChannel2Field::ToSelfDelay => Variable::U16(ac.to_self_delay),
+        AcceptChannel2Field::MaxAcceptedHtlcs => Variable::U16(ac.max_accepted_htlcs),
+        AcceptChannel2Field::FundingPubkey => Variable::Point(ac.funding_pubkey),
+        AcceptChannel2Field::RevocationBasepoint => Variable::Point(ac.revocation_basepoint),
+        AcceptChannel2Field::PaymentBasepoint => Variable::Point(ac.payment_basepoint),
+        AcceptChannel2Field::DelayedPaymentBasepoint => {
+            Variable::Point(ac.delayed_payment_basepoint)
+        }
+        AcceptChannel2Field::HtlcBasepoint => Variable::Point(ac.htlc_basepoint),
+        AcceptChannel2Field::FirstPerCommitmentPoint => {
+            Variable::Point(ac.first_per_commitment_point)
+        }
+        AcceptChannel2Field::SecondPerCommitmentPoint => {
+            Variable::Point(ac.second_per_commitment_point)
+        }
+        AcceptChannel2Field::UpfrontShutdownScript => {
+            Variable::Bytes(ac.tlvs.upfront_shutdown_script.clone().unwrap_or_default())
+        }
+        AcceptChannel2Field::ChannelType => {
+            Variable::Features(ac.tlvs.channel_type.clone().unwrap_or_default())
+        }
+    }
+}
+
 /// Extracts a field from a parsed `accept_channel` message.
 fn extract_field(ac: &AcceptChannel, field: AcceptChannelField) -> Variable {
     match field {
@@ -1449,9 +1694,9 @@ mod tests {
     use super::*;
     use bitcoin::secp256k1::{Secp256k1, SecretKey};
     use bitcoin::{Amount, Transaction};
-    use smite::bolt::{AcceptChannelTlvs, GossipTimestampFilter, Init, Ping};
+    use smite::bolt::{AcceptChannel2Tlvs, AcceptChannelTlvs, GossipTimestampFilter, Init, Ping};
     use smite_ir::Instruction;
-    use smite_ir::operation::ShutdownScriptVariant;
+    use smite_ir::operation::{ChannelTypeVariant, ShutdownScriptVariant};
 
     // -- MockConnection --
 
@@ -1559,6 +1804,14 @@ mod tests {
     }
 
     // -- Helpers --
+
+    /// Builds a private key with a single distinguishing byte, so
+    /// `sample_pubkey(b)` is the point it derives.
+    fn key(byte: u8) -> [u8; 32] {
+        let mut k = [0u8; 32];
+        k[31] = byte;
+        k
+    }
 
     fn sample_pubkey(byte: u8) -> PublicKey {
         let secp = Secp256k1::new();
@@ -4206,6 +4459,455 @@ mod tests {
         assert_eq!(
             extract_field(&ac, AcceptChannelField::ChannelType),
             Variable::Features(vec![])
+        );
+    }
+
+    // -- Channel establishment v2 --
+
+    fn sample_accept_channel2(temporary_channel_id: ChannelId) -> AcceptChannel2 {
+        AcceptChannel2 {
+            temporary_channel_id,
+            // The acceptor contributes nothing, the common case for CLN and
+            // Eclair when they are not configured to provide liquidity.
+            funding_satoshis: 0,
+            dust_limit_satoshis: 546,
+            max_htlc_value_in_flight_msat: 100_000_000,
+            htlc_minimum_msat: 1_000,
+            minimum_depth: 6,
+            to_self_delay: 144,
+            max_accepted_htlcs: 483,
+            funding_pubkey: sample_pubkey(11),
+            revocation_basepoint: sample_pubkey(12),
+            payment_basepoint: sample_pubkey(13),
+            delayed_payment_basepoint: sample_pubkey(14),
+            htlc_basepoint: sample_pubkey(15),
+            first_per_commitment_point: sample_pubkey(16),
+            second_per_commitment_point: sample_pubkey(17),
+            tlvs: AcceptChannel2Tlvs {
+                upfront_shutdown_script: Some(vec![0xde, 0xad]),
+                channel_type: Some(vec![0x00, 0x40, 0x10, 0x00]),
+                require_confirmed_inputs: false,
+            },
+        }
+    }
+
+    /// Our `revocation_basepoint`, and hence the `temporary_channel_id` that
+    /// `open_channel2_instructions` derives from it.
+    fn sample_v2_revocation_basepoint() -> PublicKey {
+        sample_pubkey(3)
+    }
+
+    fn sample_v2_temporary_channel_id() -> ChannelId {
+        ChannelId::v2_temporary_from_revocation_basepoint(&sample_v2_revocation_basepoint())
+    }
+
+    /// Builds the 21 `open_channel2` input instructions in wire order, deriving
+    /// the `temporary_channel_id` from our revocation basepoint as BOLT 2
+    /// requires. Instruction 21 is `DeriveTemporaryChannelIdV2`.
+    fn open_channel2_instructions() -> Vec<Instruction> {
+        let load = |op: Operation| Instruction {
+            operation: op,
+            inputs: vec![],
+        };
+        let derive = |sk_idx: usize| Instruction {
+            operation: Operation::DerivePoint,
+            inputs: vec![sk_idx],
+        };
+        vec![
+            load(Operation::LoadChainHashFromContext), // v0  chain_hash
+            load(Operation::LoadFeeratePerKw(253)),    // v1  funding_feerate_perkw
+            load(Operation::LoadFeeratePerKw(2500)),   // v2  commitment_feerate_perkw
+            load(Operation::LoadAmount(200_000)),      // v3  funding_satoshis
+            load(Operation::LoadAmount(546)),          // v4  dust_limit_satoshis
+            load(Operation::LoadAmount(100_000_000)),  // v5  max_htlc_value_in_flight_msat
+            load(Operation::LoadAmount(1_000)),        // v6  htlc_minimum_msat
+            load(Operation::LoadU16(144)),             // v7  to_self_delay
+            load(Operation::LoadU16(483)),             // v8  max_accepted_htlcs
+            load(Operation::LoadBlockHeight(120)),     // v9  locktime
+            load(Operation::LoadPrivateKey(key(1))),   // v10
+            derive(10),                                // v11 funding_pubkey
+            load(Operation::LoadPrivateKey(key(3))),   // v12
+            derive(12),                                // v13 revocation_basepoint
+            load(Operation::LoadPrivateKey(key(4))),   // v14
+            derive(14),                                // v15 payment_basepoint
+            load(Operation::LoadPrivateKey(key(5))),   // v16
+            derive(16),                                // v17 delayed_payment_basepoint
+            load(Operation::LoadPrivateKey(key(6))),   // v18
+            derive(18),                                // v19 htlc_basepoint
+            load(Operation::LoadPrivateKey(key(7))),   // v20
+            derive(20),                                // v21 first_per_commitment_point
+            load(Operation::LoadPrivateKey(key(8))),   // v22
+            derive(22),                                // v23 second_per_commitment_point
+            load(Operation::LoadU8(0)),                // v24 channel_flags
+            load(Operation::LoadBytes(vec![])),        // v25 upfront_shutdown_script
+            load(Operation::LoadChannelType(ChannelTypeVariant::Anchors)), // v26 channel_type
+            Instruction {
+                operation: Operation::DeriveTemporaryChannelIdV2,
+                inputs: vec![13],
+            }, // v27 temporary_channel_id
+        ]
+    }
+
+    /// Indices into [`open_channel2_instructions`], in `BuildOpenChannel2`
+    /// wire order.
+    const OPEN_CHANNEL2_INPUTS: [usize; 21] = [
+        0,  // chain_hash
+        27, // temporary_channel_id
+        1,  // funding_feerate_perkw
+        2,  // commitment_feerate_perkw
+        3,  // funding_satoshis
+        4,  // dust_limit_satoshis
+        5,  // max_htlc_value_in_flight_msat
+        6,  // htlc_minimum_msat
+        7,  // to_self_delay
+        8,  // max_accepted_htlcs
+        9,  // locktime
+        11, // funding_pubkey
+        13, // revocation_basepoint
+        15, // payment_basepoint
+        17, // delayed_payment_basepoint
+        19, // htlc_basepoint
+        21, // first_per_commitment_point
+        23, // second_per_commitment_point
+        24, // channel_flags
+        25, // upfront_shutdown_script
+        26, // channel_type
+    ];
+
+    fn decode_open_channel2(bytes: &[u8]) -> OpenChannel2 {
+        match Message::decode(bytes).expect("valid open_channel2") {
+            Message::OpenChannel2(oc) => oc,
+            other => panic!("expected open_channel2, got {other}"),
+        }
+    }
+
+    /// Emits the full `open_channel2` / `accept_channel2` exchange. The
+    /// `AcceptChannel2` compound lands at the returned instruction index.
+    fn send_open_channel2_instructions() -> (Vec<Instruction>, usize) {
+        let mut instructions = open_channel2_instructions();
+        instructions.push(Instruction {
+            operation: Operation::BuildOpenChannel2 {
+                require_confirmed_inputs: false,
+            },
+            inputs: OPEN_CHANNEL2_INPUTS.to_vec(),
+        }); // v28
+        instructions.push(Instruction {
+            operation: Operation::SendOpenChannel2,
+            inputs: vec![28],
+        }); // v29
+        instructions.push(Instruction {
+            operation: Operation::RecvAcceptChannel2,
+            inputs: vec![29],
+        }); // v30
+        (instructions, 30)
+    }
+
+    #[test]
+    fn execute_build_and_send_open_channel2() {
+        let mut instructions = open_channel2_instructions();
+        instructions.push(Instruction {
+            operation: Operation::BuildOpenChannel2 {
+                require_confirmed_inputs: true,
+            },
+            inputs: OPEN_CHANNEL2_INPUTS.to_vec(),
+        });
+        instructions.push(Instruction {
+            operation: Operation::SendOpenChannel2,
+            inputs: vec![28],
+        });
+        let mut executor = Executor::new(
+            MockConnection::new(),
+            MockBitcoinCli::default(),
+            sample_context(),
+        );
+
+        executor
+            .execute(&Program { instructions }, std::time::Instant::now())
+            .expect("program executes");
+
+        assert_eq!(executor.conn.sent.len(), 1);
+        let sent = decode_open_channel2(&executor.conn.sent[0]);
+        assert_eq!(sent.temporary_channel_id, sample_v2_temporary_channel_id());
+        assert_eq!(sent.funding_feerate_perkw, 253);
+        assert_eq!(sent.commitment_feerate_perkw, 2500);
+        assert_eq!(sent.funding_satoshis, 200_000);
+        assert_eq!(sent.locktime, 120);
+        assert_eq!(sent.revocation_basepoint, sample_v2_revocation_basepoint());
+        assert_eq!(sent.second_per_commitment_point, sample_pubkey(8));
+        assert!(sent.tlvs.require_confirmed_inputs);
+        assert_eq!(
+            sent.tlvs.channel_type,
+            Some(ChannelTypeVariant::Anchors.encode()),
+        );
+        // A zero-length upfront_shutdown_script is the BOLT 2 opt-out signal,
+        // so the TLV is sent rather than omitted.
+        assert_eq!(sent.tlvs.upfront_shutdown_script, Some(vec![]));
+
+        // The negotiation is recorded so later steps can build from what we
+        // actually put on the wire.
+        let pending = executor
+            .negotiations_v2
+            .get(&sample_v2_temporary_channel_id())
+            .expect("negotiation recorded");
+        assert_eq!(pending.open_channel2, sent);
+        assert!(pending.accept_channel2.is_none());
+        assert!(pending.channel_id.is_none());
+    }
+
+    #[test]
+    fn execute_build_open_channel2_omits_an_empty_channel_type() {
+        let mut instructions = open_channel2_instructions();
+        // Replace the channel type with an empty feature vector.
+        instructions[26] = Instruction {
+            operation: Operation::LoadFeatures(vec![]),
+            inputs: vec![],
+        };
+        instructions.push(Instruction {
+            operation: Operation::BuildOpenChannel2 {
+                require_confirmed_inputs: false,
+            },
+            inputs: OPEN_CHANNEL2_INPUTS.to_vec(),
+        });
+        instructions.push(Instruction {
+            operation: Operation::SendOpenChannel2,
+            inputs: vec![28],
+        });
+        let mut executor = Executor::new(
+            MockConnection::new(),
+            MockBitcoinCli::default(),
+            sample_context(),
+        );
+
+        executor
+            .execute(&Program { instructions }, std::time::Instant::now())
+            .expect("program executes");
+
+        // BOLT 2 requires open_channel2 to set channel_type, so omitting it
+        // must stay reachable for fuzzing the receiver's rejection path.
+        assert_eq!(
+            decode_open_channel2(&executor.conn.sent[0])
+                .tlvs
+                .channel_type,
+            None
+        );
+    }
+
+    #[test]
+    fn execute_recv_accept_channel2_records_the_v2_channel_id() {
+        let (instructions, _) = send_open_channel2_instructions();
+        let accept = sample_accept_channel2(sample_v2_temporary_channel_id());
+        let mut conn = MockConnection::new();
+        conn.queue_recv(Message::AcceptChannel2(accept.clone()).encode());
+        let mut executor = Executor::new(conn, MockBitcoinCli::default(), sample_context());
+
+        executor
+            .execute(&Program { instructions }, std::time::Instant::now())
+            .expect("program executes");
+
+        let expected_channel_id = ChannelId::v2_from_revocation_basepoints(
+            &sample_v2_revocation_basepoint(),
+            &accept.revocation_basepoint,
+        );
+        let pending = executor
+            .negotiations_v2
+            .get(&sample_v2_temporary_channel_id())
+            .expect("negotiation recorded");
+        assert_eq!(pending.accept_channel2.as_ref(), Some(&accept));
+        assert_eq!(pending.channel_id, Some(expected_channel_id));
+        // The alias lets later messages, which carry the v2 channel_id, find
+        // the negotiation keyed by its temporary_channel_id.
+        assert_eq!(
+            executor.v2_channel_ids.get(&expected_channel_id),
+            Some(&sample_v2_temporary_channel_id()),
+        );
+    }
+
+    #[test]
+    fn execute_recv_accept_channel2_unknown_temporary_channel_id_is_ignored() {
+        let (instructions, _) = send_open_channel2_instructions();
+        // An accept_channel2 answering a temporary_channel_id we never opened,
+        // as a mutated program that dropped its open_channel2 would see.
+        let accept = sample_accept_channel2(ChannelId::new([0x77; 32]));
+        let mut conn = MockConnection::new();
+        conn.queue_recv(Message::AcceptChannel2(accept).encode());
+        let mut executor = Executor::new(conn, MockBitcoinCli::default(), sample_context());
+
+        executor
+            .execute(&Program { instructions }, std::time::Instant::now())
+            .expect("program executes without reporting a violation");
+
+        // The unknown negotiation is not invented, and the one we did open is
+        // left untouched.
+        assert!(executor.v2_channel_ids.is_empty());
+        let pending = executor
+            .negotiations_v2
+            .get(&sample_v2_temporary_channel_id())
+            .expect("our own negotiation is still recorded");
+        assert!(pending.accept_channel2.is_none());
+    }
+
+    #[test]
+    fn execute_recv_accept_channel2_unexpected_message() {
+        let (instructions, _) = send_open_channel2_instructions();
+        let mut conn = MockConnection::new();
+        conn.queue_recv(Message::AcceptChannel(sample_accept_channel()).encode());
+        let mut executor = Executor::new(conn, MockBitcoinCli::default(), sample_context());
+
+        let err = executor
+            .execute(&Program { instructions }, std::time::Instant::now())
+            .expect_err("v1 accept_channel does not answer an open_channel2");
+
+        assert!(
+            matches!(
+                err,
+                ExecuteError::UnexpectedMessage {
+                    expected: MessageType::ACCEPT_CHANNEL2,
+                    ..
+                }
+            ),
+            "unexpected error: {err}",
+        );
+    }
+
+    #[test]
+    fn execute_extract_all_accept_channel2_fields() {
+        let (mut instructions, accept_idx) = send_open_channel2_instructions();
+        for &field in AcceptChannel2Field::ALL {
+            instructions.push(Instruction {
+                operation: Operation::ExtractAcceptChannel2(field),
+                inputs: vec![accept_idx],
+            });
+        }
+        let accept = sample_accept_channel2(sample_v2_temporary_channel_id());
+        let mut conn = MockConnection::new();
+        conn.queue_recv(Message::AcceptChannel2(accept.clone()).encode());
+        let mut executor = Executor::new(conn, MockBitcoinCli::default(), sample_context());
+
+        executor
+            .execute(&Program { instructions }, std::time::Instant::now())
+            .expect("program executes");
+
+        // Every field extracts, and each one produces the type it declares.
+        for &field in AcceptChannel2Field::ALL {
+            let extracted = extract_field_v2(&accept, field);
+            assert_eq!(
+                extracted.var_type(),
+                field.output_type(),
+                "{field} produced the wrong variable type",
+            );
+        }
+        assert_eq!(
+            extract_field_v2(&accept, AcceptChannel2Field::FundingSatoshis),
+            Variable::Amount(0),
+        );
+        assert_eq!(
+            extract_field_v2(&accept, AcceptChannel2Field::SecondPerCommitmentPoint),
+            Variable::Point(sample_pubkey(17)),
+        );
+        assert_eq!(
+            extract_field_v2(&accept, AcceptChannel2Field::MinimumDepth),
+            Variable::BlockHeight(6),
+        );
+    }
+
+    #[test]
+    fn execute_derive_channel_id_v2_feeds_the_channel_id_on_the_wire() {
+        // Runtime variables do not outlive execution, so observe
+        // DeriveChannelIdV2 through the only field that carries a ChannelId
+        // here: open_channel2's temporary_channel_id.
+        let mut instructions = open_channel2_instructions();
+        instructions.push(Instruction {
+            operation: Operation::LoadPrivateKey(key(12)),
+            inputs: vec![],
+        }); // v28
+        instructions.push(Instruction {
+            operation: Operation::DerivePoint,
+            inputs: vec![28],
+        }); // v29 the peer's revocation basepoint
+        instructions.push(Instruction {
+            operation: Operation::DeriveChannelIdV2,
+            inputs: vec![13, 29],
+        }); // v30
+        let mut inputs = OPEN_CHANNEL2_INPUTS.to_vec();
+        inputs[1] = 30;
+        instructions.push(Instruction {
+            operation: Operation::BuildOpenChannel2 {
+                require_confirmed_inputs: false,
+            },
+            inputs,
+        }); // v31
+        instructions.push(Instruction {
+            operation: Operation::SendOpenChannel2,
+            inputs: vec![31],
+        });
+        let mut executor = Executor::new(
+            MockConnection::new(),
+            MockBitcoinCli::default(),
+            sample_context(),
+        );
+
+        executor
+            .execute(&Program { instructions }, std::time::Instant::now())
+            .expect("program executes");
+
+        let sent = decode_open_channel2(&executor.conn.sent[0]);
+        assert_eq!(
+            sent.temporary_channel_id,
+            ChannelId::v2_from_revocation_basepoints(
+                &sample_v2_revocation_basepoint(),
+                &sample_pubkey(12),
+            ),
+        );
+        // Both basepoints are mixed in, so this is not the temporary id.
+        assert_ne!(sent.temporary_channel_id, sample_v2_temporary_channel_id());
+    }
+
+    #[test]
+    fn execute_send_open_channel2_wrong_type_panics() {
+        let instructions = vec![
+            Instruction {
+                operation: Operation::LoadAmount(1),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::SendOpenChannel2,
+                inputs: vec![0],
+            },
+        ];
+        let mut executor = Executor::new(
+            MockConnection::new(),
+            MockBitcoinCli::default(),
+            sample_context(),
+        );
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            executor.execute(&Program { instructions }, std::time::Instant::now())
+        }));
+
+        assert!(result.is_err(), "expected a panic on the type mismatch");
+    }
+
+    #[test]
+    fn execute_recv_accept_channel2_affine_overuse_panics() {
+        let (mut instructions, _) = send_open_channel2_instructions();
+        // Receive twice against a single SendOpenChannel2.
+        instructions.push(Instruction {
+            operation: Operation::RecvAcceptChannel2,
+            inputs: vec![29],
+        });
+        let accept = sample_accept_channel2(sample_v2_temporary_channel_id());
+        let mut conn = MockConnection::new();
+        conn.queue_recv(Message::AcceptChannel2(accept.clone()).encode());
+        conn.queue_recv(Message::AcceptChannel2(accept).encode());
+        let mut executor = Executor::new(conn, MockBitcoinCli::default(), sample_context());
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            executor.execute(&Program { instructions }, std::time::Instant::now())
+        }));
+
+        assert!(
+            result.is_err(),
+            "expected a panic consuming SentOpenChannel2 twice"
         );
     }
 }

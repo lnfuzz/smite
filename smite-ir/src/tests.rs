@@ -15,7 +15,9 @@ use mutators::{
     GeneratorInsertionMutator, InputSwapMutator, InstructionDeleteMutator,
     InstructionReorderMutator, OperationParamMutator,
 };
-use operation::{AcceptChannelField, ChannelTypeVariant, ShutdownScriptVariant};
+use operation::{
+    AcceptChannel2Field, AcceptChannelField, ChannelTypeVariant, ShutdownScriptVariant,
+};
 
 /// Helper to build a private key with a single distinguishing byte.
 fn key(byte: u8) -> [u8; 32] {
@@ -870,6 +872,58 @@ fn accept_channel_field_all_is_complete() {
         AcceptChannelField::ALL.len(),
         variant_count(AcceptChannelField::ALL[0]),
     );
+}
+
+// Ensure AcceptChannel2Field and AcceptChannel2Field::ALL stay in sync. The
+// exhaustive match in this test will fail to compile if a variant is added
+// without updating it, and the assertion will fail if the match is updated
+// without updating AcceptChannel2Field::ALL.
+#[test]
+fn accept_channel2_field_all_is_complete() {
+    let variant_count = |f: AcceptChannel2Field| -> usize {
+        match f {
+            AcceptChannel2Field::TemporaryChannelId
+            | AcceptChannel2Field::FundingSatoshis
+            | AcceptChannel2Field::DustLimitSatoshis
+            | AcceptChannel2Field::MaxHtlcValueInFlightMsat
+            | AcceptChannel2Field::HtlcMinimumMsat
+            | AcceptChannel2Field::MinimumDepth
+            | AcceptChannel2Field::ToSelfDelay
+            | AcceptChannel2Field::MaxAcceptedHtlcs
+            | AcceptChannel2Field::FundingPubkey
+            | AcceptChannel2Field::RevocationBasepoint
+            | AcceptChannel2Field::PaymentBasepoint
+            | AcceptChannel2Field::DelayedPaymentBasepoint
+            | AcceptChannel2Field::HtlcBasepoint
+            | AcceptChannel2Field::FirstPerCommitmentPoint
+            | AcceptChannel2Field::SecondPerCommitmentPoint
+            | AcceptChannel2Field::UpfrontShutdownScript
+            | AcceptChannel2Field::ChannelType => 17,
+        }
+    };
+    assert_eq!(
+        AcceptChannel2Field::ALL.len(),
+        variant_count(AcceptChannel2Field::ALL[0]),
+    );
+}
+
+// Every `RecvAcceptChannel2` field extractor must be registered so the builder
+// can reach it, and each must declare the type it actually produces.
+#[test]
+fn recv_accept_channel2_exposes_every_field() {
+    let extractable = Operation::RecvAcceptChannel2.extractable_fields();
+
+    assert_eq!(extractable.len(), AcceptChannel2Field::ALL.len());
+    for (operation, output_type) in extractable {
+        let Operation::ExtractAcceptChannel2(field) = operation else {
+            panic!("expected an ExtractAcceptChannel2 operation, got {operation:?}");
+        };
+        assert_eq!(field.output_type(), output_type);
+        assert_eq!(
+            Operation::ExtractAcceptChannel2(field).input_types(),
+            vec![VariableType::AcceptChannel2],
+        );
+    }
 }
 
 // Ensure AnyGenerator and AnyGenerator::ALL stay in sync. The exhaustive

@@ -222,11 +222,20 @@ impl ProgramBuilder {
             VariableType::AcceptChannel => {
                 panic!("cannot generate fresh AcceptChannel: requires protocol interaction")
             }
+            VariableType::OpenChannel2Message => {
+                panic!("cannot generate fresh OpenChannel2Message: requires composed inputs")
+            }
+            VariableType::AcceptChannel2 => {
+                panic!("cannot generate fresh AcceptChannel2: requires protocol interaction")
+            }
             VariableType::FundingTransaction => {
                 panic!("cannot generate fresh FundingTransaction: requires composed inputs")
             }
             VariableType::SentOpenChannel => {
                 panic!("cannot generate fresh SentOpenChannel: affine type")
+            }
+            VariableType::SentOpenChannel2 => {
+                panic!("cannot generate fresh SentOpenChannel2: affine type")
             }
             VariableType::SentFundingCreated => {
                 panic!("cannot generate fresh SentFundingCreated: affine type")
