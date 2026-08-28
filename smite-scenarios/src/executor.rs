@@ -732,7 +732,7 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                         {
                             pending.shared_tx.remove_input(*serial_id);
                         }
-                        pending.tx_negotiation.sent_tx_complete = false;
+                        pending.tx_negotiation.expect_reply();
                     }
                     let encoded = Message::TxRemoveInput(TxRemoveInput {
                         channel_id,
@@ -761,7 +761,7 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                         {
                             pending.shared_tx.remove_output(*serial_id);
                         }
-                        pending.tx_negotiation.sent_tx_complete = false;
+                        pending.tx_negotiation.expect_reply();
                     }
                     let encoded = Message::TxRemoveOutput(TxRemoveOutput {
                         channel_id,
@@ -783,7 +783,12 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                         &self.v2_channel_ids,
                         channel_id,
                     ) {
-                        pending.tx_negotiation.sent_tx_complete = true;
+                        // Two consecutive `tx_complete`s conclude the exchange.
+                        // If the peer's last message was one, ours ends it and
+                        // earns no reply; otherwise the peer still answers.
+                        if !pending.tx_negotiation.peer_sent_tx_complete {
+                            pending.tx_negotiation.expect_reply();
+                        }
                     }
                     let encoded = Message::TxComplete(TxComplete { channel_id }).encode();
                     log::debug!("[{:?}] SendTxComplete", start.elapsed());
@@ -1408,7 +1413,7 @@ fn build_tx_add_input(
             });
         }
         pending.shared_tx.add_input(serial_id, input);
-        pending.tx_negotiation.sent_tx_complete = false;
+        pending.tx_negotiation.expect_reply();
     }
 
     TxAddInput {
@@ -1486,7 +1491,7 @@ fn build_tx_add_output(
                 contributor: Contributor::Local,
             },
         );
-        pending.tx_negotiation.sent_tx_complete = false;
+        pending.tx_negotiation.expect_reply();
     }
 
     TxAddOutput {
@@ -1529,6 +1534,7 @@ fn apply_interactive_tx(
         return Ok(());
     };
 
+    pending.tx_negotiation.reply_received();
     // Only two consecutive `tx_complete`s conclude the negotiation, so any
     // other message from the peer clears its half of that pair.
     pending.tx_negotiation.peer_sent_tx_complete = matches!(msg, Message::TxComplete(_));
@@ -1800,10 +1806,15 @@ fn verify_commitment_signed(
 /// Returns whether the peer owes us a reply in the interactive transaction
 /// exchange.
 ///
-/// The exchange is turn-based, so a reply is owed for every message we send
-/// until it concludes on two consecutive `tx_complete`s. Once it has, the peer
-/// moves straight on to `commitment_signed`; reading here would consume that
-/// message and leave every later operation reading one message behind.
+/// The exchange is turn-based, so the peer answers every message we send until
+/// the one that concludes it on two consecutive `tx_complete`s. Reading when
+/// nothing is owed would consume whatever the peer moved on to, usually its
+/// `commitment_signed`, and leave every later operation a message behind.
+///
+/// This counts what is owed rather than asking whether the exchange concluded.
+/// A mutator that drops one receive leaves the program permanently short of a
+/// reply, and the count lets the next receive settle the backlog instead of
+/// stranding it.
 ///
 /// A negotiation we do not track still reads. A mutated program may have sent
 /// on a channel we never opened, and the peer's rejection of it is worth
@@ -1813,8 +1824,9 @@ fn is_interactive_tx_expected(
     v2_channel_ids: &HashMap<ChannelId, ChannelId>,
     channel_id: ChannelId,
 ) -> bool {
-    negotiation_v2(negotiations, v2_channel_ids, channel_id)
-        .is_none_or(|pending| !pending.tx_negotiation_complete() && !pending.tx_negotiation.aborted)
+    negotiation_v2(negotiations, v2_channel_ids, channel_id).is_none_or(|pending| {
+        !pending.tx_negotiation.aborted && pending.tx_negotiation.outstanding_replies > 0
+    })
 }
 
 /// Returns whether the peer owes us a `tx_signatures` for this negotiation.
@@ -6322,9 +6334,9 @@ mod tests {
         assert_eq!(input.value(), 100_000_000);
         // A contribution is not a tx_complete, so the negotiation has not
         // concluded even though we sent ours.
-        assert!(pending.tx_negotiation.sent_tx_complete);
+        // The peer answered with a contribution, not a tx_complete, so our
+        // own tx_complete does not yet conclude the exchange.
         assert!(!pending.tx_negotiation.peer_sent_tx_complete);
-        assert!(!pending.tx_negotiation_complete());
     }
 
     #[test]
@@ -6363,7 +6375,11 @@ mod tests {
             .execute(&Program { instructions }, std::time::Instant::now())
             .expect("program executes");
 
-        assert!(sole_negotiation(&executor).tx_negotiation_complete());
+        let pending = sole_negotiation(&executor);
+        assert!(pending.tx_negotiation.peer_sent_tx_complete);
+        // Ours followed the peer's, so the exchange concluded and nothing
+        // further is owed.
+        assert_eq!(pending.tx_negotiation.outstanding_replies, 0);
     }
 
     #[test]
@@ -7418,10 +7434,117 @@ mod tests {
             .execute(&Program { instructions }, std::time::Instant::now())
             .expect("program executes");
 
-        assert!(sole_negotiation(&executor).tx_negotiation_complete());
+        assert_eq!(
+            sole_negotiation(&executor)
+                .tx_negotiation
+                .outstanding_replies,
+            0,
+        );
         // The commitment_signed is still queued for whoever asks for it next.
         // Consuming it here would leave every later operation one message
         // behind, and the program would fail on a message it never expected.
+        assert_eq!(executor.conn.recv_queue.len(), 1);
+        assert_eq!(
+            Message::decode(&executor.conn.recv_queue[0])
+                .expect("valid")
+                .msg_type(),
+            MessageType::COMMITMENT_SIGNED,
+        );
+    }
+
+    #[test]
+    fn execute_recv_interactive_tx_settles_a_backlog_left_by_a_dropped_receive() {
+        // A mutated program: the first tx_add_input has no paired receive, so
+        // every later receive is answering an earlier message. The peer still
+        // replies to all five contributions and stays silent after the
+        // tx_complete that concludes the exchange, leaving one reply owed.
+        let channel_id = v2_channel_id();
+        let (mut instructions, _) = send_open_channel2_instructions();
+        instructions.push(Instruction {
+            operation: Operation::ExtractAcceptChannel2(AcceptChannel2Field::RevocationBasepoint),
+            inputs: vec![30],
+        }); // v31
+        instructions.push(Instruction {
+            operation: Operation::DeriveChannelIdV2,
+            inputs: vec![13, 31],
+        }); // v32
+
+        let sends = [
+            Operation::SendTxAddInput {
+                serial_id: 2,
+                utxo_index: 0,
+                sequence: 0xffff_fffd,
+            },
+            Operation::SendTxAddInput {
+                serial_id: 4,
+                utxo_index: 1,
+                sequence: 0xffff_fffd,
+            },
+            Operation::SendTxAddOutput {
+                serial_id: 2000,
+                role: TxOutputRole::Funding,
+            },
+            Operation::SendTxAddOutput {
+                serial_id: 2002,
+                role: TxOutputRole::Change,
+            },
+            Operation::SendTxComplete,
+        ];
+        for (i, send) in sends.into_iter().enumerate() {
+            let needs_values = matches!(send, Operation::SendTxAddOutput { .. });
+            instructions.push(Instruction {
+                operation: send,
+                inputs: if needs_values {
+                    vec![32, 3, 25]
+                } else {
+                    vec![32]
+                },
+            });
+            let sent = instructions.len() - 1;
+            // The receive after the first send is the one a mutator dropped.
+            if i > 0 {
+                instructions.push(Instruction {
+                    operation: Operation::RecvInteractiveTx,
+                    inputs: vec![sent],
+                });
+            }
+        }
+        // The receive after our tx_complete, added by the loop above, is the
+        // one that must settle the backlog rather than skip: the exchange has
+        // concluded, but a reply to an earlier message is still owed.
+
+        let mut conn = MockConnection::new();
+        conn.queue_recv(
+            Message::AcceptChannel2(sample_accept_channel2(sample_v2_temporary_channel_id()))
+                .encode(),
+        );
+        // One reply per contribution; none for the concluding tx_complete.
+        for _ in 0..4 {
+            conn.queue_recv(Message::TxComplete(TxComplete { channel_id }).encode());
+        }
+        conn.queue_recv(
+            Message::CommitmentSigned(CommitmentSigned {
+                channel_id,
+                signature: Signature::from_compact(&[0u8; 64]).expect("zero signature"),
+                htlc_signatures: Vec::new(),
+                tlvs: CommitmentSignedTlvs::default(),
+            })
+            .encode(),
+        );
+        let mut executor = Executor::new(conn, sample_v2_wallet(), sample_context());
+
+        executor
+            .execute(&Program { instructions }, std::time::Instant::now())
+            .expect("program executes");
+
+        // Every owed reply was read, so the commitment_signed is still there
+        // for the operation that actually wants it.
+        assert_eq!(
+            sole_negotiation(&executor)
+                .tx_negotiation
+                .outstanding_replies,
+            0,
+        );
         assert_eq!(executor.conn.recv_queue.len(), 1);
         assert_eq!(
             Message::decode(&executor.conn.recv_queue[0])
@@ -7461,8 +7584,9 @@ mod tests {
         );
         let pending = sole_negotiation(&executor);
         assert!(pending.tx_negotiation.peer_sent_tx_complete);
-        // We have not sent ours, so the exchange is not concluded.
-        assert!(!pending.tx_negotiation_complete());
+        // Three contributions went out and one reply came back, so the peer
+        // still owes two and the next receive must not skip either.
+        assert_eq!(pending.tx_negotiation.outstanding_replies, 2);
     }
 
     #[test]
@@ -7499,6 +7623,5 @@ mod tests {
         assert!(pending.tx_negotiation.aborted);
         // An abort is not a tx_complete, so the negotiation has not concluded.
         assert!(!pending.tx_negotiation.peer_sent_tx_complete);
-        assert!(!pending.tx_negotiation_complete());
     }
 }
