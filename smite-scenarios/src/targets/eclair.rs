@@ -92,7 +92,8 @@ impl EclairTarget {
              eclair.bitcoind.rpcpassword=rpcpass\n\
              eclair.bitcoind.rpcport={bitcoind_rpc_port}\n\
              eclair.bitcoind.zmqblock=\"tcp://127.0.0.1:{zmq_block_port}\"\n\
-             eclair.bitcoind.zmqtx=\"tcp://127.0.0.1:{zmq_tx_port}\"\n",
+             eclair.bitcoind.zmqtx=\"tcp://127.0.0.1:{zmq_tx_port}\"\n\
+             eclair.features.option_dual_fund=optional\n",
             eclair_p2p_port = config.eclair_p2p_port,
             eclair_api_port = config.eclair_api_port,
             api_password = API_PASSWORD,

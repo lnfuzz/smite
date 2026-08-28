@@ -104,6 +104,10 @@ impl ClnTarget {
             .arg("--bitcoin-rpcuser=rpcuser")
             .arg("--bitcoin-rpcpassword=rpcpass")
             .arg(format!("--addr=0.0.0.0:{}", config.cln_p2p_port))
+            // Advertise option_dual_fund so the channel establishment v2
+            // scenarios can negotiate it. The v1 scenarios strip the bit from
+            // our own `init`, so enabling it here does not affect them.
+            .arg("--experimental-dual-fund")
             .arg("--log-level=info")
             .arg(format!("--log-file={}/cln.log", cln_dir.display()))
             .stdout(Stdio::null())
