@@ -17,6 +17,13 @@
 //!   bypasses our custom mutators. This was an AFL++ bug fixed upstream in
 //!   commit eddb2701b022351fb34b696ccf923bb856e9d953.
 //!
+//! Optionally:
+//! - `SMITE_IR_GENERATORS=v1|v2|all` -- which generators to draw from. BOLT 2
+//!   makes the two channel establishment flows mutually exclusive on one
+//!   connection, so a campaign against an `ir` scenario wants `v1` and one
+//!   against `ir_v2` wants `v2`; the other flow's programs would only ever be
+//!   rejected. Defaults to `all`, which draws from both.
+//!
 //! # Logging
 //!
 //! Logging is opt-in: [`afl_custom_init`] installs a logger only when
@@ -60,6 +67,24 @@ struct MutatorState {
     /// Sequence of actions taken in the last [`afl_custom_fuzz`] call, used by
     /// [`afl_custom_describe`] to name queue entries.
     last_sequence: Vec<&'static str>,
+    /// Generators this campaign draws from, selected by `SMITE_IR_GENERATORS`.
+    generators: &'static [AnyGenerator],
+}
+
+/// Reads `SMITE_IR_GENERATORS` and returns the generator set it names,
+/// defaulting to all of them.
+fn generators_from_env() -> &'static [AnyGenerator] {
+    match std::env::var("SMITE_IR_GENERATORS").as_deref() {
+        Ok("v1") => AnyGenerator::V1,
+        Ok("v2") => AnyGenerator::V2,
+        Ok("all") | Err(_) => AnyGenerator::ALL,
+        Ok(other) => {
+            eprintln!(
+                "[smite-ir-mutator] WARNING: unknown SMITE_IR_GENERATORS={other:?}, using all",
+            );
+            AnyGenerator::ALL
+        }
+    }
 }
 
 impl MutatorState {
@@ -69,6 +94,7 @@ impl MutatorState {
             out_buf: Vec::new(),
             description: Vec::new(),
             last_sequence: vec!["init"],
+            generators: generators_from_env(),
         }
     }
 
@@ -76,10 +102,10 @@ impl MutatorState {
     /// the registered generators.
     fn generate_fresh(&mut self) -> Program {
         let mut builder = ProgramBuilder::new();
-        AnyGenerator::ALL
+        self.generators
             .iter()
             .choose(&mut self.rng)
-            .expect("AnyGenerator::ALL is non-empty")
+            .expect("the generator set is non-empty")
             .generate(&mut builder, &mut self.rng);
         self.last_sequence.clear();
         self.last_sequence.push("fresh");
@@ -114,10 +140,11 @@ impl MutatorState {
                     "instr-reorder"
                 }
                 4 => {
-                    let generator = *AnyGenerator::ALL
+                    let generator = *self
+                        .generators
                         .iter()
                         .choose(&mut self.rng)
-                        .expect("AnyGenerator::ALL is non-empty");
+                        .expect("the generator set is non-empty");
                     let mutator = GeneratorInsertionMutator::new(generator);
                     mutator.mutate(program, &mut self.rng);
                     "gen-insert"

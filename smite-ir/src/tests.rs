@@ -949,6 +949,38 @@ fn any_generator_all_is_complete() {
     assert_eq!(AnyGenerator::ALL.len(), variant_count(AnyGenerator::ALL[0]));
 }
 
+// The per-flow generator sets must draw only from `ALL`, and must not mix the
+// two channel establishment flows: BOLT 2 makes them mutually exclusive on one
+// connection, so a campaign that saw both would waste half its executions on
+// programs the target rejects outright.
+#[test]
+fn per_flow_generator_sets_are_disjoint_subsets() {
+    for (name, set) in [("V1", AnyGenerator::V1), ("V2", AnyGenerator::V2)] {
+        for (i, generator) in set.iter().enumerate() {
+            assert!(
+                AnyGenerator::ALL
+                    .iter()
+                    .any(|g| std::mem::discriminant(g) == std::mem::discriminant(generator)),
+                "{name}[{i}] is not registered in AnyGenerator::ALL",
+            );
+        }
+    }
+
+    let v1_has_v2_flow = AnyGenerator::V1
+        .iter()
+        .any(|g| matches!(g, AnyGenerator::DualFundingFlow(_)));
+    let v2_has_v1_flow = AnyGenerator::V2.iter().any(|g| {
+        matches!(
+            g,
+            AnyGenerator::FundingFlow(_)
+                | AnyGenerator::OpenChannel(_)
+                | AnyGenerator::FundingCreated(_)
+        )
+    });
+    assert!(!v1_has_v2_flow, "V1 draws a dual-funded generator");
+    assert!(!v2_has_v1_flow, "V2 draws a single-funded generator");
+}
+
 // -- ShutdownScriptVariant tests --
 
 // Ensure ShutdownScriptVariant and ShutdownScriptVariant::VARIANT_COUNT stay in

@@ -558,6 +558,14 @@ fn ir_mutator_envs(config: &CampaignConfig) -> Vec<(&'static str, String)> {
     if !config.scenario.starts_with("ir") {
         return Vec::new();
     }
+    // BOLT 2 makes the two channel establishment flows mutually exclusive on
+    // one connection, so draw only from the generators this scenario's target
+    // can act on. The other flow's programs would be rejected outright.
+    let generators = if config.scenario == "ir_v2" {
+        "v2"
+    } else {
+        "v1"
+    };
     vec![
         (
             "AFL_CUSTOM_MUTATOR_LIBRARY",
@@ -565,6 +573,7 @@ fn ir_mutator_envs(config: &CampaignConfig) -> Vec<(&'static str, String)> {
         ),
         ("AFL_CUSTOM_MUTATOR_ONLY", "1".to_string()),
         ("AFL_FRAMESHIFT_DISABLE", "1".to_string()),
+        ("SMITE_IR_GENERATORS", generators.to_string()),
     ]
 }
 
@@ -1019,38 +1028,56 @@ sharedir = "{}"
         assert!(result.join("seed0").exists());
     }
 
-    #[test]
-    fn ir_mutator_envs_sets_vars_for_ir_scenario() {
-        let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("campaign.toml");
+    /// A campaign config for the given IR scenario.
+    fn ir_config(dir: &Path, scenario: &str) -> CampaignConfig {
+        let config_path = dir.join("campaign.toml");
         fs::write(
             &config_path,
             format!(
                 r#"
 target = "lnd"
-scenario = "ir_bytes"
-aflpp_path = "{}"
-smite_dir = "{}"
+scenario = "{scenario}"
+aflpp_path = "{aflpp}"
+smite_dir = "{smite}"
 runners = 1
-output_dir = "{}"
-sharedir = "{}"
+output_dir = "{out}"
+sharedir = "{sharedir}"
 "#,
-                dir.path().display(),
-                dir.path().display(),
-                dir.path().join("out").display(),
-                dir.path().join("nyx").display(),
+                aflpp = dir.display(),
+                smite = dir.display(),
+                out = dir.join("out").display(),
+                sharedir = dir.join("nyx").display(),
             ),
         )
         .unwrap();
-        let config = CampaignConfig::load(&config_path).unwrap();
+        CampaignConfig::load(&config_path).unwrap()
+    }
+
+    #[test]
+    fn ir_mutator_envs_sets_vars_for_ir_scenario() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ir_config(dir.path(), "ir_bytes");
 
         let envs = ir_mutator_envs(&config);
 
-        assert_eq!(envs.len(), 3);
+        assert_eq!(envs.len(), 4);
         assert_eq!(envs[0].0, "AFL_CUSTOM_MUTATOR_LIBRARY");
         assert!(envs[0].1.ends_with("libsmite_ir_mutator.so"));
         assert_eq!(envs[1], ("AFL_CUSTOM_MUTATOR_ONLY", "1".to_string()));
         assert_eq!(envs[2], ("AFL_FRAMESHIFT_DISABLE", "1".to_string()));
+        // The `ir` scenario negotiates no dual funding, so it draws only the
+        // single-funded generators.
+        assert_eq!(envs[3], ("SMITE_IR_GENERATORS", "v1".to_string()));
+    }
+
+    #[test]
+    fn ir_mutator_envs_selects_dual_funded_generators_for_ir_v2() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ir_config(dir.path(), "ir_v2");
+
+        let envs = ir_mutator_envs(&config);
+
+        assert_eq!(envs[3], ("SMITE_IR_GENERATORS", "v2".to_string()));
     }
 
     #[test]
