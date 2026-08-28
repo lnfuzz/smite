@@ -4,6 +4,7 @@
 //! being established, so later steps can build commitments from them.
 
 use crate::bolt::{AcceptChannel, AcceptChannel2, ChannelId, OpenChannel, OpenChannel2};
+use crate::channel_tx::SharedTransaction;
 
 /// Negotiation parameters for a channel being established.
 ///
@@ -29,4 +30,51 @@ pub struct PendingChannelV2 {
     /// The v2 `channel_id`, known once `accept_channel2` reveals the peer's
     /// revocation basepoint.
     pub channel_id: Option<ChannelId>,
+    /// The transaction being built by interactive construction, accumulating
+    /// both peers' contributions.
+    pub shared_tx: SharedTransaction,
+    /// Whether we have sent `tx_complete` since our last contribution.
+    pub sent_tx_complete: bool,
+    /// Whether the peer's most recent message was `tx_complete`. The
+    /// negotiation concludes only on two consecutive `tx_complete`s, so any
+    /// other message from the peer clears this.
+    pub peer_sent_tx_complete: bool,
+    /// Whether either peer has aborted the negotiation.
+    pub aborted: bool,
+}
+
+impl PendingChannelV2 {
+    /// Starts a negotiation from the `open_channel2` we sent, taking the
+    /// shared transaction's `nLockTime` from it.
+    #[must_use]
+    pub fn new(open_channel2: OpenChannel2) -> Self {
+        let shared_tx = SharedTransaction::new(open_channel2.locktime);
+        Self {
+            open_channel2,
+            accept_channel2: None,
+            channel_id: None,
+            shared_tx,
+            sent_tx_complete: false,
+            peer_sent_tx_complete: false,
+            aborted: false,
+        }
+    }
+
+    /// Whether both peers have sent `tx_complete` in succession, concluding
+    /// the negotiation.
+    #[must_use]
+    pub fn tx_negotiation_complete(&self) -> bool {
+        self.sent_tx_complete && self.peer_sent_tx_complete
+    }
+
+    /// Total funding output value: the sum of both peers' contributions, per
+    /// BOLT 2. Saturates rather than overflowing on a mutated amount.
+    #[must_use]
+    pub fn total_funding_satoshis(&self) -> u64 {
+        self.open_channel2.funding_satoshis.saturating_add(
+            self.accept_channel2
+                .as_ref()
+                .map_or(0, |ac| ac.funding_satoshis),
+        )
+    }
 }

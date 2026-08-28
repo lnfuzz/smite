@@ -64,6 +64,10 @@ pub enum Variable {
     SentOpenChannel,
     /// `open_channel2` has been sent, so `accept_channel2` may now be received.
     SentOpenChannel2,
+    /// An interactive transaction construction message has been sent, so the
+    /// peer's reply may now be received. The protocol is turn-based, so each
+    /// send earns exactly one receive.
+    SentInteractiveTx,
     /// `funding_created` has been sent, so `funding_signed` may now be received.
     SentFundingCreated,
     /// `shutdown` has been sent, so the counterparty's `shutdown` may now be
@@ -98,6 +102,7 @@ impl Variable {
             Self::FundingTransaction(_) => VariableType::FundingTransaction,
             Self::SentOpenChannel => VariableType::SentOpenChannel,
             Self::SentOpenChannel2 => VariableType::SentOpenChannel2,
+            Self::SentInteractiveTx => VariableType::SentInteractiveTx,
             Self::SentFundingCreated => VariableType::SentFundingCreated,
             Self::SentShutdown => VariableType::SentShutdown,
         }
@@ -130,6 +135,7 @@ pub enum VariableType {
     FundingTransaction,
     SentOpenChannel,
     SentOpenChannel2,
+    SentInteractiveTx,
     SentFundingCreated,
     SentShutdown,
 }
@@ -140,6 +146,7 @@ impl VariableType {
         match self {
             Self::SentOpenChannel
             | Self::SentOpenChannel2
+            | Self::SentInteractiveTx
             | Self::SentFundingCreated
             | Self::SentShutdown => true,
 

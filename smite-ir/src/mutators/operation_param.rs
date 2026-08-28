@@ -7,6 +7,7 @@ use smite::bolt::{MAX_MESSAGE_SIZE, ShortChannelId};
 use super::Mutator;
 use crate::operation::{
     AcceptChannel2Field, AcceptChannelField, ChannelTypeVariant, ShutdownScriptVariant,
+    TxOutputRole,
 };
 use crate::{Operation, Program};
 
@@ -86,14 +87,7 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         }
         Operation::ExtractAcceptChannel(field) => mutate_accept_channel_field(field, rng),
         Operation::BuildNodeAnnouncement { rgb_color, alias } => {
-            // Randomly mutate rgb_color or alias bytes in place; never change
-            // their lengths (array types prevent it).
-            if rng.random() {
-                mutate_fixed_bytes(rgb_color, rng);
-            } else {
-                mutate_fixed_bytes(alias, rng);
-            }
-            true
+            mutate_node_announcement(rgb_color, alias, rng)
         }
         Operation::SendChannelReady { include_alias } => {
             // Toggle the SCID alias TLV. Flipping always changes the value;
@@ -102,6 +96,19 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
             true
         }
         Operation::ExtractAcceptChannel2(field) => mutate_accept_channel2_field(field, rng),
+        Operation::SendTxAddInput {
+            serial_id,
+            utxo_index,
+            sequence,
+        } => mutate_tx_add_input(serial_id, utxo_index, sequence, rng),
+        Operation::SendTxAddOutput { serial_id, role } => {
+            mutate_tx_add_output(serial_id, role, rng)
+        }
+        Operation::SendTxRemoveInput { serial_id }
+        | Operation::SendTxRemoveOutput { serial_id } => {
+            *serial_id = tweak_serial_id(*serial_id, rng);
+            true
+        }
         Operation::BuildOpenChannel2 {
             require_confirmed_inputs,
         } => {
@@ -132,7 +139,9 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         | Operation::DeriveTemporaryChannelIdV2
         | Operation::DeriveChannelIdV2
         | Operation::SendOpenChannel2
-        | Operation::RecvAcceptChannel2 => {
+        | Operation::RecvAcceptChannel2
+        | Operation::SendTxComplete
+        | Operation::RecvInteractiveTx => {
             unreachable!("is_param_mutable returned true for {op:?}")
         }
     }
@@ -174,6 +183,96 @@ fn tweak_u8(v: u8, rng: &mut impl Rng) -> u8 {
         2 => v.wrapping_sub(rng.random_range(1..=8)),
         _ => interesting_u8(rng),
     }
+}
+
+/// Mutates a `node_announcement`'s colour or alias bytes in place. Their
+/// lengths never change, since both are fixed-size arrays.
+fn mutate_node_announcement(
+    rgb_color: &mut [u8; 3],
+    alias: &mut [u8; 32],
+    rng: &mut impl Rng,
+) -> bool {
+    if rng.random() {
+        mutate_fixed_bytes(rgb_color, rng);
+    } else {
+        mutate_fixed_bytes(alias, rng);
+    }
+    true
+}
+
+// -- Interactive transaction mutations --
+
+/// Mutates one of a `tx_add_input`'s three parameters.
+fn mutate_tx_add_input(
+    serial_id: &mut u64,
+    utxo_index: &mut u8,
+    sequence: &mut u32,
+    rng: &mut impl Rng,
+) -> bool {
+    match rng.random_range(0..3) {
+        0 => *serial_id = tweak_serial_id(*serial_id, rng),
+        1 => *utxo_index = tweak_u8(*utxo_index, rng),
+        _ => *sequence = tweak_sequence(*sequence, rng),
+    }
+    true
+}
+
+/// Mutates a `tx_add_output`'s serial id or its role.
+fn mutate_tx_add_output(serial_id: &mut u64, role: &mut TxOutputRole, rng: &mut impl Rng) -> bool {
+    if rng.random() {
+        *serial_id = tweak_serial_id(*serial_id, rng);
+        true
+    } else {
+        mutate_tx_output_role(role, rng)
+    }
+}
+
+/// Mutates a BOLT 2 interactive transaction `serial_id`.
+///
+/// Parity carries protocol meaning here -- the initiator must use even ids and
+/// the non-initiator odd ones -- so this deliberately splits between keeping
+/// the parity, flipping it to reach the "wrong parity" rejection path, and
+/// small values likely to collide with an id already in the negotiation.
+fn tweak_serial_id(v: u64, rng: &mut impl Rng) -> u64 {
+    match rng.random_range(0..8) {
+        // Keep the parity: still a legal id, a different one.
+        0..=3 => v.wrapping_add(2 * rng.random_range(1..=128)),
+        // Flip the parity, which the receiver must reject.
+        4..=5 => v ^ 1,
+        // Small values, which are the ones likely to already be in use.
+        6 => rng.random_range(0..16),
+        _ => interesting_u64(rng),
+    }
+}
+
+/// Mutates a `tx_add_input` `sequence`.
+///
+/// BOLT 2 caps it at `0xfffffffd` so every input signals replaceability, and
+/// requires the receiver to fail on `0xfffffffe` or `0xffffffff`. Those three
+/// values are the whole boundary, so target them directly rather than relying
+/// on a uniform u32 tweak to stumble onto them.
+fn tweak_sequence(v: u32, rng: &mut impl Rng) -> u32 {
+    match rng.random_range(0..4) {
+        0 => 0xffff_fffd,
+        1 => 0xffff_fffe,
+        2 => 0xffff_ffff,
+        _ => tweak_u32(v, rng),
+    }
+}
+
+/// Swaps a `tx_add_output` to a different role, so a mutation can turn the
+/// funding output into an arbitrary one and vice versa.
+fn mutate_tx_output_role(role: &mut TxOutputRole, rng: &mut impl Rng) -> bool {
+    let Some(new_role) = TxOutputRole::ALL
+        .iter()
+        .copied()
+        .filter(|r| r != role)
+        .choose(rng)
+    else {
+        return false;
+    };
+    *role = new_role;
+    true
 }
 
 // -- Short channel id mutations --
