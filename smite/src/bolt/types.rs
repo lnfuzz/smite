@@ -1,8 +1,9 @@
 //! Fundamental types for BOLT message encoding.
 
 use bitcoin::OutPoint;
-use bitcoin::hashes::Hash;
+use bitcoin::hashes::{Hash, sha256};
 use bitcoin::hex::DisplayHex;
+use bitcoin::secp256k1::PublicKey;
 use std::fmt;
 
 /// Maximum Lightning message size (2-byte length prefix limit).
@@ -63,6 +64,47 @@ impl ChannelId {
         res[30] ^= ((outpoint.vout >> 8) & 0xff) as u8;
         res[31] ^= (outpoint.vout & 0xff) as u8;
         Self(res)
+    }
+
+    /// Creates a _v2_ channel ID from both peers' revocation basepoints.
+    ///
+    /// Per BOLT 2, this is
+    /// `SHA256(lesser-revocation-basepoint || greater-revocation-basepoint)`,
+    /// ordered by the compressed serialization of the two points. Mixing in
+    /// both sides makes the result independent of the funding txid, so it is
+    /// stable across the interactive transaction negotiation.
+    #[must_use]
+    pub fn v2_from_revocation_basepoints(basepoint1: &PublicKey, basepoint2: &PublicKey) -> Self {
+        Self::v2_from_serialized_basepoints(basepoint1.serialize(), basepoint2.serialize())
+    }
+
+    /// Creates a _v2_ `temporary_channel_id` from the opener's revocation
+    /// basepoint.
+    ///
+    /// When `open_channel2` is sent the peer's revocation basepoint is not yet
+    /// known, so BOLT 2 requires a zeroed basepoint to stand in for the
+    /// non-initiator. An all-zero point sorts lexicographically below every
+    /// valid compressed public key, so it is always the first half of the
+    /// digest.
+    #[must_use]
+    pub fn v2_temporary_from_revocation_basepoint(opener_basepoint: &PublicKey) -> Self {
+        Self::v2_from_serialized_basepoints([0u8; PUBLIC_KEY_SIZE], opener_basepoint.serialize())
+    }
+
+    /// Hashes two already-serialized basepoints in BOLT 2's canonical order.
+    fn v2_from_serialized_basepoints(
+        basepoint1: [u8; PUBLIC_KEY_SIZE],
+        basepoint2: [u8; PUBLIC_KEY_SIZE],
+    ) -> Self {
+        let (lesser, greater) = if basepoint1 <= basepoint2 {
+            (basepoint1, basepoint2)
+        } else {
+            (basepoint2, basepoint1)
+        };
+        let mut preimage = [0u8; PUBLIC_KEY_SIZE * 2];
+        preimage[..PUBLIC_KEY_SIZE].copy_from_slice(&lesser);
+        preimage[PUBLIC_KEY_SIZE..].copy_from_slice(&greater);
+        Self(sha256::Hash::hash(&preimage).to_byte_array())
     }
 }
 
@@ -211,6 +253,17 @@ mod tests {
     use super::*;
     use bitcoin::{OutPoint, Txid};
 
+    /// The two `funding_pubkey`s of the 2-of-2 output in the BOLT 3
+    /// "Appendix G: Dual Funded Transaction Test Vectors". Used here only as a
+    /// convenient pair of known-valid compressed points.
+    const BASEPOINT_1: &str = "0292edb5f7bbf9e900f7e024be1c1339c6d149c11930e613af3a983d2565f4e41e";
+    const BASEPOINT_2: &str = "02e16172a41e928cbd78f761bd1c657c4afc7495a1244f7f30166b654fbf7661e3";
+
+    fn pubkey(hex_str: &str) -> PublicKey {
+        let bytes = hex::decode(hex_str).expect("valid hex");
+        PublicKey::from_slice(&bytes).expect("valid pubkey")
+    }
+
     #[test]
     fn bigsize_new() {
         let bs = BigSize::new(42);
@@ -299,6 +352,68 @@ mod tests {
             let scid = ShortChannelId::from_u64(packed);
             assert_eq!(scid.as_u64(), packed);
         }
+    }
+
+    // -- v2 channel id tests --
+    //
+    // BOLT 2 defines no test vector for the v2 `channel_id`, so the expected
+    // digests below were computed independently of this implementation and are
+    // pinned here as regression vectors.
+
+    #[test]
+    fn channel_id_v2_from_revocation_basepoints_matches_vector() {
+        let channel_id =
+            ChannelId::v2_from_revocation_basepoints(&pubkey(BASEPOINT_1), &pubkey(BASEPOINT_2));
+
+        assert_eq!(
+            channel_id.to_string(),
+            "59bc22f722836ce5095a37504f8ab87b1b2dbdc8aad638b77da3f5f3e8330edd",
+        );
+    }
+
+    #[test]
+    fn channel_id_v2_from_revocation_basepoints_is_order_independent() {
+        let basepoint_1 = pubkey(BASEPOINT_1);
+        let basepoint_2 = pubkey(BASEPOINT_2);
+
+        assert_eq!(
+            ChannelId::v2_from_revocation_basepoints(&basepoint_1, &basepoint_2),
+            ChannelId::v2_from_revocation_basepoints(&basepoint_2, &basepoint_1),
+        );
+    }
+
+    #[test]
+    fn channel_id_v2_temporary_matches_vector() {
+        assert_eq!(
+            ChannelId::v2_temporary_from_revocation_basepoint(&pubkey(BASEPOINT_1)).to_string(),
+            "90fc2d0fcef3376e4c26de47e9c86a7362adecf87c8c1a01cdaa3263abd74c5a",
+        );
+        assert_eq!(
+            ChannelId::v2_temporary_from_revocation_basepoint(&pubkey(BASEPOINT_2)).to_string(),
+            "270d4e8fa33e0c15f46c4978186d02c51a5307229ba5689c9f600c68360e25e3",
+        );
+    }
+
+    #[test]
+    fn channel_id_v2_temporary_differs_from_final() {
+        let basepoint_1 = pubkey(BASEPOINT_1);
+        let basepoint_2 = pubkey(BASEPOINT_2);
+
+        assert_ne!(
+            ChannelId::v2_temporary_from_revocation_basepoint(&basepoint_1),
+            ChannelId::v2_from_revocation_basepoints(&basepoint_1, &basepoint_2),
+        );
+    }
+
+    #[test]
+    fn channel_id_v2_distinguishes_basepoints() {
+        let basepoint_1 = pubkey(BASEPOINT_1);
+        let basepoint_2 = pubkey(BASEPOINT_2);
+
+        assert_ne!(
+            ChannelId::v2_from_revocation_basepoints(&basepoint_1, &basepoint_1),
+            ChannelId::v2_from_revocation_basepoints(&basepoint_1, &basepoint_2),
+        );
     }
 
     #[test]
