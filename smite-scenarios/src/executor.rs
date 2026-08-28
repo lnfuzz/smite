@@ -683,6 +683,7 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                         &mut self.negotiations_v2,
                         &self.v2_channel_ids,
                     );
+                    let channel_id = msg.channel_id;
                     let encoded = Message::TxAddInput(msg).encode();
                     log::debug!(
                         "[{:?}] SendTxAddInput: serial_id={serial_id}, {} bytes",
@@ -690,7 +691,7 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                         encoded.len(),
                     );
                     self.conn.send_message(&encoded)?;
-                    Some(Variable::SentInteractiveTx)
+                    Some(Variable::SentInteractiveTx(channel_id))
                 }
 
                 Operation::SendTxAddOutput { serial_id, role } => {
@@ -703,6 +704,7 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                         &mut self.negotiations_v2,
                         &self.v2_channel_ids,
                     );
+                    let channel_id = msg.channel_id;
                     let encoded = Message::TxAddOutput(msg).encode();
                     log::debug!(
                         "[{:?}] SendTxAddOutput: serial_id={serial_id}, role={role}, {} bytes",
@@ -710,7 +712,7 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                         encoded.len(),
                     );
                     self.conn.send_message(&encoded)?;
-                    Some(Variable::SentInteractiveTx)
+                    Some(Variable::SentInteractiveTx(channel_id))
                 }
 
                 Operation::SendTxRemoveInput { serial_id } => {
@@ -742,7 +744,7 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                         start.elapsed(),
                     );
                     self.conn.send_message(&encoded)?;
-                    Some(Variable::SentInteractiveTx)
+                    Some(Variable::SentInteractiveTx(channel_id))
                 }
 
                 Operation::SendTxRemoveOutput { serial_id } => {
@@ -771,7 +773,7 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                         start.elapsed(),
                     );
                     self.conn.send_message(&encoded)?;
-                    Some(Variable::SentInteractiveTx)
+                    Some(Variable::SentInteractiveTx(channel_id))
                 }
 
                 Operation::SendTxComplete => {
@@ -786,25 +788,39 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                     let encoded = Message::TxComplete(TxComplete { channel_id }).encode();
                     log::debug!("[{:?}] SendTxComplete", start.elapsed());
                     self.conn.send_message(&encoded)?;
-                    Some(Variable::SentInteractiveTx)
+                    Some(Variable::SentInteractiveTx(channel_id))
                 }
 
                 Operation::RecvInteractiveTx => {
-                    consume_sent_interactive_tx(&mut variables, instr.inputs[0]);
-                    log::debug!("[{:?}] RecvInteractiveTx: waiting", start.elapsed());
-                    let msg = recv_non_ping(&mut self.conn, RECV_IDLE_TIMEOUT)?;
-                    match &msg {
-                        // The reason a peer gives for abandoning a negotiation
-                        // is the most useful thing in the log when one dies, so
-                        // put it on the line that reports the message.
-                        Message::TxAbort(abort) => log::debug!(
-                            "[{:?}] RecvInteractiveTx: got {msg}: {}",
+                    let channel_id = consume_sent_interactive_tx(&mut variables, instr.inputs[0]);
+                    if is_interactive_tx_expected(
+                        &self.negotiations_v2,
+                        &self.v2_channel_ids,
+                        channel_id,
+                    ) {
+                        log::debug!("[{:?}] RecvInteractiveTx: waiting", start.elapsed());
+                        let msg = recv_non_ping(&mut self.conn, RECV_IDLE_TIMEOUT)?;
+                        match &msg {
+                            // The reason a peer gives for abandoning a
+                            // negotiation is the most useful thing in the log
+                            // when one dies, so put it on the line that reports
+                            // the message.
+                            Message::TxAbort(abort) => log::debug!(
+                                "[{:?}] RecvInteractiveTx: got {msg}: {}",
+                                start.elapsed(),
+                                String::from_utf8_lossy(&abort.data),
+                            ),
+                            _ => {
+                                log::debug!("[{:?}] RecvInteractiveTx: got {msg}", start.elapsed());
+                            }
+                        }
+                        apply_interactive_tx(&mut self.negotiations_v2, &self.v2_channel_ids, msg)?;
+                    } else {
+                        log::debug!(
+                            "[{:?}] RecvInteractiveTx: negotiation concluded, nothing to receive",
                             start.elapsed(),
-                            String::from_utf8_lossy(&abort.data),
-                        ),
-                        _ => log::debug!("[{:?}] RecvInteractiveTx: got {msg}", start.elapsed()),
+                        );
                     }
-                    apply_interactive_tx(&mut self.negotiations_v2, &self.v2_channel_ids, msg)?;
                     None
                 }
 
@@ -1143,11 +1159,15 @@ fn consume_sent_open_channel2(variables: &mut [Option<Variable>], index: usize) 
     }
 }
 
-fn consume_sent_interactive_tx(variables: &mut [Option<Variable>], index: usize) {
+/// Consumes the affine `SentInteractiveTx`, returning the `channel_id` the
+/// message it stands for was sent on.
+fn consume_sent_interactive_tx(variables: &mut [Option<Variable>], index: usize) -> ChannelId {
     match resolve(variables, index) {
-        Variable::SentInteractiveTx => {
+        Variable::SentInteractiveTx(channel_id) => {
+            let channel_id = *channel_id;
             // Consume the affine `SentInteractiveTx`.
             variables[index] = None;
+            channel_id
         }
         other => panic!(
             "variable {index}: expected SentInteractiveTx, got {:?}",
@@ -1775,6 +1795,26 @@ fn verify_commitment_signed(
     }
 
     Ok(())
+}
+
+/// Returns whether the peer owes us a reply in the interactive transaction
+/// exchange.
+///
+/// The exchange is turn-based, so a reply is owed for every message we send
+/// until it concludes on two consecutive `tx_complete`s. Once it has, the peer
+/// moves straight on to `commitment_signed`; reading here would consume that
+/// message and leave every later operation reading one message behind.
+///
+/// A negotiation we do not track still reads. A mutated program may have sent
+/// on a channel we never opened, and the peer's rejection of it is worth
+/// surfacing.
+fn is_interactive_tx_expected(
+    negotiations: &HashMap<ChannelId, PendingChannelV2>,
+    v2_channel_ids: &HashMap<ChannelId, ChannelId>,
+    channel_id: ChannelId,
+) -> bool {
+    negotiation_v2(negotiations, v2_channel_ids, channel_id)
+        .is_none_or(|pending| !pending.tx_negotiation_complete() && !pending.tx_negotiation.aborted)
 }
 
 /// Returns whether the peer owes us a `tx_signatures` for this negotiation.
@@ -7300,6 +7340,129 @@ mod tests {
                 .commitment_exchange
                 .received_tx_signatures
         );
+    }
+
+    #[test]
+    fn execute_recv_interactive_tx_stops_once_the_exchange_concludes() {
+        // The exchange from a real Eclair run: the peer, contributing nothing,
+        // answers each of our messages with tx_complete. Our own tx_complete
+        // then makes two consecutive ones, concluding the exchange, and the
+        // peer moves straight on to commitment_signed.
+        let channel_id = v2_channel_id();
+        let (mut instructions, _) = send_open_channel2_instructions();
+        instructions.push(Instruction {
+            operation: Operation::ExtractAcceptChannel2(AcceptChannel2Field::RevocationBasepoint),
+            inputs: vec![30],
+        }); // v31
+        instructions.push(Instruction {
+            operation: Operation::DeriveChannelIdV2,
+            inputs: vec![13, 31],
+        }); // v32
+        // Each send is followed by the peer's reply, as the turn-based
+        // protocol and the generator both require.
+        let sends = [
+            Operation::SendTxAddInput {
+                serial_id: 2,
+                utxo_index: 0,
+                sequence: 0xffff_fffd,
+            },
+            Operation::SendTxAddOutput {
+                serial_id: 2000,
+                role: TxOutputRole::Funding,
+            },
+            Operation::SendTxAddOutput {
+                serial_id: 2002,
+                role: TxOutputRole::Change,
+            },
+            Operation::SendTxComplete,
+        ];
+        for send in sends {
+            let needs_values = matches!(send, Operation::SendTxAddOutput { .. });
+            instructions.push(Instruction {
+                operation: send,
+                inputs: if needs_values {
+                    vec![32, 3, 25]
+                } else {
+                    vec![32]
+                },
+            });
+            let sent = instructions.len() - 1;
+            instructions.push(Instruction {
+                operation: Operation::RecvInteractiveTx,
+                inputs: vec![sent],
+            });
+        }
+
+        let mut conn = MockConnection::new();
+        conn.queue_recv(
+            Message::AcceptChannel2(sample_accept_channel2(sample_v2_temporary_channel_id()))
+                .encode(),
+        );
+        // One tx_complete per message we send before our own tx_complete.
+        for _ in 0..3 {
+            conn.queue_recv(Message::TxComplete(TxComplete { channel_id }).encode());
+        }
+        // What the peer sends next, which the concluded exchange must not eat.
+        conn.queue_recv(
+            Message::CommitmentSigned(CommitmentSigned {
+                channel_id,
+                signature: Signature::from_compact(&[0u8; 64]).expect("zero signature"),
+                htlc_signatures: Vec::new(),
+                tlvs: CommitmentSignedTlvs::default(),
+            })
+            .encode(),
+        );
+        let mut executor = Executor::new(conn, sample_v2_wallet(), sample_context());
+
+        executor
+            .execute(&Program { instructions }, std::time::Instant::now())
+            .expect("program executes");
+
+        assert!(sole_negotiation(&executor).tx_negotiation_complete());
+        // The commitment_signed is still queued for whoever asks for it next.
+        // Consuming it here would leave every later operation one message
+        // behind, and the program would fail on a message it never expected.
+        assert_eq!(executor.conn.recv_queue.len(), 1);
+        assert_eq!(
+            Message::decode(&executor.conn.recv_queue[0])
+                .expect("valid")
+                .msg_type(),
+            MessageType::COMMITMENT_SIGNED,
+        );
+    }
+
+    #[test]
+    fn execute_recv_interactive_tx_still_reads_mid_exchange() {
+        // Only our own tx_complete is outstanding, so the peer still owes a
+        // reply and the receive must not be skipped.
+        let channel_id = v2_channel_id();
+        let instructions = v2_flow_instructions(vec![Instruction {
+            operation: Operation::RecvInteractiveTx,
+            // The change output's send token: we have contributed since our
+            // last tx_complete, so the exchange is still open.
+            inputs: vec![35],
+        }]);
+
+        let mut conn = MockConnection::new();
+        conn.queue_recv(
+            Message::AcceptChannel2(sample_accept_channel2(sample_v2_temporary_channel_id()))
+                .encode(),
+        );
+        conn.queue_recv(Message::TxComplete(TxComplete { channel_id }).encode());
+        let mut executor = Executor::new(conn, sample_v2_wallet(), sample_context());
+
+        executor
+            .execute(&Program { instructions }, std::time::Instant::now())
+            .expect("program executes");
+
+        assert!(
+            executor.conn.recv_queue.is_empty(),
+            "the reply was not read"
+        );
+        let pending = sole_negotiation(&executor);
+        assert!(pending.tx_negotiation.peer_sent_tx_complete);
+        // We have not sent ours, so the exchange is not concluded.
+        assert!(!pending.tx_negotiation_complete());
     }
 
     #[test]
