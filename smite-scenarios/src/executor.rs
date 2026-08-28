@@ -793,7 +793,17 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                     consume_sent_interactive_tx(&mut variables, instr.inputs[0]);
                     log::debug!("[{:?}] RecvInteractiveTx: waiting", start.elapsed());
                     let msg = recv_non_ping(&mut self.conn, RECV_IDLE_TIMEOUT)?;
-                    log::debug!("[{:?}] RecvInteractiveTx: got {msg}", start.elapsed());
+                    match &msg {
+                        // The reason a peer gives for abandoning a negotiation
+                        // is the most useful thing in the log when one dies, so
+                        // put it on the line that reports the message.
+                        Message::TxAbort(abort) => log::debug!(
+                            "[{:?}] RecvInteractiveTx: got {msg}: {}",
+                            start.elapsed(),
+                            String::from_utf8_lossy(&abort.data),
+                        ),
+                        _ => log::debug!("[{:?}] RecvInteractiveTx: got {msg}", start.elapsed()),
+                    }
                     apply_interactive_tx(&mut self.negotiations_v2, &self.v2_channel_ids, msg)?;
                     None
                 }
@@ -1527,11 +1537,9 @@ fn apply_interactive_tx(
             pending.shared_tx.remove_output(m.serial_id);
         }
         Message::TxComplete(_) => {}
-        Message::TxAbort(m) => {
-            log::debug!(
-                "peer aborted the negotiation: {}",
-                m.message().unwrap_or("<non-utf8>"),
-            );
+        // The reason is already logged by the caller, which reports it whether
+        // or not the negotiation it names is one we know about.
+        Message::TxAbort(_) => {
             pending.tx_negotiation.aborted = true;
         }
         _ => unreachable!("message type checked above"),
@@ -2555,7 +2563,9 @@ mod tests {
     use super::*;
     use bitcoin::secp256k1::{Secp256k1, SecretKey};
     use bitcoin::{Amount, Transaction};
-    use smite::bolt::{AcceptChannel2Tlvs, AcceptChannelTlvs, GossipTimestampFilter, Init, Ping};
+    use smite::bolt::{
+        AcceptChannel2Tlvs, AcceptChannelTlvs, GossipTimestampFilter, Init, Ping, TxAbort,
+    };
     use smite_ir::Instruction;
     use smite_ir::operation::{ChannelTypeVariant, ShutdownScriptVariant};
 
@@ -7290,5 +7300,42 @@ mod tests {
                 .commitment_exchange
                 .received_tx_signatures
         );
+    }
+
+    #[test]
+    fn execute_recv_interactive_tx_records_a_peer_abort() {
+        let (mut instructions, _) = send_open_channel2_instructions();
+        instructions.push(Instruction {
+            operation: Operation::SendTxComplete,
+            inputs: vec![27],
+        }); // v31
+        instructions.push(Instruction {
+            operation: Operation::RecvInteractiveTx,
+            inputs: vec![31],
+        });
+
+        let mut conn = MockConnection::new();
+        conn.queue_recv(
+            Message::AcceptChannel2(sample_accept_channel2(sample_v2_temporary_channel_id()))
+                .encode(),
+        );
+        conn.queue_recv(
+            Message::TxAbort(TxAbort::new(
+                sample_v2_temporary_channel_id(),
+                "funding output not to spec",
+            ))
+            .encode(),
+        );
+        let mut executor = Executor::new(conn, sample_v2_wallet(), sample_context());
+
+        executor
+            .execute(&Program { instructions }, std::time::Instant::now())
+            .expect("an abort is normal protocol behaviour, not a harness error");
+
+        let pending = sole_negotiation(&executor);
+        assert!(pending.tx_negotiation.aborted);
+        // An abort is not a tx_complete, so the negotiation has not concluded.
+        assert!(!pending.tx_negotiation.peer_sent_tx_complete);
+        assert!(!pending.tx_negotiation_complete());
     }
 }
