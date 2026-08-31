@@ -8,7 +8,7 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bitcoin::secp256k1;
 use serde::Deserialize;
@@ -20,6 +20,18 @@ use super::{Target, TargetError, check_crash_log};
 
 /// API password for Eclair's REST API.
 const API_PASSWORD: &str = "fuzzpass";
+
+/// Upper bound on how long to wait for the JVM's JIT compile queue to drain
+/// after warmup before giving up and freezing anyway.
+const JIT_DRAIN_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How often to poll `jcmd Compiler.queue` while waiting for it to drain.
+const JIT_DRAIN_POLL: Duration = Duration::from_millis(150);
+
+/// Number of consecutive idle polls required before declaring the compile queue
+/// drained, so we don't stop during a transient lull while Eclair is still
+/// feeding the compiler.
+const JIT_DRAIN_CONFIRMATIONS: u32 = 3;
 
 /// Configuration for the Eclair target.
 pub struct EclairConfig {
@@ -125,9 +137,22 @@ impl EclairTarget {
             cmd.env("LD_PRELOAD", handler);
         }
 
-        cmd.arg(format!("-Declair.datadir={}", eclair_dir.display()))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        // JVM tuning options for eclair-node.sh, applied for the lifetime of the
+        // Eclair process. Replaces JAVA_OPTS outright, so it must restate any
+        // defaults from the workload's init.sh it still wants.
+        if let Ok(opts) = std::env::var("SMITE_ECLAIR_JAVA_OPTS") {
+            cmd.env("JAVA_OPTS", opts);
+        }
+
+        cmd.arg(format!("-Declair.datadir={}", eclair_dir.display()));
+
+        // Silence Eclair by default; inherit its stdio when we need to see JVM
+        // diagnostics such as -XX:+PrintCompilation output.
+        if std::env::var("SMITE_ECLAIR_LOG").is_ok() {
+            cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        } else {
+            cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        }
 
         let eclair = ManagedProcess::spawn(&mut cmd, "eclair")?;
 
@@ -192,6 +217,87 @@ impl EclairTarget {
             .map_err(|e| TargetError::StartFailed(format!("failed to parse pubkey: {e}")))?;
 
         Ok((pubkey, info.block_height))
+    }
+
+    /// Runs `jcmd <eclair-jvm-pid> <args...>` and returns its stdout on success.
+    fn run_jcmd(&self, args: &[&str]) -> Result<String, String> {
+        let java_home = std::env::var("JAVA_HOME").unwrap_or_else(|_| "/opt/java/openjdk".into());
+        let out = Command::new(format!("{java_home}/bin/jcmd"))
+            .arg(self.eclair.pid().to_string())
+            .args(args)
+            .output()
+            .map_err(|e| format!("failed to run jcmd: {e}"))?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        } else {
+            Err(format!(
+                "jcmd {} failed (status {}): {}",
+                args.join(" "),
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        }
+    }
+
+    /// Polls `jcmd Compiler.queue` until the compiler is idle for
+    /// [`JIT_DRAIN_CONFIRMATIONS`] consecutive polls, or [`JIT_DRAIN_TIMEOUT`]
+    /// elapses. Idle = the output lists no in-flight `CompilerThread` and no
+    /// queued `Class::method` (`::`).
+    fn wait_for_compiler_idle(&self) {
+        let deadline = Instant::now() + JIT_DRAIN_TIMEOUT;
+        let mut consecutive_idle = 0u32;
+        loop {
+            let idle = match self.run_jcmd(&["Compiler.queue"]) {
+                Ok(out) => !out.contains("CompilerThread") && !out.contains("::"),
+                // If we can't query the queue we can't confirm idle; keep trying
+                // until the timeout rather than freezing a possibly-busy compiler.
+                Err(e) => {
+                    log::debug!("Compiler.queue poll failed: {e}");
+                    false
+                }
+            };
+
+            if idle {
+                consecutive_idle += 1;
+                if consecutive_idle >= JIT_DRAIN_CONFIRMATIONS {
+                    log::info!("JIT compile queue drained");
+                    return;
+                }
+            } else {
+                consecutive_idle = 0;
+            }
+
+            if Instant::now() >= deadline {
+                log::warn!("timed out waiting for JIT compile queue to drain; freezing anyway");
+                return;
+            }
+            std::thread::sleep(JIT_DRAIN_POLL);
+        }
+    }
+
+    /// Waits for the compile queue to drain, then freezes the JIT via a catch-all
+    /// `Exclude` compiler directive (`jcmd`). This blocks further compilation
+    /// while keeping warmed code installed (verified: no deopt), so no compiler
+    /// threads run during fuzzing. Draining first is essential — freezing with
+    /// methods still queued would leave them interpreted.
+    ///
+    /// `eclair-node.sh` `exec`s the JVM, so `self.eclair.pid()` is the JVM pid.
+    /// Best-effort: jcmd failures are logged, not propagated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if writing the directive file fails.
+    pub fn freeze_jit(&self) -> Result<(), TargetError> {
+        self.wait_for_compiler_idle();
+
+        // Catch-all exclude: block future JIT compilation of every method.
+        let directive = std::env::temp_dir().join("smite-jit-exclude-all.json");
+        fs::write(&directive, "[ { match: [\"*.*\"], Exclude: true } ]\n")?;
+        match self.run_jcmd(&["Compiler.directives_add", &directive.to_string_lossy()]) {
+            Ok(out) => log::info!("Froze JIT via jcmd: {}", out.trim()),
+            Err(e) => log::warn!("could not freeze JIT: {e}"),
+        }
+        Ok(())
     }
 }
 
