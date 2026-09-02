@@ -32,12 +32,12 @@ fn install_panic_hook() {
 /// with `sigwait()`.
 ///
 /// Blocking supersedes the disposition inherited across exec, which for SIGUSR1
-/// is `SIG_IGN` (set by the scenario's pre-exec hook, see `LdkTarget::start`).
-/// That distinction is the whole point: an *ignored* signal is discarded the
-/// moment it is delivered, while a *blocked* one stays pending until `sigwait()`
-/// consumes it, regardless of its disposition. So this call is what makes
-/// bitcoind's `-blocknotify` SIGUSR1 observable, and why nothing here calls
-/// `sigaction`: the wait loop below is the only consumer these signals need.
+/// defaults to terminating the process. That distinction is the whole point: an
+/// *ignored* signal is discarded the moment it is delivered, while a *blocked*
+/// one stays pending until `sigwait()` consumes it, regardless of its
+/// disposition. So this call is what makes target's SIGUSR1 observable, and
+/// why nothing here calls `sigaction`: the wait loop below is the only consumer
+/// these signals need.
 ///
 /// Standard signals do not queue, so a burst of SIGUSR1 collapses into one
 /// pending instance and thus one wakeup. That is fine here: each wakeup syncs
@@ -64,7 +64,7 @@ fn setup_signal_set() -> libc::sigset_t {
 fn main() {
     install_panic_hook();
 
-    // bitcoind's -blocknotify sends SIGUSR1 for each new block.
+    // The target sends SIGUSR1 to request an immediate chain sync.
     // SIGTERM/SIGINT are used for graceful shutdown.
     let signal_set = setup_signal_set();
 
@@ -114,7 +114,7 @@ fn main() {
     println!("READY");
 
     // Wait for signals. sigwait() blocks here without polling and returns
-    // immediately when bitcoind sends SIGUSR1 or the process receives
+    // immediately when the target sends SIGUSR1 or the process receives
     // SIGTERM/SIGINT.
     loop {
         let mut signal = 0;
@@ -126,13 +126,13 @@ fn main() {
 
         match signal {
             libc::SIGUSR1 => {
-                // Sync the wallet whenever bitcoind signals a new block.
+                // Sync the wallet whenever the target asks for it.
                 // ldk-node's own 2s background poll keeps running, so this is
                 // technically redundant and may race it, but that's safe:
                 // ldk-node coalesces concurrent syncs, so whichever loses the
                 // race just waits on the in-flight sync's result rather than
                 // applying the block twice. We accept the redundancy to sync on
-                // the block instead of up to 2s later.
+                // demand instead of up to 2s later.
                 if let Err(e) = node.sync_wallets() {
                     eprintln!("sync_wallets failed: {e}");
                 }

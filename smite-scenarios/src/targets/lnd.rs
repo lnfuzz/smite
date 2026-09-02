@@ -14,7 +14,7 @@ use smite::bitcoin::BitcoinCli;
 use smite::process::ManagedProcess;
 
 use super::bitcoind;
-use super::{Target, TargetError};
+use super::{Target, TargetError, TargetRpc};
 
 /// Configuration for the LND target.
 pub struct LndConfig {
@@ -79,6 +79,16 @@ impl CoveragePipes {
         self.ack_read.read_exact(&mut buf)?;
         Ok(())
     }
+}
+
+/// RPC handle for interacting with LND node target.
+#[derive(Debug, Clone)]
+pub struct LndRpc;
+
+impl TargetRpc for LndRpc {
+    /// LND receives new blocks directly from bitcoind over ZMQ, so no manual
+    /// chain synchronization is required.
+    fn chain_sync(&mut self) {}
 }
 
 /// LND Lightning node target.
@@ -271,6 +281,7 @@ impl LndTarget {
 
 impl Target for LndTarget {
     type Config = LndConfig;
+    type Rpc = LndRpc;
 
     fn start(config: Self::Config) -> Result<Self, TargetError> {
         let (data_path, temp_dir) = bitcoind::resolve_data_dir()?;
@@ -298,6 +309,10 @@ impl Target for LndTarget {
 
     fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    fn rpc(&self) -> Self::Rpc {
+        LndRpc
     }
 
     fn bitcoin_cli(&self) -> &BitcoinCli {

@@ -8,7 +8,7 @@ use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus};
 use std::time::{Duration, Instant};
 
-use nix::sys::signal::{Signal, killpg};
+use nix::sys::signal::{Signal, kill, killpg};
 use nix::unistd::Pid;
 
 /// A managed subprocess with graceful shutdown support.
@@ -151,6 +151,19 @@ impl Drop for ManagedProcess {
             }
         }
     }
+}
+
+/// Sends SIGUSR1 to the process with the given `pid`.
+///
+/// # Errors
+///
+/// Returns an error if `pid` exceeds `i32::MAX` or if sending the signal fails.
+pub fn send_sigusr1(pid: u32) -> io::Result<()> {
+    let pid = i32::try_from(pid)
+        .map(Pid::from_raw)
+        .map_err(|_| io::Error::other("pid exceeds i32::MAX"))?;
+
+    kill(pid, Signal::SIGUSR1).map_err(Into::into)
 }
 
 #[cfg(test)]

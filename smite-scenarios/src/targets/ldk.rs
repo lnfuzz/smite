@@ -11,10 +11,10 @@ use std::process::{Command, Stdio};
 
 use bitcoin::secp256k1;
 use smite::bitcoin::BitcoinCli;
-use smite::process::ManagedProcess;
+use smite::process::{ManagedProcess, send_sigusr1};
 
 use super::bitcoind;
-use super::{Target, TargetError, check_crash_log};
+use super::{Target, TargetError, TargetRpc, check_crash_log};
 
 /// Configuration for the LDK target.
 pub struct LdkConfig {
@@ -41,10 +41,37 @@ impl LdkConfig {
         bitcoind::BitcoindConfig {
             rpc_port: self.bitcoind_rpc_port,
             p2p_port: self.bitcoind_p2p_port,
-            // signals the wrapper (SIGUSR1) to sync on each new block instead
-            // of waiting for the next poll.
-            extra_args: vec!["-blocknotify=pkill -USR1 -f ^ldk-node-wrapper".to_string()],
             ..bitcoind::BitcoindConfig::default()
+        }
+    }
+}
+
+/// RPC handle for interacting with LDK node target.
+///
+/// LDK currently has no RPC socket, so commands are delivered through signals
+/// that invoke the corresponding APIs directly.
+#[derive(Debug, Clone)]
+pub struct LdkRpc {
+    /// PID of the LDK node's wrapper process, which receives the signals.
+    pid: u32,
+}
+
+impl TargetRpc for LdkRpc {
+    /// Signals the wrapper (SIGUSR1) to sync on new blocks immediately instead
+    /// of waiting for its regular poll interval, allowing it to sync faster.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the signal cannot be sent, which means the call itself is at
+    /// fault rather than the target having crashed.
+    fn chain_sync(&mut self) {
+        // A crashed wrapper remains an unreaped zombie, so the signal is sent
+        // but discarded. check_alive will report the crash at the end.
+        if let Err(e) = send_sigusr1(self.pid) {
+            panic!(
+                "failed to send SIGUSR1 to ldk-node-wrapper (pid {}): {e}",
+                self.pid
+            );
         }
     }
 }
@@ -90,28 +117,6 @@ impl LdkTarget {
             cmd.env("LD_PRELOAD", handler);
         }
 
-        // Ignore SIGUSR1 for the window between exec and the wrapper blocking
-        // it. Initial-block generation triggers a burst of asynchronous
-        // `-blocknotify` (`pkill -USR1`), and a stray one landing in that window
-        // would kill the wrapper, since SIGUSR1 is fatal by default. SIG_IGN
-        // survives exec; a caught handler would not.
-        //
-        // Signals arriving while SIG_IGN is in effect are dropped, but that ends
-        // once the wrapper calls `pthread_sigmask(SIG_BLOCK)`: blocking wins over
-        // the disposition, so SIGUSR1 then stays pending for `sigwait()` instead
-        // of being discarded. SIG_IGN therefore stays in effect for the whole run
-        // and the wrapper never needs to replace it.
-        //
-        // SAFETY: runs in the child after fork, before exec; calls only the
-        // async-signal-safe `signal`.
-        unsafe {
-            use std::os::unix::process::CommandExt;
-            cmd.pre_exec(|| {
-                libc::signal(libc::SIGUSR1, libc::SIG_IGN);
-                Ok(())
-            });
-        }
-
         let mut ldk = ManagedProcess::spawn(&mut cmd, "ldk-node-wrapper")?;
 
         // Parse pubkey from stdout. The wrapper prints:
@@ -150,6 +155,7 @@ impl LdkTarget {
 
 impl Target for LdkTarget {
     type Config = LdkConfig;
+    type Rpc = LdkRpc;
 
     fn start(config: Self::Config) -> Result<Self, TargetError> {
         let (data_path, temp_dir) = bitcoind::resolve_data_dir()?;
@@ -176,6 +182,12 @@ impl Target for LdkTarget {
 
     fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    fn rpc(&self) -> Self::Rpc {
+        LdkRpc {
+            pid: self.ldk.pid(),
+        }
     }
 
     fn bitcoin_cli(&self) -> &BitcoinCli {

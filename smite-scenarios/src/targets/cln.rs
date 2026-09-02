@@ -9,7 +9,9 @@
 //! This means checking lightningd's liveness is sufficient for crash detection.
 
 use std::fs;
+use std::io;
 use std::net::SocketAddr;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -20,7 +22,7 @@ use smite::bitcoin::BitcoinCli;
 use smite::process::ManagedProcess;
 
 use super::bitcoind;
-use super::{Target, TargetError, check_crash_log};
+use super::{Target, TargetError, TargetRpc, check_crash_log};
 
 /// Configuration for the CLN target.
 pub struct ClnConfig {
@@ -43,15 +45,83 @@ impl Default for ClnConfig {
 }
 
 impl ClnConfig {
-    fn bitcoind_config(&self, data_dir: &Path) -> bitcoind::BitcoindConfig {
+    fn bitcoind_config(&self) -> bitcoind::BitcoindConfig {
         bitcoind::BitcoindConfig {
             rpc_port: self.bitcoind_rpc_port,
             p2p_port: self.bitcoind_p2p_port,
-            extra_args: vec![format!(
-                "-blocknotify=lightning-cli --lightning-dir='{}' --network=regtest syncblocks",
-                data_dir.join("cln").display()
-            )],
             ..bitcoind::BitcoindConfig::default()
+        }
+    }
+}
+
+/// RPC handle for interacting with CLN node target.
+#[derive(Debug, Clone)]
+pub struct ClnRpc {
+    /// Path to the CLN node's unix RPC socket.
+    pub rpc_socket: PathBuf,
+}
+
+impl ClnRpc {
+    // Bound RPC socket I/O so a stalled lightningd cannot block indefinitely.
+    const RPC_IO_TIMEOUT: Duration = Duration::from_secs(1);
+
+    /// Sends a JSON-RPC request to CLN over its Unix RPC socket and returns the
+    /// `result` of the response.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] only if the RPC socket cannot be connected to,
+    /// which means CLN already crashed. That is a symptom of an earlier crash
+    /// rather than a fault in the call.
+    ///
+    /// # Panics
+    ///
+    /// If the request cannot be written, the response cannot be read or parsed,
+    /// or CLN answers with a JSON-RPC `error` object.
+    fn run(&self, method: &str, params: impl serde::Serialize) -> io::Result<serde_json::Value> {
+        let mut sock = UnixStream::connect(&self.rpc_socket)?;
+        sock.set_read_timeout(Some(Self::RPC_IO_TIMEOUT))
+            .expect("valid timeout");
+        sock.set_write_timeout(Some(Self::RPC_IO_TIMEOUT))
+            .expect("valid timeout");
+
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "smite",
+            "method": method,
+            "params": params,
+        });
+        serde_json::to_writer(&mut sock, &request)
+            .unwrap_or_else(|e| panic!("failed to send {method} to lightningd: {e}"));
+
+        let mut response: serde_json::Value = serde_json::Deserializer::from_reader(&mut sock)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("lightningd closed the socket without answering {method}"))
+            .unwrap_or_else(|e| panic!("failed to read {method} response from lightningd: {e}"));
+        assert!(
+            response.get("error").is_none(),
+            "lightningd rejected {method}: {}",
+            response["error"]
+        );
+
+        Ok(response["result"].take())
+    }
+}
+
+impl TargetRpc for ClnRpc {
+    /// RPC to make CLN poll for new blocks immediately instead of waiting for
+    /// its regular poll interval, allowing it to sync faster.
+    ///
+    /// # Panics
+    ///
+    /// - If lightningd answers with an error, which means the call itself is at
+    ///   fault rather than the target having crashed.
+    fn chain_sync(&mut self) {
+        if let Err(e) = self.run("syncblocks", serde_json::json!({})) {
+            // lightningd is unreachable, indicating that CLN has already
+            // crashed, check_alive will report the crash at the end.
+            log::warn!("syncblocks could not reach lightningd: {e}");
         }
     }
 }
@@ -207,12 +277,12 @@ impl Drop for ClnTarget {
 
 impl Target for ClnTarget {
     type Config = ClnConfig;
+    type Rpc = ClnRpc;
 
     fn start(config: Self::Config) -> Result<Self, TargetError> {
         let (data_path, temp_dir) = bitcoind::resolve_data_dir()?;
 
-        let bitcoind_config = config.bitcoind_config(&data_path);
-        let (bitcoind, bitcoin_cli) = bitcoind::start(&bitcoind_config, &data_path)?;
+        let (bitcoind, bitcoin_cli) = bitcoind::start(&config.bitcoind_config(), &data_path)?;
         let (cln, pubkey, cln_dir) = Self::start_cln(&config, &data_path)?;
         let addr = SocketAddr::from(([127, 0, 0, 1], config.cln_p2p_port));
 
@@ -235,6 +305,12 @@ impl Target for ClnTarget {
 
     fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    fn rpc(&self) -> Self::Rpc {
+        ClnRpc {
+            rpc_socket: self.cln_dir.join("regtest").join("lightning-rpc"),
+        }
     }
 
     fn bitcoin_cli(&self) -> &BitcoinCli {
