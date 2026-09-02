@@ -12,14 +12,6 @@ use smite::bolt::{AcceptChannelTlvs, GossipTimestampFilter, Init, Ping};
 use smite_ir::Instruction;
 use smite_ir::operation::ShutdownScriptVariant;
 
-/// Decodes a sent message expected to be a `channel_announcement`.
-fn decode_sent_channel_announcement(bytes: &[u8]) -> ChannelAnnouncement {
-    match Message::decode(bytes).expect("valid message") {
-        Message::ChannelAnnouncement(ca) => ca,
-        other => panic!("expected channel_announcement(256), got {other}"),
-    }
-}
-
 fn decode_open_channel(bytes: &[u8]) -> OpenChannel {
     match Message::decode(bytes).expect("valid message") {
         Message::OpenChannel(oc) => oc,
@@ -41,20 +33,13 @@ fn execute_load_build_send() {
         inputs: vec![20],
     });
 
-    let program = Program {
+    let mut fx = Fixture::new();
+    fx.run(&Program {
         instructions: instrs,
-    };
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor
-        .execute(&program, std::time::Instant::now())
-        .unwrap();
+    });
 
-    assert_eq!(executor.conn.sent.len(), 1);
-    let oc = decode_open_channel(&executor.conn.sent[0]);
+    assert_eq!(fx.sent_len(), 1);
+    let oc: OpenChannel = fx.sent(0);
     assert_eq!(oc.chain_hash, [0xcc; 32]);
     assert_eq!(oc.temporary_channel_id, TemporaryChannelId::new([0xbb; 32]));
     assert_eq!(oc.funding_satoshis, 100_000);
@@ -125,23 +110,13 @@ fn execute_build_channel_announcement() {
         },
     ];
 
-    let program = Program {
+    let mut fx = Fixture::new();
+    fx.run(&Program {
         instructions: instrs,
-    };
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor
-        .execute(&program, std::time::Instant::now())
-        .unwrap();
+    });
 
-    assert_eq!(executor.conn.sent.len(), 1);
-    let ca = match Message::decode(&executor.conn.sent[0]).expect("valid message") {
-        Message::ChannelAnnouncement(ca) => ca,
-        other => panic!("expected channel_announcement(256), got {other}"),
-    };
+    assert_eq!(fx.sent_len(), 1);
+    let ca: ChannelAnnouncement = fx.sent(0);
 
     let secp = Secp256k1::new();
     let pk = |b: &[u8; 32]| PublicKey::from_secret_key(&secp, &SecretKey::from_slice(b).unwrap());
@@ -192,23 +167,13 @@ fn execute_build_node_announcement() {
         },
     ];
 
-    let program = Program {
+    let mut fx = Fixture::new();
+    fx.run(&Program {
         instructions: instrs,
-    };
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor
-        .execute(&program, std::time::Instant::now())
-        .unwrap();
+    });
 
-    assert_eq!(executor.conn.sent.len(), 1);
-    let na = match Message::decode(&executor.conn.sent[0]).expect("valid message") {
-        Message::NodeAnnouncement(na) => na,
-        other => panic!("expected node_announcement(257), got {other}"),
-    };
+    assert_eq!(fx.sent_len(), 1);
+    let na: NodeAnnouncement = fx.sent(0);
 
     let secp = Secp256k1::new();
     let expected_node_id =
@@ -284,23 +249,13 @@ fn execute_build_channel_update() {
         },
     ];
 
-    let program = Program {
+    let mut fx = Fixture::new();
+    fx.run(&Program {
         instructions: instrs,
-    };
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor
-        .execute(&program, std::time::Instant::now())
-        .unwrap();
+    });
 
-    assert_eq!(executor.conn.sent.len(), 1);
-    let cu = match Message::decode(&executor.conn.sent[0]).expect("valid message") {
-        Message::ChannelUpdate(cu) => cu,
-        other => panic!("expected channel_update(258), got {other}"),
-    };
+    assert_eq!(fx.sent_len(), 1);
+    let cu: ChannelUpdate = fx.sent(0);
 
     assert_eq!(cu.chain_hash, sample_context().chain_hash);
     assert_eq!(cu.short_channel_id, scid);
@@ -395,23 +350,13 @@ fn execute_build_announcement_signatures() {
         },
     ];
 
-    let program = Program {
+    let mut fx = Fixture::new();
+    fx.run(&Program {
         instructions: instrs,
-    };
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor
-        .execute(&program, std::time::Instant::now())
-        .unwrap();
+    });
 
-    assert_eq!(executor.conn.sent.len(), 1);
-    let ann_sigs = match Message::decode(&executor.conn.sent[0]).expect("valid message") {
-        Message::AnnouncementSignatures(s) => s,
-        other => panic!("expected announcement_signatures(259), got {other}"),
-    };
+    assert_eq!(fx.sent_len(), 1);
+    let ann_sigs: AnnouncementSignatures = fx.sent(0);
 
     assert_eq!(ann_sigs.channel_id, ChannelId::new(channel_id_bytes));
     assert_eq!(ann_sigs.short_channel_id, scid);
@@ -488,19 +433,12 @@ fn execute_build_open_channel_with_tlvs() {
         inputs: vec![20],
     });
 
-    let program = Program {
+    let mut fx = Fixture::new();
+    fx.run(&Program {
         instructions: instrs,
-    };
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor
-        .execute(&program, std::time::Instant::now())
-        .unwrap();
+    });
 
-    let oc = decode_open_channel(&executor.conn.sent[0]);
+    let oc: OpenChannel = fx.sent(0);
     assert_eq!(
         oc.tlvs.upfront_shutdown_script,
         Some(vec![0x00, 0x14, 0xab])
@@ -537,19 +475,12 @@ fn execute_derive_point() {
         inputs: vec![base + 20],
     });
 
-    let program = Program {
+    let mut fx = Fixture::new();
+    fx.run(&Program {
         instructions: instrs,
-    };
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor
-        .execute(&program, std::time::Instant::now())
-        .unwrap();
+    });
 
-    let oc = decode_open_channel(&executor.conn.sent[0]);
+    let oc: OpenChannel = fx.sent(0);
     let secp = Secp256k1::new();
     let expected = PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&[0x11; 32]).unwrap());
     assert_eq!(oc.funding_pubkey, expected);
@@ -1033,12 +964,7 @@ fn execute_wrong_input_count_panics() {
             inputs: vec![], // expects 1 input
         }],
     };
-    let _ = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    )
-    .execute(&program, std::time::Instant::now());
+    Fixture::new().run(&program);
 }
 
 #[test]
@@ -1056,12 +982,7 @@ fn execute_type_mismatch_panics() {
             },
         ],
     };
-    let _ = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    )
-    .execute(&program, std::time::Instant::now());
+    Fixture::new().run(&program);
 }
 
 #[test]
@@ -1073,12 +994,7 @@ fn execute_variable_out_of_bounds_panics() {
             inputs: vec![99],
         }],
     };
-    let _ = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    )
-    .execute(&program, std::time::Instant::now());
+    Fixture::new().run(&program);
 }
 
 #[test]
@@ -1096,12 +1012,7 @@ fn execute_forward_variable_reference_panics() {
             },
         ],
     };
-    let _ = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    )
-    .execute(&program, std::time::Instant::now());
+    Fixture::new().run(&program);
 }
 
 #[test]
@@ -1120,12 +1031,7 @@ fn execute_void_variable_reference_panics() {
             },
         ],
     };
-    let _ = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    )
-    .execute(&program, std::time::Instant::now());
+    Fixture::new().run(&program);
 }
 
 #[test]
@@ -1143,12 +1049,7 @@ fn execute_invalid_private_key_panics() {
             },
         ],
     };
-    let _ = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    )
-    .execute(&program, std::time::Instant::now());
+    Fixture::new().run(&program);
 }
 
 #[test]
@@ -1169,12 +1070,7 @@ fn execute_send_open_channel_wrong_type_panics() {
         instructions: instrs,
     };
 
-    let _ = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    )
-    .execute(&program, std::time::Instant::now());
+    Fixture::new().run(&program);
 }
 
 #[test]
@@ -1212,21 +1108,14 @@ fn execute_mine_blocks_invokes_cli() {
         operation: Operation::MineBlocks(6),
         inputs: vec![],
     }];
-    let program = Program {
+    let mut fx = Fixture::new();
+    fx.run(&Program {
         instructions: instrs,
-    };
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor
-        .execute(&program, std::time::Instant::now())
-        .unwrap();
+    });
 
     // Verify that mine_blocks was called with the correct number
-    assert_eq!(executor.bitcoin_cli.mine_blocks_calls, vec![6]);
-    assert!(executor.bitcoin_cli.mined_private_mempool.is_empty());
+    assert_eq!(fx.bitcoin().mine_blocks_calls, vec![6]);
+    assert!(fx.bitcoin().mined_private_mempool.is_empty());
 }
 
 #[test]
@@ -1245,33 +1134,18 @@ fn execute_mine_blocks_wrong_input() {
     let program = Program {
         instructions: instrs,
     };
-    let _ = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    )
-    .execute(&program, std::time::Instant::now());
+    Fixture::new().run(&program);
 }
 
 #[test]
 fn execute_create_and_broadcast_tx() {
-    let mock_cli = MockBitcoinCli {
-        utxos: vec![sample_utxo()],
-        change_spk: sample_change_spk(),
-        ..Default::default()
-    };
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
-    executor
-        .execute(
-            &Program {
-                instructions: create_and_broadcast_tx_instructions(),
-            },
-            std::time::Instant::now(),
-        )
-        .expect("tx construction and broadcast should succeed");
+    let mut fx = Fixture::new();
+    fx.run(&Program {
+        instructions: create_and_broadcast_tx_instructions(),
+    });
 
-    assert_eq!(executor.bitcoin_cli.broadcast_calls.len(), 1);
-    let broadcast_tx = &executor.bitcoin_cli.broadcast_calls[0];
+    assert_eq!(fx.bitcoin().broadcast_calls.len(), 1);
+    let broadcast_tx = &fx.bitcoin().broadcast_calls[0];
     assert_eq!(
         broadcast_tx.compute_txid().to_string(),
         "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
@@ -1283,11 +1157,6 @@ fn execute_create_and_broadcast_tx() {
 // by feeding it into a channel_announcement and decoding the sent message.
 #[test]
 fn execute_lookup_short_channel_id_confirmed() {
-    let mock_cli = MockBitcoinCli {
-        utxos: vec![sample_utxo()],
-        change_spk: sample_change_spk(),
-        ..Default::default()
-    };
     let mut instrs = create_and_broadcast_tx_instructions();
     instrs.push(Instruction {
         operation: Operation::MineBlocks(6),
@@ -1303,29 +1172,21 @@ fn execute_lookup_short_channel_id_confirmed() {
     // Build and send a channel_announcement carrying the looked-up SCID.
     instrs.extend(channel_announcement_from_scid_instructions(instrs.len(), 9));
 
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
-    executor
-        .execute(
-            &Program {
-                instructions: instrs,
-            },
-            std::time::Instant::now(),
-        )
-        .expect("lookup after confirmation should succeed");
+    let mut fx = Fixture::new();
+    fx.run(&Program {
+        instructions: instrs,
+    });
 
-    assert_eq!(executor.bitcoin_cli.mine_blocks_calls, vec![6]);
+    assert_eq!(fx.bitcoin().mine_blocks_calls, vec![6]);
     // The executor must have queried the mock with the broadcast
     // transaction's txid.
-    assert_eq!(executor.bitcoin_cli.block_position_lookups.len(), 1);
-    let broadcast_txid = executor.bitcoin_cli.broadcast_calls[0].compute_txid();
-    assert_eq!(
-        executor.bitcoin_cli.block_position_lookups[0],
-        broadcast_txid,
-    );
+    assert_eq!(fx.bitcoin().block_position_lookups.len(), 1);
+    let broadcast_txid = fx.bitcoin().broadcast_calls[0].compute_txid();
+    assert_eq!(fx.bitcoin().block_position_lookups[0], broadcast_txid);
 
     // The mock returns block_height=800_042, tx_index=7 for a confirmed
     // tx, and the funding output is always at vout 0.
-    let ca = decode_sent_channel_announcement(&executor.conn.sent[0]);
+    let ca: ChannelAnnouncement = fx.sent(0);
     assert_eq!(ca.short_channel_id, ShortChannelId::new(800_042, 7, 0));
 }
 
@@ -1335,11 +1196,6 @@ fn execute_lookup_short_channel_id_confirmed() {
 // via the SCID carried in a channel_announcement.
 #[test]
 fn execute_lookup_short_channel_id_unconfirmed_returns_sentinel() {
-    let mock_cli = MockBitcoinCli {
-        utxos: vec![sample_utxo()],
-        change_spk: sample_change_spk(),
-        ..Default::default()
-    };
     // No BroadcastTransaction and no MineBlocks: the mock reports zero
     // confirmations and get_transaction_block_position returns None.
     let mut instrs = vec![
@@ -1379,21 +1235,17 @@ fn execute_lookup_short_channel_id_unconfirmed_returns_sentinel() {
     ];
     instrs.extend(channel_announcement_from_scid_instructions(instrs.len(), 7));
 
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
-    executor
-        .execute(
-            &Program {
-                instructions: instrs,
-            },
-            std::time::Instant::now(),
-        )
-        .expect("lookup on unconfirmed tx should not fail");
+    let mut fx = Fixture::new();
+    fx.run(&Program {
+        instructions: instrs,
+    });
+
     // The mock was queried but returned None (zero confirmations), so the
     // executor took the sentinel path without panicking.
-    assert!(executor.bitcoin_cli.mine_blocks_calls.is_empty());
-    assert_eq!(executor.bitcoin_cli.block_position_lookups.len(), 1);
+    assert!(fx.bitcoin().mine_blocks_calls.is_empty());
+    assert_eq!(fx.bitcoin().block_position_lookups.len(), 1);
 
-    let ca = decode_sent_channel_announcement(&executor.conn.sent[0]);
+    let ca: ChannelAnnouncement = fx.sent(0);
     assert_eq!(ca.short_channel_id, ShortChannelId::new(0, 0, 0));
 }
 
@@ -2009,20 +1861,11 @@ fn execute_send_shutdown() {
         ],
     };
 
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor
-        .execute(&program, std::time::Instant::now())
-        .unwrap();
+    let mut fx = Fixture::new();
+    fx.run(&program);
 
-    assert_eq!(executor.conn.sent.len(), 1);
-    let sd = match Message::decode(&executor.conn.sent[0]).expect("valid message") {
-        Message::Shutdown(sd) => sd,
-        other => panic!("expected shutdown(38), got {other}"),
-    };
+    assert_eq!(fx.sent_len(), 1);
+    let sd: Shutdown = fx.sent(0);
     assert_eq!(sd.channel_id, channel_id);
     assert_eq!(sd.scriptpubkey, script.encode());
 }
@@ -2049,20 +1892,11 @@ fn execute_send_shutdown_empty_scriptpubkey() {
         ],
     };
 
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor
-        .execute(&program, std::time::Instant::now())
-        .unwrap();
+    let mut fx = Fixture::new();
+    fx.run(&program);
 
-    assert_eq!(executor.conn.sent.len(), 1);
-    let sd = match Message::decode(&executor.conn.sent[0]).expect("valid message") {
-        Message::Shutdown(sd) => sd,
-        other => panic!("expected shutdown(38), got {other}"),
-    };
+    assert_eq!(fx.sent_len(), 1);
+    let sd: Shutdown = fx.sent(0);
     assert_eq!(sd.channel_id, channel_id);
     assert!(sd.scriptpubkey.is_empty());
 }

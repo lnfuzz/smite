@@ -111,6 +111,97 @@ impl BitcoinRpc for MockBitcoinCli {
     }
 }
 
+// -- Fixture --
+
+/// An [`Executor`] wired to a mock peer and a mock bitcoind.
+pub struct Fixture {
+    executor: Executor<MockConnection, MockBitcoinCli>,
+}
+
+impl Fixture {
+    /// A fixture with a silent peer and a wallet holding [`sample_utxo`].
+    pub fn new() -> Self {
+        let bitcoin_cli = MockBitcoinCli {
+            utxos: vec![sample_utxo()],
+            change_spk: sample_change_spk(),
+            ..Default::default()
+        };
+        Self {
+            executor: Executor::new(MockConnection::new(), bitcoin_cli, sample_context()),
+        }
+    }
+
+    /// Runs `program` against the target, panicking if execution fails.
+    pub fn run(&mut self, program: &Program) {
+        self.executor
+            .execute(program, std::time::Instant::now())
+            .expect("program execution successful");
+    }
+
+    /// Returns the mock bitcoind the executor drives.
+    pub fn bitcoin(&self) -> &MockBitcoinCli {
+        &self.executor.bitcoin_cli
+    }
+
+    /// Returns the number of messages the executor sent.
+    pub fn sent_len(&self) -> usize {
+        self.executor.conn.sent.len()
+    }
+
+    /// Decodes the `n`th message the executor sent, panicking if it is not an
+    /// `M`.
+    pub fn sent<M: FromMessage>(&self, n: usize) -> M {
+        let bytes = self.executor.conn.sent.get(n).unwrap_or_else(|| {
+            panic!(
+                "expected at least {} sent messages, got {}",
+                n + 1,
+                self.sent_len()
+            )
+        });
+        let msg = Message::decode(bytes).expect("valid message");
+        let got = msg.to_string();
+        M::from_message(msg).unwrap_or_else(|| panic!("expected {}, got {got}", M::TYPE))
+    }
+}
+
+/// Extracts a specific BOLT message from a decoded [`Message`].
+pub trait FromMessage: Sized {
+    /// Wire type of the expected BOLT message.
+    const TYPE: MessageType;
+
+    /// Returns the extracted BOLT message if `msg`'s type matches, `None`
+    /// otherwise.
+    fn from_message(msg: Message) -> Option<Self>;
+}
+
+/// Implements [`FromMessage`] for BOLT messages whose [`Message`] variant has
+/// the same name.
+macro_rules! impl_from_message {
+    ($($bolt_msg:ident => $msg_type:ident,)*) => {
+        $(
+            impl FromMessage for $bolt_msg {
+                const TYPE: MessageType = MessageType::$msg_type;
+
+                fn from_message(msg: Message) -> Option<Self> {
+                    match msg {
+                        Message::$bolt_msg(bolt_msg) => Some(bolt_msg),
+                        _ => None,
+                    }
+                }
+            }
+        )*
+    };
+}
+
+impl_from_message! {
+    OpenChannel => OPEN_CHANNEL,
+    Shutdown => SHUTDOWN,
+    ChannelAnnouncement => CHANNEL_ANNOUNCEMENT,
+    NodeAnnouncement => NODE_ANNOUNCEMENT,
+    ChannelUpdate => CHANNEL_UPDATE,
+    AnnouncementSignatures => ANNOUNCEMENT_SIGNATURES,
+}
+
 // -- Helpers --
 
 pub fn sample_pubkey(byte: u8) -> PublicKey {
