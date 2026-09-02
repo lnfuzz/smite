@@ -36,13 +36,17 @@ pub enum Violation {
     #[error("invalid accept_channel for temporary_channel_id {0}: {1}")]
     InvalidAcceptChannel(ChannelId, String),
 
-    /// The target sent a `funding_signed` or `channel_ready` for a `channel_id`
-    /// we never opened, i.e. one for which no state was ever established.
+    /// The target's `funding_signed` broke a BOLT 2 requirement, as judged by
+    /// [`crate::oracles::FundingSignedOracle`]. The reason names the breached
+    /// requirement, one of:
+    /// - it names a `channel_id` we sent no `funding_created` for,
+    /// - it answers a `funding_created` with an invalid signature, or
+    /// - its signature is not valid for the holder's commitment transaction.
+    #[error("invalid funding_signed for channel_id {0}: {1}")]
+    InvalidFundingSigned(ChannelId, String),
+
+    /// The target sent a `channel_ready` for a `channel_id` we never opened,
+    /// i.e. one for which no state was ever established.
     #[error("unknown channel: no tracked state for channel_id {0}")]
     UnknownChannel(ChannelId),
-
-    /// The target's `funding_signed` signature failed to verify against the
-    /// holder's initial commitment transaction.
-    #[error("invalid counterparty signature for channel_id {0}")]
-    InvalidCounterpartySignature(ChannelId),
 }
