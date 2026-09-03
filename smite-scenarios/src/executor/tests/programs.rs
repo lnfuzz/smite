@@ -2,9 +2,9 @@
 //!
 //! Each helper returns the instructions for one flow.
 
+use super::harness::{acceptor_funding_sk, opener_funding_sk};
 use crate::executor::*;
 use smite_ir::Instruction;
-use std::str::FromStr;
 
 /// Builds the 20 `open_channel` input instructions in wire order.
 pub fn open_channel_instructions() -> Vec<Instruction> {
@@ -93,14 +93,8 @@ pub fn open_channel_instructions() -> Vec<Instruction> {
 }
 
 pub fn create_and_broadcast_tx_instructions() -> Vec<Instruction> {
-    let opener_privkey =
-        SecretKey::from_str("30ff4956bbdd3222d44cc5e8a1261dab1e07957bdac5ae88fe3261ef321f3749")
-            .unwrap()
-            .secret_bytes();
-    let acceptor_privkey =
-        SecretKey::from_str("1552dfba4f6cf29a62a0af13c8d6981d36d0ef8d61ba10fb0fe90da7634d7e13")
-            .unwrap()
-            .secret_bytes();
+    let opener_privkey = opener_funding_sk().secret_bytes();
+    let acceptor_privkey = acceptor_funding_sk().secret_bytes();
 
     vec![
         Instruction {

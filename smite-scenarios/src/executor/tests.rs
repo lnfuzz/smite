@@ -1006,10 +1006,7 @@ fn execute_create_and_broadcast_tx() {
 
     assert_eq!(fx.bitcoin().broadcast_calls.len(), 1);
     let broadcast_tx = &fx.bitcoin().broadcast_calls[0];
-    assert_eq!(
-        broadcast_tx.compute_txid().to_string(),
-        "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
-    );
+    assert_eq!(broadcast_tx.compute_txid(), funding_outpoint().txid);
 }
 
 // LookupShortChannelId should combine the confirmed block position with
@@ -1167,21 +1164,11 @@ fn execute_create_funding_transaction_insufficient_funds() {
 fn execute_send_funding_created_and_recv_funding_signed() {
     // The acceptor replies with funding_signed carrying its signature over
     // the opener's commitment.
-    let channel_id = ChannelId::v1_from_funding_outpoint(OutPoint {
-        txid: "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
-            .parse()
-            .unwrap(),
-        vout: 0,
-    });
+    let channel_id = funding_channel_id();
 
-    // The expected signature here was computed using LDK as the source of
-    // truth.
     let mut fx = Fixture::new()
         .with_negotiation(sample_funding_negotiation())
-        .queue(&Message::FundingSigned(FundingSigned {
-            channel_id,
-            signature: "304402203dbf3dbf337b042a72576488c1fb019086089d8d790a47f652346cff2511b6e70220395fdf700cb82b0abfcfe8e0b7c822181f2ee72409c82c3ff8e04e36593662c7".parse().unwrap(),
-        }));
+        .queue(&funding_signed_reply(channel_id));
     fx.run(&Program {
         instructions: send_funding_created_and_recv_funding_signed_instructions(),
     });
@@ -1190,20 +1177,14 @@ fn execute_send_funding_created_and_recv_funding_signed() {
     let fc: FundingCreated = fx.sent(0);
 
     assert_eq!(fc.temporary_channel_id, TemporaryChannelId::new([0xbb; 32]));
-    assert_eq!(
-        fc.funding_txid.to_string(),
-        "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
-    );
+    assert_eq!(fc.funding_txid, funding_outpoint().txid);
     assert_eq!(fc.funding_output_index, 0);
 
     // Verify the signature sent by the opener on the acceptor side.
     let state = fx.channel_state(&channel_id);
     let holder = HolderIdentity {
         side: Side::Acceptor,
-        funding_privkey: SecretKey::from_str(
-            "1552dfba4f6cf29a62a0af13c8d6981d36d0ef8d61ba10fb0fe90da7634d7e13",
-        )
-        .unwrap(),
+        funding_privkey: acceptor_funding_sk(),
     };
 
     assert!(
@@ -1218,12 +1199,7 @@ fn execute_send_funding_created_and_recv_funding_signed() {
 
 #[test]
 fn execute_send_funding_created_uses_wire_funding_pubkey() {
-    let channel_id = ChannelId::v1_from_funding_outpoint(OutPoint {
-        txid: "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
-            .parse()
-            .unwrap(),
-        vout: 0,
-    });
+    let channel_id = funding_channel_id();
 
     // Swap out the SendFundingCreated privkey. This should not affect the
     // constructed channel config, which uses the negotiated pubkeys. It
@@ -1231,36 +1207,23 @@ fn execute_send_funding_created_uses_wire_funding_pubkey() {
     let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
     instrs[9].inputs[1] = 2;
 
-    // The same acceptor signature as the happy path (computed using LDK as
-    // the source of truth): computed over the the commitment implied by the
-    // negotiated funding pubkeys. It still verifies, because the config is
-    // built from the wire pubkeys rather than from the swapped privkey.
+    // The acceptor's signature still verifies, because the config is built
+    // from the wire pubkeys rather than from the swapped privkey.
     let mut fx = Fixture::new()
         .with_negotiation(sample_funding_negotiation())
-        .queue(&Message::FundingSigned(FundingSigned {
-            channel_id,
-            signature: "304402203dbf3dbf337b042a72576488c1fb019086089d8d790a47f652346cff2511b6e70220395fdf700cb82b0abfcfe8e0b7c822181f2ee72409c82c3ff8e04e36593662c7".parse().unwrap(),
-        }));
+        .queue(&funding_signed_reply(channel_id));
     fx.run(&Program {
         instructions: instrs,
     });
 
     let secp = Secp256k1::new();
-    let opener_pk = PublicKey::from_secret_key(
-        &secp,
-        &SecretKey::from_str("30ff4956bbdd3222d44cc5e8a1261dab1e07957bdac5ae88fe3261ef321f3749")
-            .unwrap(),
-    );
+    let opener_pk = PublicKey::from_secret_key(&secp, &opener_funding_sk());
     // The funding pubkey matches what was negotiated.
     let state = fx.channel_state(&channel_id);
     assert_eq!(state.config.opener.funding_pubkey, opener_pk);
     // But the swapped privkey used for signing is the acceptor's, which
     // does not match what was negotiated.
-    assert_eq!(
-        state.holder.funding_privkey,
-        SecretKey::from_str("1552dfba4f6cf29a62a0af13c8d6981d36d0ef8d61ba10fb0fe90da7634d7e13")
-            .unwrap()
-    );
+    assert_eq!(state.holder.funding_privkey, acceptor_funding_sk());
     assert_ne!(
         state.config.opener.funding_pubkey,
         PublicKey::from_secret_key(&secp, &state.holder.funding_privkey)
@@ -1279,12 +1242,7 @@ fn execute_send_funding_created_after_funding_built_does_not_track_channel() {
     };
 
     // Channel id derived from the first funding transaction's outpoint.
-    let channel_id = ChannelId::v1_from_funding_outpoint(OutPoint {
-        txid: "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
-            .parse()
-            .unwrap(),
-        vout: 0,
-    });
+    let channel_id = funding_channel_id();
 
     let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
     instrs.pop(); // Drop the trailing `RecvFundingSigned` instruction.
@@ -1362,10 +1320,7 @@ fn execute_send_funding_created_no_open_channel() {
 
     let fc: FundingCreated = fx.sent(0);
     assert_eq!(fc.temporary_channel_id, TemporaryChannelId::new([0xbb; 32]));
-    assert_eq!(
-        fc.funding_txid.to_string(),
-        "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
-    );
+    assert_eq!(fc.funding_txid, funding_outpoint().txid);
     assert_eq!(fc.funding_output_index, 0);
     assert_eq!(fc.signature, Signature::from_compact(&[0u8; 64]).unwrap());
     assert!(fx.channel_states().is_empty());
@@ -1388,10 +1343,7 @@ fn execute_send_funding_created_no_accept_channel() {
 
     let fc: FundingCreated = fx.sent(0);
     assert_eq!(fc.temporary_channel_id, TemporaryChannelId::new([0xbb; 32]));
-    assert_eq!(
-        fc.funding_txid.to_string(),
-        "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
-    );
+    assert_eq!(fc.funding_txid, funding_outpoint().txid);
     assert_eq!(fc.funding_output_index, 0);
     assert_eq!(fc.signature, Signature::from_compact(&[0u8; 64]).unwrap());
     assert!(fx.channel_states().is_empty());
@@ -1401,14 +1353,9 @@ fn execute_send_funding_created_no_accept_channel() {
 fn execute_recv_funding_signed_unknown_channel() {
     let channel_id = ChannelId::new([0xbb; 32]);
 
-    // The expected signature here was computed using LDK as the source of
-    // truth.
     let err = Fixture::new()
         .with_negotiation(sample_funding_negotiation())
-        .queue(&Message::FundingSigned(FundingSigned {
-            channel_id,
-            signature: "304402203dbf3dbf337b042a72576488c1fb019086089d8d790a47f652346cff2511b6e70220395fdf700cb82b0abfcfe8e0b7c822181f2ee72409c82c3ff8e04e36593662c7".parse().unwrap(),
-        }))
+        .queue(&funding_signed_reply(channel_id))
         .run_err(&Program {
             instructions: send_funding_created_and_recv_funding_signed_instructions(),
         });
@@ -1420,12 +1367,7 @@ fn execute_recv_funding_signed_unknown_channel() {
 
 #[test]
 fn execute_recv_funding_signed_invalid_signature() {
-    let channel_id = ChannelId::v1_from_funding_outpoint(OutPoint {
-        txid: "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
-            .parse()
-            .unwrap(),
-        vout: 0,
-    });
+    let channel_id = funding_channel_id();
     let err = Fixture::new()
         .with_negotiation(sample_funding_negotiation())
         .queue(&Message::FundingSigned(FundingSigned {
@@ -1444,12 +1386,7 @@ fn execute_recv_funding_signed_invalid_signature() {
 
 #[test]
 fn execute_send_channel_ready() {
-    let channel_id = ChannelId::v1_from_funding_outpoint(OutPoint {
-        txid: "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
-            .parse()
-            .unwrap(),
-        vout: 0,
-    });
+    let channel_id = funding_channel_id();
     let alias = ShortChannelId::new(538_532, 845, 1);
     let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
     instrs.extend([
@@ -1471,16 +1408,11 @@ fn execute_send_channel_ready() {
         },
     ]);
 
-    // We also need to send this `funding_signed`, since the instructions reused
-    // by this test expect one to be present in the executor's receive queue.
-    // The expected signature here was computed using LDK as the source of
-    // truth.
+    // We also need to queue a `funding_signed`, since the instructions reused
+    // by this test expect one to be present in the receive queue.
     let mut fx = Fixture::new()
         .with_negotiation(sample_funding_negotiation())
-        .queue(&Message::FundingSigned(FundingSigned {
-            channel_id,
-            signature: "304402203dbf3dbf337b042a72576488c1fb019086089d8d790a47f652346cff2511b6e70220395fdf700cb82b0abfcfe8e0b7c822181f2ee72409c82c3ff8e04e36593662c7".parse().unwrap(),
-        }));
+        .queue(&funding_signed_reply(channel_id));
     fx.run(&Program {
         instructions: instrs,
     });

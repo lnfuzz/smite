@@ -325,14 +325,48 @@ pub fn sample_accept_channel() -> AcceptChannel {
 }
 
 // -- Funding fixture --
+//
+// The funding keys are chosen from BOLT 3 test vectors. All other constants are
+// derived from these keys.
 
-/// The channel id the funding flow's transaction produces.
-pub fn funding_channel_id() -> ChannelId {
-    ChannelId::v1_from_funding_outpoint(OutPoint {
+/// The opener's funding key for the funding flow.
+pub fn opener_funding_sk() -> SecretKey {
+    SecretKey::from_str("30ff4956bbdd3222d44cc5e8a1261dab1e07957bdac5ae88fe3261ef321f3749")
+        .expect("valid secret key")
+}
+
+/// The acceptor's funding key for the funding flow.
+pub fn acceptor_funding_sk() -> SecretKey {
+    SecretKey::from_str("1552dfba4f6cf29a62a0af13c8d6981d36d0ef8d61ba10fb0fe90da7634d7e13")
+        .expect("valid secret key")
+}
+
+/// The outpoint of the funding transaction the funding-flow programs build.
+pub fn funding_outpoint() -> OutPoint {
+    OutPoint {
         txid: "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
             .parse()
             .expect("valid txid"),
         vout: 0,
+    }
+}
+
+/// The channel id the funding flow's transaction produces.
+pub fn funding_channel_id() -> ChannelId {
+    ChannelId::v1_from_funding_outpoint(funding_outpoint())
+}
+
+/// The acceptor's `funding_signed` for `channel_id`.
+///
+/// The signature was computed by LDK over this fixture's commitment, so the
+/// executor accepting it shows both implementations built the same commitment
+/// transaction.
+pub fn funding_signed_reply(channel_id: ChannelId) -> Message {
+    Message::FundingSigned(FundingSigned {
+        channel_id,
+        signature: "304402203dbf3dbf337b042a72576488c1fb019086089d8d790a47f652346cff2511b6e70220395fdf700cb82b0abfcfe8e0b7c822181f2ee72409c82c3ff8e04e36593662c7"
+            .parse()
+            .expect("valid DER signature"),
     })
 }
 
@@ -350,16 +384,11 @@ pub fn channel_ready_reply(second_per_commitment_point: PublicKey) -> Message {
 pub fn recv_channel_ready_fixture() -> (Fixture, PublicKey) {
     let target_pcp = sample_pubkey(1);
 
-    // We also need to queue this `funding_signed`, since the instructions
-    // reused by these tests expect one to be present in the receive queue.
-    // The expected signature here was computed using LDK as the source of
-    // truth.
+    // We also need to queue a `funding_signed`, since the instructions reused
+    // by these tests expect one to be present in the receive queue.
     let fx = Fixture::new()
         .with_negotiation(sample_funding_negotiation())
-        .queue(&Message::FundingSigned(FundingSigned {
-            channel_id: funding_channel_id(),
-            signature: "304402203dbf3dbf337b042a72576488c1fb019086089d8d790a47f652346cff2511b6e70220395fdf700cb82b0abfcfe8e0b7c822181f2ee72409c82c3ff8e04e36593662c7".parse().unwrap(),
-        }))
+        .queue(&funding_signed_reply(funding_channel_id()))
         .queue(&channel_ready_reply(target_pcp));
 
     (fx, target_pcp)
@@ -368,14 +397,8 @@ pub fn recv_channel_ready_fixture() -> (Fixture, PublicKey) {
 #[allow(clippy::similar_names)]
 pub fn sample_funding_negotiation() -> PendingChannel {
     let secp = Secp256k1::new();
-    let opener_sk =
-        SecretKey::from_str("30ff4956bbdd3222d44cc5e8a1261dab1e07957bdac5ae88fe3261ef321f3749")
-            .unwrap();
-    let acceptor_sk =
-        SecretKey::from_str("1552dfba4f6cf29a62a0af13c8d6981d36d0ef8d61ba10fb0fe90da7634d7e13")
-            .unwrap();
-    let opener_pk = PublicKey::from_secret_key(&secp, &opener_sk);
-    let acceptor_pk = PublicKey::from_secret_key(&secp, &acceptor_sk);
+    let opener_pk = PublicKey::from_secret_key(&secp, &opener_funding_sk());
+    let acceptor_pk = PublicKey::from_secret_key(&secp, &acceptor_funding_sk());
 
     PendingChannel {
         open_channel: OpenChannel {
