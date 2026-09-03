@@ -324,6 +324,47 @@ pub fn sample_accept_channel() -> AcceptChannel {
     }
 }
 
+// -- Funding fixture --
+
+/// The channel id the funding flow's transaction produces.
+pub fn funding_channel_id() -> ChannelId {
+    ChannelId::v1_from_funding_outpoint(OutPoint {
+        txid: "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
+            .parse()
+            .expect("valid txid"),
+        vout: 0,
+    })
+}
+
+/// The target's `channel_ready` for the funding flow's channel.
+pub fn channel_ready_reply(second_per_commitment_point: PublicKey) -> Message {
+    Message::ChannelReady(ChannelReady {
+        channel_id: funding_channel_id(),
+        second_per_commitment_point,
+        tlvs: ChannelReadyTlvs::default(),
+    })
+}
+
+/// A fixture with the funding negotiation seeded and both target replies
+/// queued, plus the target's per-commitment point for the assertions.
+pub fn recv_channel_ready_fixture() -> (Fixture, PublicKey) {
+    let target_pcp = sample_pubkey(1);
+
+    // We also need to queue this `funding_signed`, since the instructions
+    // reused by these tests expect one to be present in the receive queue.
+    // The expected signature here was computed using LDK as the source of
+    // truth.
+    let fx = Fixture::new()
+        .with_negotiation(sample_funding_negotiation())
+        .queue(&Message::FundingSigned(FundingSigned {
+            channel_id: funding_channel_id(),
+            signature: "304402203dbf3dbf337b042a72576488c1fb019086089d8d790a47f652346cff2511b6e70220395fdf700cb82b0abfcfe8e0b7c822181f2ee72409c82c3ff8e04e36593662c7".parse().unwrap(),
+        }))
+        .queue(&channel_ready_reply(target_pcp));
+
+    (fx, target_pcp)
+}
+
 #[allow(clippy::similar_names)]
 pub fn sample_funding_negotiation() -> PendingChannel {
     let secp = Secp256k1::new();
