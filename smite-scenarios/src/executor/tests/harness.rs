@@ -20,10 +20,6 @@ impl MockConnection {
             sent: Vec::new(),
         }
     }
-
-    pub fn queue_recv(&mut self, msg_bytes: Vec<u8>) {
-        self.recv_queue.push_back(msg_bytes);
-    }
 }
 
 impl Connection for MockConnection {
@@ -131,6 +127,12 @@ impl Fixture {
         }
     }
 
+    /// Funds the wallet with `utxos` instead of the default [`sample_utxo`].
+    pub fn with_utxos(mut self, utxos: Vec<Utxo>) -> Self {
+        self.executor.bitcoin_cli.utxos = utxos;
+        self
+    }
+
     /// Records `pending` as the negotiation for its `temporary_channel_id`.
     pub fn with_negotiation(mut self, pending: PendingChannel) -> Self {
         self.executor
@@ -143,6 +145,11 @@ impl Fixture {
     pub fn queue(mut self, msg: &Message) -> Self {
         self.executor.conn.recv_queue.push_back(msg.encode());
         self
+    }
+
+    /// Returns the number of queued peer replies the executor has not read.
+    pub fn queued_len(&self) -> usize {
+        self.executor.conn.recv_queue.len()
     }
 
     /// Runs `program` against the target, panicking if execution fails.
@@ -167,9 +174,27 @@ impl Fixture {
             .expect("negotiation recorded")
     }
 
+    /// Returns the channel state recorded for `id`.
+    pub fn channel_state(&self, id: &ChannelId) -> &ChannelState {
+        self.executor
+            .channel_states
+            .get(id)
+            .expect("channel state recorded")
+    }
+
+    /// Returns every channel state the executor recorded.
+    pub fn channel_states(&self) -> &HashMap<ChannelId, ChannelState> {
+        &self.executor.channel_states
+    }
+
     /// Returns the mock bitcoind the executor drives.
     pub fn bitcoin(&self) -> &MockBitcoinCli {
         &self.executor.bitcoin_cli
+    }
+
+    /// Returns the transactions held outside Bitcoin Core's mempool.
+    pub fn private_mempool(&self) -> &[(Txid, String)] {
+        &self.executor.private_mempool
     }
 
     /// Returns the number of messages the executor sent.
@@ -225,6 +250,8 @@ macro_rules! impl_from_message {
 impl_from_message! {
     Pong => PONG,
     OpenChannel => OPEN_CHANNEL,
+    FundingCreated => FUNDING_CREATED,
+    ChannelReady => CHANNEL_READY,
     Shutdown => SHUTDOWN,
     ChannelAnnouncement => CHANNEL_ANNOUNCEMENT,
     NodeAnnouncement => NODE_ANNOUNCEMENT,
