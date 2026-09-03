@@ -8,13 +8,13 @@ use std::str::FromStr;
 
 // -- MockConnection --
 
-pub struct MockConnection {
-    pub recv_queue: VecDeque<Vec<u8>>,
-    pub sent: Vec<Vec<u8>>,
+struct MockConnection {
+    recv_queue: VecDeque<Vec<u8>>,
+    sent: Vec<Vec<u8>>,
 }
 
 impl MockConnection {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             recv_queue: VecDeque::new(),
             sent: Vec::new(),
@@ -51,9 +51,9 @@ pub struct MockBitcoinCli {
     pub mined_private_mempool: Vec<String>,
     pub broadcast_calls: Vec<Transaction>,
     pub block_position_lookups: Vec<Txid>,
-    pub utxos: Vec<Utxo>,
-    pub change_spk: ScriptBuf,
-    pub confirmations: u32,
+    utxos: Vec<Utxo>,
+    change_spk: ScriptBuf,
+    confirmations: u32,
 }
 
 impl BitcoinRpc for MockBitcoinCli {
@@ -294,7 +294,7 @@ pub fn sample_utxo() -> Utxo {
     }
 }
 
-pub fn sample_change_spk() -> ScriptBuf {
+fn sample_change_spk() -> ScriptBuf {
     ScriptBuf::from(
         hex::decode("00142e532c12351a5c81e23c8a76d19345ca7b6de57a")
             .expect("valid P2WPKH scriptpubkey hex"),
