@@ -131,11 +131,40 @@ impl Fixture {
         }
     }
 
+    /// Records `pending` as the negotiation for its `temporary_channel_id`.
+    pub fn with_negotiation(mut self, pending: PendingChannel) -> Self {
+        self.executor
+            .negotiations
+            .insert(pending.open_channel.temporary_channel_id, pending);
+        self
+    }
+
+    /// Queues `msg` as the peer's next reply.
+    pub fn queue(mut self, msg: &Message) -> Self {
+        self.executor.conn.recv_queue.push_back(msg.encode());
+        self
+    }
+
     /// Runs `program` against the target, panicking if execution fails.
     pub fn run(&mut self, program: &Program) {
         self.executor
             .execute(program, std::time::Instant::now())
             .expect("program execution successful");
+    }
+
+    /// Runs `program` against the target, returning the error it fails with.
+    pub fn run_err(&mut self, program: &Program) -> ExecuteError {
+        self.executor
+            .execute(program, std::time::Instant::now())
+            .expect_err("program execution failure")
+    }
+
+    /// Returns the negotiation recorded for `id`.
+    pub fn negotiation(&self, id: &TemporaryChannelId) -> &PendingChannel {
+        self.executor
+            .negotiations
+            .get(id)
+            .expect("negotiation recorded")
     }
 
     /// Returns the mock bitcoind the executor drives.
@@ -194,6 +223,7 @@ macro_rules! impl_from_message {
 }
 
 impl_from_message! {
+    Pong => PONG,
     OpenChannel => OPEN_CHANNEL,
     Shutdown => SHUTDOWN,
     ChannelAnnouncement => CHANNEL_ANNOUNCEMENT,
