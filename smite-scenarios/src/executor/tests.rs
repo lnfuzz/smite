@@ -2357,7 +2357,10 @@ fn extract_tlvs_present() {
     let ac = sample_accept_channel();
     assert_eq!(
         extract_field(&ac, AcceptChannelField::UpfrontShutdownScript),
-        Variable::Bytes(vec![0xde, 0xad])
+        Variable::Bytes(
+            hex::decode("00142e532c12351a5c81e23c8a76d19345ca7b6de57a")
+                .expect("valid P2WPKH scriptpubkey hex")
+        )
     );
     assert_eq!(
         extract_field(&ac, AcceptChannelField::ChannelType),

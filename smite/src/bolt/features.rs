@@ -9,6 +9,8 @@ pub type FeatureBit = usize;
 pub struct Features(Vec<u8>);
 
 impl Features {
+    /// `option_upfront_shutdown_script` (bits 4/5).
+    pub const OPTION_UPFRONT_SHUTDOWN_SCRIPT: FeatureBit = 4;
     /// `gossip_queries` (bits 6/7).
     pub const GOSSIP_QUERIES: FeatureBit = 6;
     /// `gossip_queries_ex` (bits 10/11).

@@ -170,7 +170,10 @@ pub fn sample_accept_channel() -> AcceptChannel {
         htlc_basepoint: sample_pubkey(5),
         first_per_commitment_point: sample_pubkey(6),
         tlvs: AcceptChannelTlvs {
-            upfront_shutdown_script: Some(vec![0xde, 0xad]),
+            upfront_shutdown_script: Some(
+                hex::decode("00142e532c12351a5c81e23c8a76d19345ca7b6de57a")
+                    .expect("valid P2WPKH scriptpubkey hex"),
+            ),
             channel_type: Some(vec![0x40, 0x10, 0x00]),
         },
     }

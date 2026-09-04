@@ -1,7 +1,7 @@
 //! BOLT 2 `accept_channel` oracle, for the v1 outbound channel funding flow.
 
 use super::Oracle;
-use crate::bolt::{AcceptChannel, Features, OpenChannel};
+use crate::bolt::{AcceptChannel, Features, OpenChannel, is_standard_shutdown_script};
 use crate::channel_tx::CommitmentCost;
 use crate::pending_channel::PendingChannel;
 use crate::violation::Violation;
@@ -20,6 +20,9 @@ pub struct AcceptChannelContext<'a> {
     /// The negotiation the `accept_channel` answers, identified by its
     /// `temporary_channel_id`, or `None` if no matching `open_channel` was sent.
     pub negotiation: Option<&'a PendingChannel>,
+    /// Features negotiated with the peer, used to judge which
+    /// `upfront_shutdown_script` forms are standard.
+    pub features: &'a Features,
 }
 
 /// Checks whether the `open_channel` answered by an `accept_channel` satisfied
@@ -53,7 +56,9 @@ impl Oracle<AcceptChannelContext<'_>> for AcceptChannelOracle {
         }
 
         // Check that the `accept_channel` itself is valid.
-        if let Err(reason) = verify_accept_channel(context.accept_channel, open_channel) {
+        if let Err(reason) =
+            verify_accept_channel(context.accept_channel, open_channel, context.features)
+        {
             return Err(Violation::InvalidAcceptChannel(
                 context.accept_channel.temporary_channel_id,
                 format!("invalid accept_channel: {reason}"),
@@ -153,7 +158,21 @@ fn verify_accepted_open_channel(open_channel: &OpenChannel) -> Result<(), String
 fn verify_accept_channel(
     accept_channel: &AcceptChannel,
     open_channel: &OpenChannel,
+    features: &Features,
 ) -> Result<(), String> {
+    // Check that the upfront script is standard if option_upfront_shutdown_script is negotiated.
+    // A zero-length script is the BOLT 2 opt-out.
+    if features.supports_feature(Features::OPTION_UPFRONT_SHUTDOWN_SCRIPT)
+        && let Some(spk) = &accept_channel.tlvs.upfront_shutdown_script
+        && !spk.is_empty()
+        && !is_standard_shutdown_script(spk, features)
+    {
+        return Err(format!(
+            "upfront_shutdown_script {} is not a standard scriptpubkey",
+            hex::encode(spk),
+        ));
+    }
+
     // Check that the channel type was included.
     let Some(channel_type) = accept_channel
         .tlvs
@@ -345,9 +364,19 @@ mod tests {
 
     #[track_caller]
     fn assert_pass(accept_channel: &AcceptChannel, negotiation: Option<&PendingChannel>) {
+        assert_pass_with_features(accept_channel, negotiation, &Features::new());
+    }
+
+    #[track_caller]
+    fn assert_pass_with_features(
+        accept_channel: &AcceptChannel,
+        negotiation: Option<&PendingChannel>,
+        features: &Features,
+    ) {
         if let Err(err) = AcceptChannelOracle.evaluate(&AcceptChannelContext {
             accept_channel,
             negotiation,
+            features,
         }) {
             panic!("expected pass, got: {err}");
         }
@@ -359,9 +388,20 @@ mod tests {
         negotiation: Option<&PendingChannel>,
         expected: &str,
     ) {
+        assert_fail_with_features(accept_channel, negotiation, &Features::new(), expected);
+    }
+
+    #[track_caller]
+    fn assert_fail_with_features(
+        accept_channel: &AcceptChannel,
+        negotiation: Option<&PendingChannel>,
+        features: &Features,
+        expected: &str,
+    ) {
         match AcceptChannelOracle.evaluate(&AcceptChannelContext {
             accept_channel,
             negotiation,
+            features,
         }) {
             Err(Violation::InvalidAcceptChannel(chan_id, reason)) => {
                 assert_eq!(accept_channel.temporary_channel_id, chan_id);
@@ -579,6 +619,123 @@ mod tests {
             &ac,
             Some(&pending_negotiation(open_channel())),
             "invalid accept_channel: neither side exceeds channel reserve",
+        );
+    }
+
+    /// P2WPKH scriptpubkey: `OP_0 <20-byte push>`.
+    fn p2wpkh() -> Vec<u8> {
+        let mut spk = vec![0x00, 0x14];
+        spk.extend_from_slice(&[0xab; 20]);
+        spk
+    }
+
+    /// P2TR scriptpubkey: `OP_1 <32-byte push>`, standard only with
+    /// `option_shutdown_anysegwit`.
+    fn p2tr() -> Vec<u8> {
+        let mut spk = vec![0x51, 0x20];
+        spk.extend_from_slice(&[0xcd; 32]);
+        spk
+    }
+
+    /// `OP_RETURN <6-byte push>`, standard only with `option_simple_close`.
+    fn op_return() -> Vec<u8> {
+        let mut spk = vec![0x6a, 0x06];
+        spk.extend_from_slice(&[0xef; 6]);
+        spk
+    }
+
+    fn with_upfront() -> Features {
+        Features::from_bits(&[Features::OPTION_UPFRONT_SHUTDOWN_SCRIPT])
+    }
+
+    #[test]
+    fn accept_channel_standard_upfront_shutdown_script_passes() {
+        let mut ac = accept_channel();
+        ac.tlvs.upfront_shutdown_script = Some(p2wpkh());
+
+        assert_pass_with_features(
+            &ac,
+            Some(&pending_negotiation(open_channel())),
+            &with_upfront(),
+        );
+    }
+
+    #[test]
+    fn accept_channel_empty_upfront_shutdown_script_passes() {
+        let mut ac = accept_channel();
+        ac.tlvs.upfront_shutdown_script = Some(vec![]);
+
+        assert_pass_with_features(
+            &ac,
+            Some(&pending_negotiation(open_channel())),
+            &with_upfront(),
+        );
+    }
+
+    #[test]
+    fn accept_channel_non_standard_upfront_shutdown_script_fails() {
+        let mut ac = accept_channel();
+        ac.tlvs.upfront_shutdown_script = Some(vec![0xde, 0xad, 0xbe, 0xef]);
+
+        assert_fail_with_features(
+            &ac,
+            Some(&pending_negotiation(open_channel())),
+            &with_upfront(),
+            "invalid accept_channel: upfront_shutdown_script deadbeef is not a standard scriptpubkey",
+        );
+    }
+
+    #[test]
+    fn accept_channel_upfront_shutdown_script_unchecked_without_feature() {
+        let mut ac = accept_channel();
+        ac.tlvs.upfront_shutdown_script = Some(vec![0xde, 0xad, 0xbe, 0xef]);
+
+        assert_pass_with_features(
+            &ac,
+            Some(&pending_negotiation(open_channel())),
+            &Features::new(),
+        );
+    }
+
+    #[test]
+    fn accept_channel_anysegwit_upfront_shutdown_script_requires_feature() {
+        let mut ac = accept_channel();
+        ac.tlvs.upfront_shutdown_script = Some(p2tr());
+
+        assert_fail_with_features(
+            &ac,
+            Some(&pending_negotiation(open_channel())),
+            &with_upfront(),
+            "invalid accept_channel: upfront_shutdown_script",
+        );
+        assert_pass_with_features(
+            &ac,
+            Some(&pending_negotiation(open_channel())),
+            &Features::from_bits(&[
+                Features::OPTION_UPFRONT_SHUTDOWN_SCRIPT,
+                Features::OPTION_SHUTDOWN_ANYSEGWIT,
+            ]),
+        );
+    }
+
+    #[test]
+    fn accept_channel_simple_close_upfront_shutdown_script_requires_feature() {
+        let mut ac = accept_channel();
+        ac.tlvs.upfront_shutdown_script = Some(op_return());
+
+        assert_fail_with_features(
+            &ac,
+            Some(&pending_negotiation(open_channel())),
+            &with_upfront(),
+            "invalid accept_channel: upfront_shutdown_script",
+        );
+        assert_pass_with_features(
+            &ac,
+            Some(&pending_negotiation(open_channel())),
+            &Features::from_bits(&[
+                Features::OPTION_UPFRONT_SHUTDOWN_SCRIPT,
+                Features::OPTION_SIMPLE_CLOSE,
+            ]),
         );
     }
 
