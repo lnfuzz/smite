@@ -1,5 +1,6 @@
 //! Mutator that tweaks embedded literal values in Load and Extract operations.
 
+use bitcoin::secp256k1::SecretKey;
 use rand::seq::IteratorRandom;
 use rand::{Rng, RngExt};
 use smite::bolt::{MAX_MESSAGE_SIZE, ShortChannelId};
@@ -60,7 +61,11 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
             mutate_bytes(bytes, rng);
             true
         }
-        Operation::LoadPrivateKey(bytes) | Operation::LoadChannelId(bytes) => {
+        Operation::LoadPrivateKey(bytes) => {
+            mutate_private_key(bytes, rng);
+            true
+        }
+        Operation::LoadChannelId(bytes) => {
             mutate_fixed_bytes(bytes, rng);
             true
         }
@@ -216,8 +221,33 @@ fn shuffle_subrange(bytes: &mut [u8], rng: &mut impl Rng) {
     }
 }
 
+/// Picks the byte used by repeated-fill mutations, biased toward
+/// `INTERESTING_U8`.
+fn repeated_byte(rng: &mut impl Rng) -> u8 {
+    if rng.random_range(0..4) == 0 {
+        rng.random()
+    } else {
+        interesting_u8(rng)
+    }
+}
+
+/// Overwrites a range of `bytes` with a single repeated byte, preserving the
+/// slice's length.
+fn fill_repeated(bytes: &mut [u8], rng: &mut impl Rng) {
+    if bytes.is_empty() {
+        return;
+    }
+    let (start, len) = if rng.random() {
+        (0, bytes.len())
+    } else {
+        let len = rng.random_range(1..=bytes.len());
+        (rng.random_range(0..=bytes.len() - len), len)
+    };
+    bytes[start..start + len].fill(repeated_byte(rng));
+}
+
 fn mutate_bytes(bytes: &mut Vec<u8>, rng: &mut impl Rng) {
-    match rng.random_range(0..10) {
+    match rng.random_range(0..12) {
         // Flip a random bit.
         0 if !bytes.is_empty() => {
             let idx = rng.random_range(0..bytes.len());
@@ -242,7 +272,7 @@ fn mutate_bytes(bytes: &mut Vec<u8>, rng: &mut impl Rng) {
             let pos = rng.random_range(0..=bytes.len());
             let max_count = (MAX_MESSAGE_SIZE - bytes.len()).min(128);
             let count = rng.random_range(2..=max_count);
-            let byte: u8 = rng.random();
+            let byte = repeated_byte(rng);
             bytes.splice(pos..pos, std::iter::repeat_n(byte, count));
         }
         // Remove a random byte.
@@ -275,6 +305,14 @@ fn mutate_bytes(bytes: &mut Vec<u8>, rng: &mut impl Rng) {
             let dst = rng.random_range(0..=bytes.len() - len);
             bytes.copy_within(src..src + len, dst);
         }
+        // Overwrite a byte range with a repeated byte.
+        9 if !bytes.is_empty() => fill_repeated(bytes, rng),
+        // Replace with a repeated byte at a random length.
+        10 => {
+            let len = rng.random_range(0..=256);
+            bytes.clear();
+            bytes.resize(len, repeated_byte(rng));
+        }
         // Replace with random length and content.
         _ => {
             let len = rng.random_range(0..=256);
@@ -290,7 +328,7 @@ fn mutate_fixed_bytes(bytes: &mut [u8], rng: &mut impl Rng) {
         return;
     }
     let n = bytes.len();
-    match rng.random_range(0..6) {
+    match rng.random_range(0..7) {
         // Flip a random bit.
         0 => {
             let idx = rng.random_range(0..n);
@@ -321,8 +359,28 @@ fn mutate_fixed_bytes(bytes: &mut [u8], rng: &mut impl Rng) {
             let dst = rng.random_range(0..=n - len);
             bytes.copy_within(src..src + len, dst);
         }
+        // Overwrite a byte range with a repeated byte.
+        5 => fill_repeated(bytes, rng),
         // Randomize entirely.
         _ => rng.fill(bytes),
+    }
+}
+
+/// Tweaks a private key in place, keeping it a valid secp256k1 scalar.
+///
+/// The executor derives points and signs with these keys, so an out-of-range
+/// key aborts the run instead of exercising the target. Uniformly random bytes
+/// are out of range with probability ~2^-128, but repeated-byte fills land on
+/// the invalid values (all-zero, and all-`0xFF` runs that reach the curve
+/// order) often enough to matter, so the rare invalid result is repaired.
+fn mutate_private_key(bytes: &mut [u8; 32], rng: &mut impl Rng) {
+    mutate_fixed_bytes(bytes, rng);
+    if SecretKey::from_slice(bytes).is_err() {
+        // Only zero and values >= the curve order are invalid. The order is
+        // just under 2^256, so clearing the top byte pulls any out-of-range
+        // value below it, and setting the low bit rules out zero.
+        bytes[0] = 0;
+        bytes[31] |= 1;
     }
 }
 
@@ -533,6 +591,124 @@ mod tests {
             }
         }
         assert!(mutated, "shuffle_subrange doesn't mutate input");
+    }
+
+    #[test]
+    fn repeated_byte_is_biased_toward_interesting() {
+        let mut rng = SmallRng::seed_from_u64(0);
+        let interesting = (0..1000)
+            .filter(|_| INTERESTING_U8.contains(&repeated_byte(&mut rng)))
+            .count();
+
+        // 3/4 of the draws come straight from INTERESTING_U8, plus the rare
+        // random byte that happens to land on one.
+        assert!(
+            interesting > 600,
+            "repeated_byte is not biased toward INTERESTING_U8: {interesting}/1000"
+        );
+    }
+
+    #[test]
+    fn fill_repeated_preserves_length_and_writes_a_run() {
+        let mut rng = SmallRng::seed_from_u64(0);
+        let original: Vec<u8> = (0..32).collect();
+
+        for _ in 0..100 {
+            let mut bytes = original.clone();
+            fill_repeated(&mut bytes, &mut rng);
+            assert_eq!(bytes.len(), original.len(), "fill_repeated changed length");
+
+            let run: Vec<u8> = bytes
+                .iter()
+                .zip(&original)
+                .filter_map(|(new, old)| (new != old).then_some(*new))
+                .collect();
+            assert!(
+                run.windows(2).all(|w| w[0] == w[1]),
+                "fill_repeated wrote more than one value: {run:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fill_repeated_produces_boundary_runs() {
+        let mut rng = SmallRng::seed_from_u64(0);
+        let mut all_zeros = false;
+        let mut all_ones = false;
+
+        for _ in 0..1000 {
+            let mut bytes = [0x5a; 32];
+            fill_repeated(&mut bytes, &mut rng);
+            all_zeros |= bytes == [0x00; 32];
+            all_ones |= bytes == [0xFF; 32];
+        }
+        assert!(all_zeros, "fill_repeated never produced an all-zero field");
+        assert!(all_ones, "fill_repeated never produced an all-ones field");
+    }
+
+    #[test]
+    fn mutate_private_key_stays_on_curve() {
+        let mut rng = SmallRng::seed_from_u64(0);
+
+        // Walk from each starting point that repeated fills are most likely to
+        // push out of range, mutating cumulatively so the walk visits the
+        // repaired keys too.
+        for start in [[0x00; 32], [0xFF; 32], [0x5a; 32]] {
+            let mut bytes = start;
+            for _ in 0..10_000 {
+                mutate_private_key(&mut bytes, &mut rng);
+                assert!(
+                    SecretKey::from_slice(&bytes).is_ok(),
+                    "mutate_private_key produced an invalid key: {bytes:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fill_repeated_empty_is_noop() {
+        let mut rng = SmallRng::seed_from_u64(0);
+        let mut empty: Vec<u8> = vec![];
+        fill_repeated(&mut empty, &mut rng);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn mutate_fixed_bytes_produces_boundary_runs() {
+        let mut rng = SmallRng::seed_from_u64(0);
+        let mut all_zeros = false;
+        let mut all_ones = false;
+
+        for _ in 0..10_000 {
+            let mut bytes = [0x5a; 32];
+            mutate_fixed_bytes(&mut bytes, &mut rng);
+            all_zeros |= bytes == [0x00; 32];
+            all_ones |= bytes == [0xFF; 32];
+        }
+        assert!(
+            all_zeros,
+            "mutate_fixed_bytes never produced an all-zero field"
+        );
+        assert!(
+            all_ones,
+            "mutate_fixed_bytes never produced an all-ones field"
+        );
+    }
+
+    #[test]
+    fn mutate_bytes_produces_boundary_runs() {
+        let mut rng = SmallRng::seed_from_u64(0);
+        let mut all_zeros = false;
+        let mut all_ones = false;
+
+        for _ in 0..10_000 {
+            let mut bytes = vec![0x5a; 32];
+            mutate_bytes(&mut bytes, &mut rng);
+            all_zeros |= !bytes.is_empty() && bytes.iter().all(|b| *b == 0x00);
+            all_ones |= !bytes.is_empty() && bytes.iter().all(|b| *b == 0xFF);
+        }
+        assert!(all_zeros, "mutate_bytes never produced an all-zero field");
+        assert!(all_ones, "mutate_bytes never produced an all-ones field");
     }
 
     #[test]

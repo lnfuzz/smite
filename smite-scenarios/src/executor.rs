@@ -307,7 +307,9 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
     /// - `LoadBytes` / `LoadFeatures` payload exceeding `MAX_MESSAGE_SIZE` (panics
     ///   inside the encoder)
     /// - `LoadPrivateKey` whose bytes are all-zero or >= the secp256k1 curve
-    ///   order (probability ~2^-128 for uniform random input)
+    ///   order. Program producers keep keys in range: the builder draws them
+    ///   uniformly (out of range with probability ~2^-128) and the mutator
+    ///   repairs any out-of-range result.
     #[allow(clippy::too_many_lines)]
     pub fn execute(
         &mut self,
