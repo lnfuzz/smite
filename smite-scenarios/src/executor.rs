@@ -22,7 +22,7 @@ use smite::oracles::{AcceptChannelContext, AcceptChannelOracle, Oracle};
 use smite::pending_channel::PendingChannel;
 use smite::violation::Violation;
 use smite_ir::operation::AcceptChannelField;
-use smite_ir::{Operation, Program, Variable};
+use smite_ir::{Operation, Program, Variable, VariableType};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
@@ -483,7 +483,11 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                 }
 
                 Operation::RecvAcceptChannel => {
-                    consume_sent_open_channel(&mut variables, instr.inputs[0]);
+                    consume_affine(
+                        &mut variables,
+                        instr.inputs[0],
+                        VariableType::SentOpenChannel,
+                    );
                     log::debug!("[{:?}] RecvAcceptChannel: waiting", start.elapsed());
                     let ac = recv_accept_channel(&mut self.conn)?;
                     log::debug!("[{:?}] RecvAcceptChannel: received", start.elapsed());
@@ -496,7 +500,11 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                 }
 
                 Operation::RecvFundingSigned => {
-                    consume_sent_funding_created(&mut variables, instr.inputs[0]);
+                    consume_affine(
+                        &mut variables,
+                        instr.inputs[0],
+                        VariableType::SentFundingCreated,
+                    );
                     log::debug!("[{:?}] RecvFundingSigned: waiting", start.elapsed());
                     let fs = recv_funding_signed(&mut self.conn)?;
                     log::debug!("[{:?}] RecvFundingSigned: received", start.elapsed());
@@ -600,197 +608,68 @@ fn resolve(variables: &[Option<Variable>], index: usize) -> &Variable {
         .unwrap_or_else(|| panic!("variable {index} is void"))
 }
 
-fn resolve_amount(variables: &[Option<Variable>], index: usize) -> u64 {
-    match resolve(variables, index) {
-        Variable::Amount(v) => *v,
-        other => panic!(
-            "variable {index}: expected Amount, got {:?}",
-            other.var_type()
-        ),
-    }
+fn type_mismatch(index: usize, expected: VariableType, actual: &Variable) -> ! {
+    panic!(
+        "variable {index}: expected {expected:?}, got {:?}",
+        actual.var_type()
+    )
 }
 
-fn resolve_feerate(variables: &[Option<Variable>], index: usize) -> u32 {
-    match resolve(variables, index) {
-        Variable::FeeratePerKw(v) => *v,
-        other => panic!(
-            "variable {index}: expected FeeratePerKw, got {:?}",
-            other.var_type(),
-        ),
-    }
-}
-
-fn resolve_forwarding_fee(variables: &[Option<Variable>], index: usize) -> u32 {
-    match resolve(variables, index) {
-        Variable::ForwardingFee(v) => *v,
-        other => panic!(
-            "variable {index}: expected ForwardingFee, got {:?}",
-            other.var_type(),
-        ),
-    }
-}
-
-fn resolve_timestamp(variables: &[Option<Variable>], index: usize) -> u32 {
-    match resolve(variables, index) {
-        Variable::Timestamp(v) => *v,
-        other => panic!(
-            "variable {index}: expected Timestamp, got {:?}",
-            other.var_type(),
-        ),
-    }
-}
-
-fn resolve_u16(variables: &[Option<Variable>], index: usize) -> u16 {
-    match resolve(variables, index) {
-        Variable::U16(v) => *v,
-        other => panic!("variable {index}: expected U16, got {:?}", other.var_type()),
-    }
-}
-
-fn resolve_u8(variables: &[Option<Variable>], index: usize) -> u8 {
-    match resolve(variables, index) {
-        Variable::U8(v) => *v,
-        other => panic!("variable {index}: expected U8, got {:?}", other.var_type()),
-    }
-}
-
-fn resolve_bytes(variables: &[Option<Variable>], index: usize) -> &[u8] {
-    match resolve(variables, index) {
-        Variable::Bytes(v) => v,
-        other => panic!(
-            "variable {index}: expected Bytes, got {:?}",
-            other.var_type()
-        ),
-    }
-}
-
-fn resolve_features(variables: &[Option<Variable>], index: usize) -> &[u8] {
-    match resolve(variables, index) {
-        Variable::Features(v) => v,
-        other => panic!(
-            "variable {index}: expected Features, got {:?}",
-            other.var_type(),
-        ),
-    }
-}
-
-fn resolve_chain_hash(variables: &[Option<Variable>], index: usize) -> [u8; 32] {
-    match resolve(variables, index) {
-        Variable::ChainHash(v) => *v,
-        other => panic!(
-            "variable {index}: expected ChainHash, got {:?}",
-            other.var_type(),
-        ),
-    }
-}
-
-fn resolve_channel_id(variables: &[Option<Variable>], index: usize) -> ChannelId {
-    match resolve(variables, index) {
-        Variable::ChannelId(v) => *v,
-        other => panic!(
-            "variable {index}: expected ChannelId, got {:?}",
-            other.var_type(),
-        ),
-    }
-}
-
-fn resolve_pubkey(variables: &[Option<Variable>], index: usize) -> PublicKey {
-    match resolve(variables, index) {
-        Variable::Point(pk) => *pk,
-        other => panic!(
-            "variable {index}: expected Point, got {:?}",
-            other.var_type()
-        ),
-    }
-}
-
-fn resolve_short_channel_id(variables: &[Option<Variable>], index: usize) -> ShortChannelId {
-    match resolve(variables, index) {
-        Variable::ShortChannelId(v) => *v,
-        other => panic!(
-            "variable {index}: expected ShortChannelId, got {:?}",
-            other.var_type(),
-        ),
-    }
-}
-
-fn resolve_private_key(variables: &[Option<Variable>], index: usize) -> [u8; 32] {
-    match resolve(variables, index) {
-        Variable::PrivateKey(v) => *v,
-        other => panic!(
-            "variable {index}: expected PrivateKey, got {:?}",
-            other.var_type(),
-        ),
-    }
-}
-
-fn resolve_message(variables: &[Option<Variable>], index: usize) -> &[u8] {
-    match resolve(variables, index) {
-        Variable::Message(v) => v,
-        other => panic!(
-            "variable {index}: expected Message, got {:?}",
-            other.var_type()
-        ),
-    }
-}
-
-fn resolve_open_channel_message(variables: &[Option<Variable>], index: usize) -> &OpenChannel {
-    match resolve(variables, index) {
-        Variable::OpenChannelMessage(v) => v,
-        other => panic!(
-            "variable {index}: expected OpenChannelMessage, got {:?}",
-            other.var_type()
-        ),
-    }
-}
-
-fn resolve_accept_channel(variables: &[Option<Variable>], index: usize) -> &AcceptChannel {
-    match resolve(variables, index) {
-        Variable::AcceptChannel(v) => v,
-        other => panic!(
-            "variable {index}: expected AcceptChannel, got {:?}",
-            other.var_type(),
-        ),
-    }
-}
-
-fn resolve_funding_transaction(
-    variables: &[Option<Variable>],
-    index: usize,
-) -> &FundingTransaction {
-    match resolve(variables, index) {
-        Variable::FundingTransaction(v) => v,
-        other => panic!(
-            "variable {index}: expected FundingTransaction, got {:?}",
-            other.var_type(),
-        ),
-    }
-}
-
-fn consume_sent_open_channel(variables: &mut [Option<Variable>], index: usize) {
-    match resolve(variables, index) {
-        Variable::SentOpenChannel => {
-            // Consume the affine `SentOpenChannel`.
-            variables[index] = None;
+/// Defines a resolver for a single [`Variable`] variant. A `&T` return type
+/// borrows the payload from the variable slice; any other type copies it out.
+macro_rules! define_resolver {
+    ($name:ident, $variant:ident, &$ret:ty) => {
+        fn $name(variables: &[Option<Variable>], index: usize) -> &$ret {
+            match resolve(variables, index) {
+                Variable::$variant(v) => v,
+                other => type_mismatch(index, VariableType::$variant, other),
+            }
         }
-        other => panic!(
-            "variable {index}: expected SentOpenChannel, got {:?}",
-            other.var_type(),
-        ),
-    }
+    };
+    ($name:ident, $variant:ident, $ret:ty) => {
+        fn $name(variables: &[Option<Variable>], index: usize) -> $ret {
+            match resolve(variables, index) {
+                Variable::$variant(v) => *v,
+                other => type_mismatch(index, VariableType::$variant, other),
+            }
+        }
+    };
 }
 
-fn consume_sent_funding_created(variables: &mut [Option<Variable>], index: usize) {
-    match resolve(variables, index) {
-        Variable::SentFundingCreated => {
-            // Consume the affine `SentFundingCreated`.
-            variables[index] = None;
-        }
-        other => panic!(
-            "variable {index}: expected SentFundingCreated, got {:?}",
-            other.var_type(),
-        ),
+define_resolver!(resolve_amount, Amount, u64);
+define_resolver!(resolve_feerate, FeeratePerKw, u32);
+define_resolver!(resolve_forwarding_fee, ForwardingFee, u32);
+define_resolver!(resolve_timestamp, Timestamp, u32);
+define_resolver!(resolve_u16, U16, u16);
+define_resolver!(resolve_u8, U8, u8);
+define_resolver!(resolve_bytes, Bytes, &[u8]);
+define_resolver!(resolve_features, Features, &[u8]);
+define_resolver!(resolve_chain_hash, ChainHash, [u8; 32]);
+define_resolver!(resolve_channel_id, ChannelId, ChannelId);
+define_resolver!(resolve_pubkey, Point, PublicKey);
+define_resolver!(resolve_short_channel_id, ShortChannelId, ShortChannelId);
+define_resolver!(resolve_private_key, PrivateKey, [u8; 32]);
+define_resolver!(resolve_message, Message, &[u8]);
+define_resolver!(
+    resolve_open_channel_message,
+    OpenChannelMessage,
+    &OpenChannel
+);
+define_resolver!(resolve_accept_channel, AcceptChannel, &AcceptChannel);
+define_resolver!(
+    resolve_funding_transaction,
+    FundingTransaction,
+    &FundingTransaction
+);
+
+/// Consumes an affine variable, leaving its slot void so it cannot be used
+/// again.
+fn consume_affine(variables: &mut [Option<Variable>], index: usize, expected: VariableType) {
+    let actual = resolve(variables, index);
+    if actual.var_type() != expected {
+        type_mismatch(index, expected, actual);
     }
+    variables[index] = None;
 }
 
 // -- Operation handlers --
