@@ -12,20 +12,6 @@ use smite::bolt::{AcceptChannelTlvs, GossipTimestampFilter, Init, Ping};
 use smite_ir::Instruction;
 use smite_ir::operation::ShutdownScriptVariant;
 
-/// Decodes a sent message expected to be a `channel_announcement`.
-fn decode_sent_channel_announcement(bytes: &[u8]) -> ChannelAnnouncement {
-    match Message::decode(bytes).expect("valid message") {
-        Message::ChannelAnnouncement(ca) => ca,
-        other => panic!("expected channel_announcement(256), got {other}"),
-    }
-}
-
-fn decode_open_channel(bytes: &[u8]) -> OpenChannel {
-    match Message::decode(bytes).expect("valid message") {
-        Message::OpenChannel(oc) => oc,
-        other => panic!("expected open_channel(32), got {other}"),
-    }
-}
 // -- execute() tests --
 
 #[test]
@@ -41,20 +27,13 @@ fn execute_load_build_send() {
         inputs: vec![20],
     });
 
-    let program = Program {
+    let mut fx = Fixture::new();
+    fx.run(&Program {
         instructions: instrs,
-    };
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor
-        .execute(&program, std::time::Instant::now())
-        .unwrap();
+    });
 
-    assert_eq!(executor.conn.sent.len(), 1);
-    let oc = decode_open_channel(&executor.conn.sent[0]);
+    assert_eq!(fx.sent_len(), 1);
+    let oc: OpenChannel = fx.sent(0);
     assert_eq!(oc.chain_hash, [0xcc; 32]);
     assert_eq!(oc.temporary_channel_id, TemporaryChannelId::new([0xbb; 32]));
     assert_eq!(oc.funding_satoshis, 100_000);
@@ -125,23 +104,13 @@ fn execute_build_channel_announcement() {
         },
     ];
 
-    let program = Program {
+    let mut fx = Fixture::new();
+    fx.run(&Program {
         instructions: instrs,
-    };
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor
-        .execute(&program, std::time::Instant::now())
-        .unwrap();
+    });
 
-    assert_eq!(executor.conn.sent.len(), 1);
-    let ca = match Message::decode(&executor.conn.sent[0]).expect("valid message") {
-        Message::ChannelAnnouncement(ca) => ca,
-        other => panic!("expected channel_announcement(256), got {other}"),
-    };
+    assert_eq!(fx.sent_len(), 1);
+    let ca: ChannelAnnouncement = fx.sent(0);
 
     let secp = Secp256k1::new();
     let pk = |b: &[u8; 32]| PublicKey::from_secret_key(&secp, &SecretKey::from_slice(b).unwrap());
@@ -192,23 +161,13 @@ fn execute_build_node_announcement() {
         },
     ];
 
-    let program = Program {
+    let mut fx = Fixture::new();
+    fx.run(&Program {
         instructions: instrs,
-    };
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor
-        .execute(&program, std::time::Instant::now())
-        .unwrap();
+    });
 
-    assert_eq!(executor.conn.sent.len(), 1);
-    let na = match Message::decode(&executor.conn.sent[0]).expect("valid message") {
-        Message::NodeAnnouncement(na) => na,
-        other => panic!("expected node_announcement(257), got {other}"),
-    };
+    assert_eq!(fx.sent_len(), 1);
+    let na: NodeAnnouncement = fx.sent(0);
 
     let secp = Secp256k1::new();
     let expected_node_id =
@@ -284,23 +243,13 @@ fn execute_build_channel_update() {
         },
     ];
 
-    let program = Program {
+    let mut fx = Fixture::new();
+    fx.run(&Program {
         instructions: instrs,
-    };
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor
-        .execute(&program, std::time::Instant::now())
-        .unwrap();
+    });
 
-    assert_eq!(executor.conn.sent.len(), 1);
-    let cu = match Message::decode(&executor.conn.sent[0]).expect("valid message") {
-        Message::ChannelUpdate(cu) => cu,
-        other => panic!("expected channel_update(258), got {other}"),
-    };
+    assert_eq!(fx.sent_len(), 1);
+    let cu: ChannelUpdate = fx.sent(0);
 
     assert_eq!(cu.chain_hash, sample_context().chain_hash);
     assert_eq!(cu.short_channel_id, scid);
@@ -395,23 +344,13 @@ fn execute_build_announcement_signatures() {
         },
     ];
 
-    let program = Program {
+    let mut fx = Fixture::new();
+    fx.run(&Program {
         instructions: instrs,
-    };
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor
-        .execute(&program, std::time::Instant::now())
-        .unwrap();
+    });
 
-    assert_eq!(executor.conn.sent.len(), 1);
-    let ann_sigs = match Message::decode(&executor.conn.sent[0]).expect("valid message") {
-        Message::AnnouncementSignatures(s) => s,
-        other => panic!("expected announcement_signatures(259), got {other}"),
-    };
+    assert_eq!(fx.sent_len(), 1);
+    let ann_sigs: AnnouncementSignatures = fx.sent(0);
 
     assert_eq!(ann_sigs.channel_id, ChannelId::new(channel_id_bytes));
     assert_eq!(ann_sigs.short_channel_id, scid);
@@ -488,19 +427,12 @@ fn execute_build_open_channel_with_tlvs() {
         inputs: vec![20],
     });
 
-    let program = Program {
+    let mut fx = Fixture::new();
+    fx.run(&Program {
         instructions: instrs,
-    };
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor
-        .execute(&program, std::time::Instant::now())
-        .unwrap();
+    });
 
-    let oc = decode_open_channel(&executor.conn.sent[0]);
+    let oc: OpenChannel = fx.sent(0);
     assert_eq!(
         oc.tlvs.upfront_shutdown_script,
         Some(vec![0x00, 0x14, 0xab])
@@ -537,19 +469,12 @@ fn execute_derive_point() {
         inputs: vec![base + 20],
     });
 
-    let program = Program {
+    let mut fx = Fixture::new();
+    fx.run(&Program {
         instructions: instrs,
-    };
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor
-        .execute(&program, std::time::Instant::now())
-        .unwrap();
+    });
 
-    let oc = decode_open_channel(&executor.conn.sent[0]);
+    let oc: OpenChannel = fx.sent(0);
     let secp = Secp256k1::new();
     let expected = PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&[0x11; 32]).unwrap());
     assert_eq!(oc.funding_pubkey, expected);
@@ -557,9 +482,6 @@ fn execute_derive_point() {
 
 #[test]
 fn execute_recv_and_extract_all_fields() {
-    let ac = sample_accept_channel();
-    let ac_bytes = Message::AcceptChannel(ac).encode();
-
     // Receive accept_channel (v0), then extract all 16 fields (v1..v16).
     let fields = [
         AcceptChannelField::TemporaryChannelId,
@@ -598,24 +520,15 @@ fn execute_recv_and_extract_all_fields() {
     // rebuild a message from the extracted fields and verify it matches the
     // original.
 
-    let program = Program {
-        instructions: instrs,
-    };
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor.conn.queue_recv(ac_bytes);
-    executor
-        .execute(&program, std::time::Instant::now())
-        .unwrap();
+    Fixture::new()
+        .queue(&Message::AcceptChannel(sample_accept_channel()))
+        .run(&Program {
+            instructions: instrs,
+        });
 }
 
 #[test]
 fn execute_recv_unexpected_message() {
-    let init_bytes = Message::Init(Init::empty()).encode();
-
     let mut instrs = send_open_channel_instructions();
     let sent_open_channel = instrs.len() - 1;
     instrs.push(Instruction {
@@ -623,18 +536,11 @@ fn execute_recv_unexpected_message() {
         inputs: vec![sent_open_channel],
     });
 
-    let program = Program {
-        instructions: instrs,
-    };
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor.conn.queue_recv(init_bytes);
-    let err = executor
-        .execute(&program, std::time::Instant::now())
-        .unwrap_err();
+    let err = Fixture::new()
+        .queue(&Message::Init(Init::empty()))
+        .run_err(&Program {
+            instructions: instrs,
+        });
     assert!(matches!(
         err,
         ExecuteError::UnexpectedMessage {
@@ -647,7 +553,6 @@ fn execute_recv_unexpected_message() {
 #[test]
 fn execute_recv_peer_error() {
     let peer_error = smite::bolt::Error::all_channels("Wrong channel id in channel_ready");
-    let error_bytes = Message::Error(peer_error.clone()).encode();
 
     let mut instrs = send_open_channel_instructions();
     let sent_open_channel = instrs.len() - 1;
@@ -656,18 +561,11 @@ fn execute_recv_peer_error() {
         inputs: vec![sent_open_channel],
     });
 
-    let program = Program {
-        instructions: instrs,
-    };
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor.conn.queue_recv(error_bytes);
-    let err = executor
-        .execute(&program, std::time::Instant::now())
-        .unwrap_err();
+    let err = Fixture::new()
+        .queue(&Message::Error(peer_error.clone()))
+        .run_err(&Program {
+            instructions: instrs,
+        });
     assert!(matches!(err, ExecuteError::PeerError(e) if e == peer_error));
 }
 
@@ -678,8 +576,6 @@ fn execute_recv_auto_pong() {
         num_pong_bytes: 4,
         ignored: vec![0xaa],
     };
-    let ping_bytes = Message::Ping(ping).encode();
-    let ac_bytes = Message::AcceptChannel(sample_accept_channel()).encode();
 
     let mut instrs = send_open_channel_instructions();
     let sent_open_channel = instrs.len() - 1;
@@ -688,42 +584,23 @@ fn execute_recv_auto_pong() {
         inputs: vec![sent_open_channel],
     });
 
-    let program = Program {
+    let mut fx = Fixture::new()
+        .queue(&Message::Ping(ping))
+        .queue(&Message::AcceptChannel(sample_accept_channel()));
+    fx.run(&Program {
         instructions: instrs,
-    };
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor.conn.queue_recv(ping_bytes);
-    executor.conn.queue_recv(ac_bytes);
-    executor
-        .execute(&program, std::time::Instant::now())
-        .unwrap();
+    });
 
     // Verify exactly two messages were sent: `open_channel` and `pong`.
-    assert_eq!(executor.conn.sent.len(), 2);
-
-    // Verify the first message was `open_channel`.
-    let oc = Message::decode(&executor.conn.sent[0]).unwrap();
-    let Message::OpenChannel(_) = oc else {
-        panic!("expected open_channel(32), got {oc}");
-    };
-
-    // Verify the second message was the pong.
-    let pong = Message::decode(&executor.conn.sent[1]).unwrap();
-    let Message::Pong(pong) = pong else {
-        panic!("expected pong(19), got {pong}");
-    };
+    assert_eq!(fx.sent_len(), 2);
+    fx.sent::<OpenChannel>(0);
+    let pong: Pong = fx.sent(1);
     assert_eq!(pong.ignored.len(), 4);
 }
 
 #[test]
 fn execute_recv_skips_gossip() {
     let gossip = GossipTimestampFilter::new([0u8; 32], 0, 86400);
-    let gossip_bytes = Message::GossipTimestampFilter(gossip).encode();
-    let ac_bytes = Message::AcceptChannel(sample_accept_channel()).encode();
 
     let mut instrs = send_open_channel_instructions();
     let sent_open_channel = instrs.len() - 1;
@@ -731,27 +608,17 @@ fn execute_recv_skips_gossip() {
         operation: Operation::RecvAcceptChannel,
         inputs: vec![sent_open_channel],
     });
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor.conn.queue_recv(gossip_bytes);
-    executor.conn.queue_recv(ac_bytes);
-    executor
-        .execute(
-            &Program {
-                instructions: instrs,
-            },
-            std::time::Instant::now(),
-        )
-        .unwrap();
+    let mut fx = Fixture::new()
+        .queue(&Message::GossipTimestampFilter(gossip))
+        .queue(&Message::AcceptChannel(sample_accept_channel()));
+    fx.run(&Program {
+        instructions: instrs,
+    });
 
-    let accept_channel = executor
-        .negotiations
-        .values()
-        .next()
-        .and_then(|pending| pending.accept_channel.as_ref())
+    let accept_channel = fx
+        .negotiation(&TemporaryChannelId::new([0xbb; 32]))
+        .accept_channel
+        .as_ref()
         .expect("accept_channel recorded");
     assert_eq!(accept_channel.clone(), sample_accept_channel());
 }
@@ -759,7 +626,6 @@ fn execute_recv_skips_gossip() {
 #[test]
 fn execute_records_negotiation_for_open_and_accept() {
     let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
-    let ac_bytes = Message::AcceptChannel(sample_accept_channel()).encode();
 
     let mut instrs = send_open_channel_instructions();
     let sent_open_channel = instrs.len() - 1;
@@ -767,22 +633,12 @@ fn execute_records_negotiation_for_open_and_accept() {
         operation: Operation::RecvAcceptChannel,
         inputs: vec![sent_open_channel],
     });
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor.conn.queue_recv(ac_bytes);
-    executor
-        .execute(
-            &Program {
-                instructions: instrs,
-            },
-            std::time::Instant::now(),
-        )
-        .unwrap();
+    let mut fx = Fixture::new().queue(&Message::AcceptChannel(sample_accept_channel()));
+    fx.run(&Program {
+        instructions: instrs,
+    });
 
-    let pending = executor.negotiations.get(&temporary_channel_id).unwrap();
+    let pending = fx.negotiation(&temporary_channel_id);
     assert_eq!(
         pending.open_channel.temporary_channel_id,
         temporary_channel_id
@@ -795,11 +651,6 @@ fn execute_records_negotiation_for_open_and_accept() {
 #[test]
 fn execute_recv_accept_channel_unknown_channel() {
     let unknown_id = TemporaryChannelId::new([0xcc; 32]);
-    let ac_bytes = Message::AcceptChannel(AcceptChannel {
-        temporary_channel_id: unknown_id,
-        ..sample_accept_channel()
-    })
-    .encode();
 
     let mut instrs = send_open_channel_instructions();
     let sent_open_channel = instrs.len() - 1;
@@ -807,20 +658,14 @@ fn execute_recv_accept_channel_unknown_channel() {
         operation: Operation::RecvAcceptChannel,
         inputs: vec![sent_open_channel],
     });
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor.conn.queue_recv(ac_bytes);
-    let err = executor
-        .execute(
-            &Program {
-                instructions: instrs,
-            },
-            std::time::Instant::now(),
-        )
-        .unwrap_err();
+    let err = Fixture::new()
+        .queue(&Message::AcceptChannel(AcceptChannel {
+            temporary_channel_id: unknown_id,
+            ..sample_accept_channel()
+        }))
+        .run_err(&Program {
+            instructions: instrs,
+        });
 
     let ExecuteError::Violation(Violation::InvalidAcceptChannel(id, reason)) = &err else {
         panic!("unexpected error: {err:?}");
@@ -836,7 +681,6 @@ fn execute_recv_accept_channel_unknown_channel() {
 #[test]
 fn execute_recv_accept_channel_opener_cannot_afford_fee() {
     let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
-    let ac_bytes = Message::AcceptChannel(sample_accept_channel()).encode();
 
     // Set `push_msat` so the opener cannot afford the commitment fee
     // requiring the peer to reject the `open_channel` per BOLT 2.
@@ -851,20 +695,11 @@ fn execute_recv_accept_channel_opener_cannot_afford_fee() {
         inputs: vec![sent_open_channel],
     });
 
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor.conn.queue_recv(ac_bytes);
-    let err = executor
-        .execute(
-            &Program {
-                instructions: instrs,
-            },
-            std::time::Instant::now(),
-        )
-        .unwrap_err();
+    let err = Fixture::new()
+        .queue(&Message::AcceptChannel(sample_accept_channel()))
+        .run_err(&Program {
+            instructions: instrs,
+        });
 
     let ExecuteError::Violation(Violation::InvalidAcceptChannel(id, reason)) = &err else {
         panic!("unexpected error: {err:?}");
@@ -880,7 +715,6 @@ fn execute_recv_accept_channel_opener_cannot_afford_fee() {
 #[test]
 fn execute_recv_accept_channel_rejects_reuse_before_funding() {
     let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
-    let ac_bytes = Message::AcceptChannel(sample_accept_channel()).encode();
 
     let mut instrs = send_open_channel_instructions();
     let built_open_channel = instrs.len() - 2;
@@ -899,21 +733,12 @@ fn execute_recv_accept_channel_rejects_reuse_before_funding() {
         inputs: vec![resent_open_channel],
     });
 
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor.conn.queue_recv(ac_bytes.clone());
-    executor.conn.queue_recv(ac_bytes.clone());
-    let err = executor
-        .execute(
-            &Program {
-                instructions: instrs,
-            },
-            std::time::Instant::now(),
-        )
-        .unwrap_err();
+    let err = Fixture::new()
+        .queue(&Message::AcceptChannel(sample_accept_channel()))
+        .queue(&Message::AcceptChannel(sample_accept_channel()))
+        .run_err(&Program {
+            instructions: instrs,
+        });
 
     let ExecuteError::Violation(Violation::InvalidAcceptChannel(id, reason)) = &err else {
         panic!("unexpected error: {err:?}");
@@ -951,43 +776,23 @@ fn execute_records_only_first_open_channel_for_duplicate_id_before_funding() {
         inputs: vec![built],
     });
 
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor
-        .execute(
-            &Program {
-                instructions: instrs,
-            },
-            std::time::Instant::now(),
-        )
-        .unwrap();
+    let mut fx = Fixture::new();
+    fx.run(&Program {
+        instructions: instrs,
+    });
 
     // Both open_channel messages went out on the wire, but only the first
     // negotiation is recorded for the shared id.
-    assert_eq!(executor.conn.sent.len(), 2);
-    assert_eq!(
-        decode_open_channel(&executor.conn.sent[0]).funding_satoshis,
-        100_000
-    );
-    assert_eq!(
-        decode_open_channel(&executor.conn.sent[1]).funding_satoshis,
-        200_000
-    );
-    let pending = executor.negotiations.get(&temporary_channel_id).unwrap();
+    assert_eq!(fx.sent_len(), 2);
+    assert_eq!(fx.sent::<OpenChannel>(0).funding_satoshis, 100_000);
+    assert_eq!(fx.sent::<OpenChannel>(1).funding_satoshis, 200_000);
+    let pending = fx.negotiation(&temporary_channel_id);
     assert_eq!(pending.open_channel.funding_satoshis, 100_000);
 }
 
 #[test]
 fn execute_records_open_channel_for_duplicate_id_after_funding() {
     let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
-    let mock_cli = MockBitcoinCli {
-        utxos: vec![sample_utxo()],
-        change_spk: sample_change_spk(),
-        ..Default::default()
-    };
 
     // Negotiated open_channel: funding_satoshis = 10_000_000.
     // Second open_channel: same temporary_channel_id, funding_satoshis = 100_000.
@@ -1003,20 +808,12 @@ fn execute_records_open_channel_for_duplicate_id_after_funding() {
         instrs.push(instr);
     }
 
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
-    executor
-        .negotiations
-        .insert(temporary_channel_id, sample_funding_negotiation());
-    executor
-        .execute(
-            &Program {
-                instructions: instrs,
-            },
-            std::time::Instant::now(),
-        )
-        .unwrap();
+    let mut fx = Fixture::new().with_negotiation(sample_funding_negotiation());
+    fx.run(&Program {
+        instructions: instrs,
+    });
 
-    let pending = executor.negotiations.get(&temporary_channel_id).unwrap();
+    let pending = fx.negotiation(&temporary_channel_id);
     assert_eq!(pending.open_channel.funding_satoshis, 100_000);
     assert!(pending.accept_channel.is_none());
     assert!(!pending.funding_built);
@@ -1033,12 +830,7 @@ fn execute_wrong_input_count_panics() {
             inputs: vec![], // expects 1 input
         }],
     };
-    let _ = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    )
-    .execute(&program, std::time::Instant::now());
+    Fixture::new().run(&program);
 }
 
 #[test]
@@ -1056,12 +848,7 @@ fn execute_type_mismatch_panics() {
             },
         ],
     };
-    let _ = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    )
-    .execute(&program, std::time::Instant::now());
+    Fixture::new().run(&program);
 }
 
 #[test]
@@ -1073,12 +860,7 @@ fn execute_variable_out_of_bounds_panics() {
             inputs: vec![99],
         }],
     };
-    let _ = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    )
-    .execute(&program, std::time::Instant::now());
+    Fixture::new().run(&program);
 }
 
 #[test]
@@ -1096,12 +878,7 @@ fn execute_forward_variable_reference_panics() {
             },
         ],
     };
-    let _ = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    )
-    .execute(&program, std::time::Instant::now());
+    Fixture::new().run(&program);
 }
 
 #[test]
@@ -1120,12 +897,7 @@ fn execute_void_variable_reference_panics() {
             },
         ],
     };
-    let _ = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    )
-    .execute(&program, std::time::Instant::now());
+    Fixture::new().run(&program);
 }
 
 #[test]
@@ -1143,12 +915,7 @@ fn execute_invalid_private_key_panics() {
             },
         ],
     };
-    let _ = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    )
-    .execute(&program, std::time::Instant::now());
+    Fixture::new().run(&program);
 }
 
 #[test]
@@ -1169,12 +936,7 @@ fn execute_send_open_channel_wrong_type_panics() {
         instructions: instrs,
     };
 
-    let _ = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    )
-    .execute(&program, std::time::Instant::now());
+    Fixture::new().run(&program);
 }
 
 #[test]
@@ -1192,17 +954,11 @@ fn execute_affine_overuse_panics() {
             inputs: vec![sent_open_channel],
         },
     ]);
-    let program = Program {
-        instructions: instrs,
-    };
-    let ac_bytes = Message::AcceptChannel(sample_accept_channel()).encode();
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor.conn.queue_recv(ac_bytes);
-    let _ = executor.execute(&program, std::time::Instant::now());
+    Fixture::new()
+        .queue(&Message::AcceptChannel(sample_accept_channel()))
+        .run(&Program {
+            instructions: instrs,
+        });
 }
 
 // MineBlocks should track calls to mine_blocks
@@ -1212,21 +968,14 @@ fn execute_mine_blocks_invokes_cli() {
         operation: Operation::MineBlocks(6),
         inputs: vec![],
     }];
-    let program = Program {
+    let mut fx = Fixture::new();
+    fx.run(&Program {
         instructions: instrs,
-    };
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor
-        .execute(&program, std::time::Instant::now())
-        .unwrap();
+    });
 
     // Verify that mine_blocks was called with the correct number
-    assert_eq!(executor.bitcoin_cli.mine_blocks_calls, vec![6]);
-    assert!(executor.bitcoin_cli.mined_private_mempool.is_empty());
+    assert_eq!(fx.bitcoin().mine_blocks_calls, vec![6]);
+    assert!(fx.bitcoin().mined_private_mempool.is_empty());
 }
 
 #[test]
@@ -1245,37 +994,19 @@ fn execute_mine_blocks_wrong_input() {
     let program = Program {
         instructions: instrs,
     };
-    let _ = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    )
-    .execute(&program, std::time::Instant::now());
+    Fixture::new().run(&program);
 }
 
 #[test]
 fn execute_create_and_broadcast_tx() {
-    let mock_cli = MockBitcoinCli {
-        utxos: vec![sample_utxo()],
-        change_spk: sample_change_spk(),
-        ..Default::default()
-    };
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
-    executor
-        .execute(
-            &Program {
-                instructions: create_and_broadcast_tx_instructions(),
-            },
-            std::time::Instant::now(),
-        )
-        .expect("tx construction and broadcast should succeed");
+    let mut fx = Fixture::new();
+    fx.run(&Program {
+        instructions: create_and_broadcast_tx_instructions(),
+    });
 
-    assert_eq!(executor.bitcoin_cli.broadcast_calls.len(), 1);
-    let broadcast_tx = &executor.bitcoin_cli.broadcast_calls[0];
-    assert_eq!(
-        broadcast_tx.compute_txid().to_string(),
-        "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
-    );
+    assert_eq!(fx.bitcoin().broadcast_calls.len(), 1);
+    let broadcast_tx = &fx.bitcoin().broadcast_calls[0];
+    assert_eq!(broadcast_tx.compute_txid(), funding_outpoint().txid);
 }
 
 // LookupShortChannelId should combine the confirmed block position with
@@ -1283,11 +1014,6 @@ fn execute_create_and_broadcast_tx() {
 // by feeding it into a channel_announcement and decoding the sent message.
 #[test]
 fn execute_lookup_short_channel_id_confirmed() {
-    let mock_cli = MockBitcoinCli {
-        utxos: vec![sample_utxo()],
-        change_spk: sample_change_spk(),
-        ..Default::default()
-    };
     let mut instrs = create_and_broadcast_tx_instructions();
     instrs.push(Instruction {
         operation: Operation::MineBlocks(6),
@@ -1303,29 +1029,21 @@ fn execute_lookup_short_channel_id_confirmed() {
     // Build and send a channel_announcement carrying the looked-up SCID.
     instrs.extend(channel_announcement_from_scid_instructions(instrs.len(), 9));
 
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
-    executor
-        .execute(
-            &Program {
-                instructions: instrs,
-            },
-            std::time::Instant::now(),
-        )
-        .expect("lookup after confirmation should succeed");
+    let mut fx = Fixture::new();
+    fx.run(&Program {
+        instructions: instrs,
+    });
 
-    assert_eq!(executor.bitcoin_cli.mine_blocks_calls, vec![6]);
+    assert_eq!(fx.bitcoin().mine_blocks_calls, vec![6]);
     // The executor must have queried the mock with the broadcast
     // transaction's txid.
-    assert_eq!(executor.bitcoin_cli.block_position_lookups.len(), 1);
-    let broadcast_txid = executor.bitcoin_cli.broadcast_calls[0].compute_txid();
-    assert_eq!(
-        executor.bitcoin_cli.block_position_lookups[0],
-        broadcast_txid,
-    );
+    assert_eq!(fx.bitcoin().block_position_lookups.len(), 1);
+    let broadcast_txid = fx.bitcoin().broadcast_calls[0].compute_txid();
+    assert_eq!(fx.bitcoin().block_position_lookups[0], broadcast_txid);
 
     // The mock returns block_height=800_042, tx_index=7 for a confirmed
     // tx, and the funding output is always at vout 0.
-    let ca = decode_sent_channel_announcement(&executor.conn.sent[0]);
+    let ca: ChannelAnnouncement = fx.sent(0);
     assert_eq!(ca.short_channel_id, ShortChannelId::new(800_042, 7, 0));
 }
 
@@ -1335,11 +1053,6 @@ fn execute_lookup_short_channel_id_confirmed() {
 // via the SCID carried in a channel_announcement.
 #[test]
 fn execute_lookup_short_channel_id_unconfirmed_returns_sentinel() {
-    let mock_cli = MockBitcoinCli {
-        utxos: vec![sample_utxo()],
-        change_spk: sample_change_spk(),
-        ..Default::default()
-    };
     // No BroadcastTransaction and no MineBlocks: the mock reports zero
     // confirmations and get_transaction_block_position returns None.
     let mut instrs = vec![
@@ -1379,32 +1092,22 @@ fn execute_lookup_short_channel_id_unconfirmed_returns_sentinel() {
     ];
     instrs.extend(channel_announcement_from_scid_instructions(instrs.len(), 7));
 
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
-    executor
-        .execute(
-            &Program {
-                instructions: instrs,
-            },
-            std::time::Instant::now(),
-        )
-        .expect("lookup on unconfirmed tx should not fail");
+    let mut fx = Fixture::new();
+    fx.run(&Program {
+        instructions: instrs,
+    });
+
     // The mock was queried but returned None (zero confirmations), so the
     // executor took the sentinel path without panicking.
-    assert!(executor.bitcoin_cli.mine_blocks_calls.is_empty());
-    assert_eq!(executor.bitcoin_cli.block_position_lookups.len(), 1);
+    assert!(fx.bitcoin().mine_blocks_calls.is_empty());
+    assert_eq!(fx.bitcoin().block_position_lookups.len(), 1);
 
-    let ca = decode_sent_channel_announcement(&executor.conn.sent[0]);
+    let ca: ChannelAnnouncement = fx.sent(0);
     assert_eq!(ca.short_channel_id, ShortChannelId::new(0, 0, 0));
 }
 
 #[test]
 fn execute_broadcast_dedupes_rejected_tx_in_private_mempool() {
-    let mock_cli = MockBitcoinCli {
-        utxos: vec![sample_utxo()],
-        change_spk: sample_change_spk(),
-        ..Default::default()
-    };
-
     // Fund with a dust amount so the built funding tx carries a below-dust
     // output.
     let mut instrs = create_and_broadcast_tx_instructions();
@@ -1422,29 +1125,20 @@ fn execute_broadcast_dedupes_rejected_tx_in_private_mempool() {
         inputs: vec![],
     });
 
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
-    executor
-        .execute(
-            &Program {
-                instructions: instrs,
-            },
-            std::time::Instant::now(),
-        )
-        .unwrap();
+    let mut fx = Fixture::new();
+    fx.run(&Program {
+        instructions: instrs,
+    });
 
-    assert_eq!(executor.bitcoin_cli.broadcast_calls.len(), 2);
+    assert_eq!(fx.bitcoin().broadcast_calls.len(), 2);
     assert_eq!(
-        executor.bitcoin_cli.broadcast_calls[0].compute_txid(),
-        executor.bitcoin_cli.broadcast_calls[1].compute_txid(),
+        fx.bitcoin().broadcast_calls[0].compute_txid(),
+        fx.bitcoin().broadcast_calls[1].compute_txid(),
     );
 
-    let rejected_hex =
-        bitcoin::consensus::encode::serialize_hex(&executor.bitcoin_cli.broadcast_calls[0]);
-    assert!(executor.private_mempool.is_empty());
-    assert_eq!(
-        executor.bitcoin_cli.mined_private_mempool,
-        vec![rejected_hex]
-    );
+    let rejected_hex = bitcoin::consensus::encode::serialize_hex(&fx.bitcoin().broadcast_calls[0]);
+    assert!(fx.private_mempool().is_empty());
+    assert_eq!(fx.bitcoin().mined_private_mempool, vec![rejected_hex]);
 }
 
 #[test]
@@ -1454,19 +1148,11 @@ fn execute_create_funding_transaction_insufficient_funds() {
         amount: Amount::from_sat(1_000),
         ..sample_utxo()
     };
-    let mock_cli = MockBitcoinCli {
-        utxos: vec![small_utxo],
-        change_spk: sample_change_spk(),
-        ..Default::default()
-    };
-    let err = Executor::new(MockConnection::new(), mock_cli, sample_context())
-        .execute(
-            &Program {
-                instructions: create_and_broadcast_tx_instructions(),
-            },
-            std::time::Instant::now(),
-        )
-        .unwrap_err();
+    let err = Fixture::new()
+        .with_utxos(vec![small_utxo])
+        .run_err(&Program {
+            instructions: create_and_broadcast_tx_instructions(),
+        });
     let ExecuteError::InsufficientFunds(funds_err) = err else {
         panic!("expected InsufficientFunds, got {err:?}");
     };
@@ -1476,65 +1162,29 @@ fn execute_create_funding_transaction_insufficient_funds() {
 
 #[test]
 fn execute_send_funding_created_and_recv_funding_signed() {
-    let mock_cli = MockBitcoinCli {
-        utxos: vec![sample_utxo()],
-        change_spk: sample_change_spk(),
-        ..Default::default()
-    };
-
     // The acceptor replies with funding_signed carrying its signature over
     // the opener's commitment.
-    let channel_id = ChannelId::v1_from_funding_outpoint(OutPoint {
-        txid: "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
-            .parse()
-            .unwrap(),
-        vout: 0,
+    let channel_id = funding_channel_id();
+
+    let mut fx = Fixture::new()
+        .with_negotiation(sample_funding_negotiation())
+        .queue(&funding_signed_reply(channel_id));
+    fx.run(&Program {
+        instructions: send_funding_created_and_recv_funding_signed_instructions(),
     });
 
-    // The expected signature here was computed using LDK as the source of
-    // truth.
-    let fs_bytes = Message::FundingSigned(FundingSigned {
-        channel_id,
-        signature: "304402203dbf3dbf337b042a72576488c1fb019086089d8d790a47f652346cff2511b6e70220395fdf700cb82b0abfcfe8e0b7c822181f2ee72409c82c3ff8e04e36593662c7".parse().unwrap(),
-    })
-    .encode();
-
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
-    executor.conn.queue_recv(fs_bytes);
-    executor.negotiations.insert(
-        TemporaryChannelId::new([0xbb; 32]),
-        sample_funding_negotiation(),
-    );
-    executor
-        .execute(
-            &Program {
-                instructions: send_funding_created_and_recv_funding_signed_instructions(),
-            },
-            std::time::Instant::now(),
-        )
-        .unwrap();
-
-    assert_eq!(executor.conn.sent.len(), 1);
-    let fc = match Message::decode(&executor.conn.sent[0]).expect("valid message") {
-        Message::FundingCreated(fc) => fc,
-        other => panic!("expected funding_created(34), got {other}"),
-    };
+    assert_eq!(fx.sent_len(), 1);
+    let fc: FundingCreated = fx.sent(0);
 
     assert_eq!(fc.temporary_channel_id, TemporaryChannelId::new([0xbb; 32]));
-    assert_eq!(
-        fc.funding_txid.to_string(),
-        "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
-    );
+    assert_eq!(fc.funding_txid, funding_outpoint().txid);
     assert_eq!(fc.funding_output_index, 0);
 
     // Verify the signature sent by the opener on the acceptor side.
-    let state = executor.channel_states.get(&channel_id).unwrap();
+    let state = fx.channel_state(&channel_id);
     let holder = HolderIdentity {
         side: Side::Acceptor,
-        funding_privkey: SecretKey::from_str(
-            "1552dfba4f6cf29a62a0af13c8d6981d36d0ef8d61ba10fb0fe90da7634d7e13",
-        )
-        .unwrap(),
+        funding_privkey: acceptor_funding_sk(),
     };
 
     assert!(
@@ -1543,36 +1193,13 @@ fn execute_send_funding_created_and_recv_funding_signed() {
             .verify_counterparty_signature(&state.commitment, &holder, &fc.signature)
     );
 
-    let pending = executor
-        .negotiations
-        .get(&TemporaryChannelId::new([0xbb; 32]))
-        .unwrap();
+    let pending = fx.negotiation(&TemporaryChannelId::new([0xbb; 32]));
     assert!(pending.funding_built);
 }
 
 #[test]
 fn execute_send_funding_created_uses_wire_funding_pubkey() {
-    let mock_cli = MockBitcoinCli {
-        utxos: vec![sample_utxo()],
-        change_spk: sample_change_spk(),
-        ..Default::default()
-    };
-
-    let channel_id = ChannelId::v1_from_funding_outpoint(OutPoint {
-        txid: "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
-            .parse()
-            .unwrap(),
-        vout: 0,
-    });
-
-    // The same acceptor signature as the happy path (computed using LDK as
-    // the source of truth): computed over the the commitment implied by the
-    // negotiated funding pubkeys.
-    let fs_bytes = Message::FundingSigned(FundingSigned {
-        channel_id,
-        signature: "304402203dbf3dbf337b042a72576488c1fb019086089d8d790a47f652346cff2511b6e70220395fdf700cb82b0abfcfe8e0b7c822181f2ee72409c82c3ff8e04e36593662c7".parse().unwrap(),
-    })
-    .encode();
+    let channel_id = funding_channel_id();
 
     // Swap out the SendFundingCreated privkey. This should not affect the
     // constructed channel config, which uses the negotiated pubkeys. It
@@ -1580,39 +1207,23 @@ fn execute_send_funding_created_uses_wire_funding_pubkey() {
     let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
     instrs[9].inputs[1] = 2;
 
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
-    executor.conn.queue_recv(fs_bytes);
-    executor.negotiations.insert(
-        TemporaryChannelId::new([0xbb; 32]),
-        sample_funding_negotiation(),
-    );
-    // The acceptor's funding_signed still verifies, because the config is
-    // built from the wire pubkeys rather than from the swapped privkey.
-    executor
-        .execute(
-            &Program {
-                instructions: instrs,
-            },
-            std::time::Instant::now(),
-        )
-        .unwrap();
+    // The acceptor's signature still verifies, because the config is built
+    // from the wire pubkeys rather than from the swapped privkey.
+    let mut fx = Fixture::new()
+        .with_negotiation(sample_funding_negotiation())
+        .queue(&funding_signed_reply(channel_id));
+    fx.run(&Program {
+        instructions: instrs,
+    });
 
     let secp = Secp256k1::new();
-    let opener_pk = PublicKey::from_secret_key(
-        &secp,
-        &SecretKey::from_str("30ff4956bbdd3222d44cc5e8a1261dab1e07957bdac5ae88fe3261ef321f3749")
-            .unwrap(),
-    );
+    let opener_pk = PublicKey::from_secret_key(&secp, &opener_funding_sk());
     // The funding pubkey matches what was negotiated.
-    let state = executor.channel_states.get(&channel_id).unwrap();
+    let state = fx.channel_state(&channel_id);
     assert_eq!(state.config.opener.funding_pubkey, opener_pk);
     // But the swapped privkey used for signing is the acceptor's, which
     // does not match what was negotiated.
-    assert_eq!(
-        state.holder.funding_privkey,
-        SecretKey::from_str("1552dfba4f6cf29a62a0af13c8d6981d36d0ef8d61ba10fb0fe90da7634d7e13")
-            .unwrap()
-    );
+    assert_eq!(state.holder.funding_privkey, acceptor_funding_sk());
     assert_ne!(
         state.config.opener.funding_pubkey,
         PublicKey::from_secret_key(&secp, &state.holder.funding_privkey)
@@ -1629,19 +1240,9 @@ fn execute_send_funding_created_after_funding_built_does_not_track_channel() {
         },
         ..sample_utxo()
     };
-    let mock_cli = MockBitcoinCli {
-        utxos: vec![sample_utxo(), second_utxo],
-        change_spk: sample_change_spk(),
-        ..Default::default()
-    };
 
     // Channel id derived from the first funding transaction's outpoint.
-    let channel_id = ChannelId::v1_from_funding_outpoint(OutPoint {
-        txid: "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
-            .parse()
-            .unwrap(),
-        vout: 0,
-    });
+    let channel_id = funding_channel_id();
 
     let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
     instrs.pop(); // Drop the trailing `RecvFundingSigned` instruction.
@@ -1657,24 +1258,17 @@ fn execute_send_funding_created_after_funding_built_does_not_track_channel() {
         },
     ]);
 
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
-    executor.negotiations.insert(
-        TemporaryChannelId::new([0xbb; 32]),
-        sample_funding_negotiation(),
-    );
-    executor
-        .execute(
-            &Program {
-                instructions: instrs,
-            },
-            std::time::Instant::now(),
-        )
-        .unwrap();
+    let mut fx = Fixture::new()
+        .with_utxos(vec![sample_utxo(), second_utxo])
+        .with_negotiation(sample_funding_negotiation());
+    fx.run(&Program {
+        instructions: instrs,
+    });
 
     // The message still goes out, only the state tracking is suppressed.
-    assert_eq!(executor.conn.sent.len(), 2);
-    assert_eq!(executor.channel_states.len(), 1);
-    assert!(executor.channel_states.contains_key(&channel_id));
+    assert_eq!(fx.sent_len(), 2);
+    assert_eq!(fx.channel_states().len(), 1);
+    assert!(fx.channel_states().contains_key(&channel_id));
 }
 
 #[test]
@@ -1683,23 +1277,11 @@ fn execute_send_funding_created_push_exceeds_funding() {
     // commitment construction error.
     let mut negotiation = sample_funding_negotiation();
     negotiation.open_channel.push_msat = 20_000_000_000;
-    let mock_cli = MockBitcoinCli {
-        utxos: vec![sample_utxo()],
-        change_spk: sample_change_spk(),
-        ..Default::default()
-    };
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
-    executor
-        .negotiations
-        .insert(TemporaryChannelId::new([0xbb; 32]), negotiation);
-    let err = executor
-        .execute(
-            &Program {
-                instructions: send_funding_created_and_recv_funding_signed_instructions(),
-            },
-            std::time::Instant::now(),
-        )
-        .unwrap_err();
+    let err = Fixture::new()
+        .with_negotiation(negotiation)
+        .run_err(&Program {
+            instructions: send_funding_created_and_recv_funding_signed_instructions(),
+        });
     assert!(matches!(
         err,
         ExecuteError::Commitment(smite::channel_tx::CommitmentError::PushExceedsFunding)
@@ -1712,23 +1294,11 @@ fn execute_send_funding_created_funding_msat_overflow() {
     // millisatoshis.
     let mut negotiation = sample_funding_negotiation();
     negotiation.open_channel.funding_satoshis = u64::MAX;
-    let mock_cli = MockBitcoinCli {
-        utxos: vec![sample_utxo()],
-        change_spk: sample_change_spk(),
-        ..Default::default()
-    };
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
-    executor
-        .negotiations
-        .insert(TemporaryChannelId::new([0xbb; 32]), negotiation);
-    let err = executor
-        .execute(
-            &Program {
-                instructions: send_funding_created_and_recv_funding_signed_instructions(),
-            },
-            std::time::Instant::now(),
-        )
-        .unwrap_err();
+    let err = Fixture::new()
+        .with_negotiation(negotiation)
+        .run_err(&Program {
+            instructions: send_funding_created_and_recv_funding_signed_instructions(),
+        });
     assert!(matches!(
         err,
         ExecuteError::Commitment(smite::channel_tx::CommitmentError::FundingMsatOverflow)
@@ -1740,36 +1310,20 @@ fn execute_send_funding_created_no_open_channel() {
     // No negotiation exists for this temporary_channel_id, so we get a
     // `funding_created` with an all-zero signature and no recorded channel
     // state.
-    let mock_cli = MockBitcoinCli {
-        utxos: vec![sample_utxo()],
-        change_spk: sample_change_spk(),
-        ..Default::default()
-    };
     let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
     instrs.pop(); // Drop the trailing `RecvFundingSigned` instruction.
 
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
-    executor
-        .execute(
-            &Program {
-                instructions: instrs,
-            },
-            std::time::Instant::now(),
-        )
-        .unwrap();
+    let mut fx = Fixture::new();
+    fx.run(&Program {
+        instructions: instrs,
+    });
 
-    let fc = match Message::decode(&executor.conn.sent[0]).expect("valid message") {
-        Message::FundingCreated(fc) => fc,
-        other => panic!("expected funding_created(34), got {other}"),
-    };
+    let fc: FundingCreated = fx.sent(0);
     assert_eq!(fc.temporary_channel_id, TemporaryChannelId::new([0xbb; 32]));
-    assert_eq!(
-        fc.funding_txid.to_string(),
-        "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
-    );
+    assert_eq!(fc.funding_txid, funding_outpoint().txid);
     assert_eq!(fc.funding_output_index, 0);
     assert_eq!(fc.signature, Signature::from_compact(&[0u8; 64]).unwrap());
-    assert!(executor.channel_states.is_empty());
+    assert!(fx.channel_states().is_empty());
 }
 
 #[test]
@@ -1779,73 +1333,32 @@ fn execute_send_funding_created_no_accept_channel() {
     // state.
     let mut negotiation = sample_funding_negotiation();
     negotiation.accept_channel = None;
-    let mock_cli = MockBitcoinCli {
-        utxos: vec![sample_utxo()],
-        change_spk: sample_change_spk(),
-        ..Default::default()
-    };
     let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
     instrs.pop(); // Drop the trailing `RecvFundingSigned` instruction.
 
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
-    executor
-        .negotiations
-        .insert(TemporaryChannelId::new([0xbb; 32]), negotiation);
-    executor
-        .execute(
-            &Program {
-                instructions: instrs,
-            },
-            std::time::Instant::now(),
-        )
-        .unwrap();
+    let mut fx = Fixture::new().with_negotiation(negotiation);
+    fx.run(&Program {
+        instructions: instrs,
+    });
 
-    let fc = match Message::decode(&executor.conn.sent[0]).expect("valid message") {
-        Message::FundingCreated(fc) => fc,
-        other => panic!("expected funding_created(34), got {other}"),
-    };
+    let fc: FundingCreated = fx.sent(0);
     assert_eq!(fc.temporary_channel_id, TemporaryChannelId::new([0xbb; 32]));
-    assert_eq!(
-        fc.funding_txid.to_string(),
-        "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
-    );
+    assert_eq!(fc.funding_txid, funding_outpoint().txid);
     assert_eq!(fc.funding_output_index, 0);
     assert_eq!(fc.signature, Signature::from_compact(&[0u8; 64]).unwrap());
-    assert!(executor.channel_states.is_empty());
+    assert!(fx.channel_states().is_empty());
 }
 
 #[test]
 fn execute_recv_funding_signed_unknown_channel() {
-    let mock_cli = MockBitcoinCli {
-        utxos: vec![sample_utxo()],
-        change_spk: sample_change_spk(),
-        ..Default::default()
-    };
-
     let channel_id = ChannelId::new([0xbb; 32]);
 
-    // The expected signature here was computed using LDK as the source of
-    // truth.
-    let fs_bytes = Message::FundingSigned(FundingSigned {
-        channel_id,
-        signature: "304402203dbf3dbf337b042a72576488c1fb019086089d8d790a47f652346cff2511b6e70220395fdf700cb82b0abfcfe8e0b7c822181f2ee72409c82c3ff8e04e36593662c7".parse().unwrap(),
-    })
-    .encode();
-
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
-    executor.conn.queue_recv(fs_bytes);
-    executor.negotiations.insert(
-        TemporaryChannelId::new([0xbb; 32]),
-        sample_funding_negotiation(),
-    );
-    let err = executor
-        .execute(
-            &Program {
-                instructions: send_funding_created_and_recv_funding_signed_instructions(),
-            },
-            std::time::Instant::now(),
-        )
-        .unwrap_err();
+    let err = Fixture::new()
+        .with_negotiation(sample_funding_negotiation())
+        .queue(&funding_signed_reply(channel_id))
+        .run_err(&Program {
+            instructions: send_funding_created_and_recv_funding_signed_instructions(),
+        });
     assert!(matches!(
         err,
         ExecuteError::Violation(Violation::UnknownChannel(id)) if id == channel_id
@@ -1854,38 +1367,17 @@ fn execute_recv_funding_signed_unknown_channel() {
 
 #[test]
 fn execute_recv_funding_signed_invalid_signature() {
-    let mock_cli = MockBitcoinCli {
-        utxos: vec![sample_utxo()],
-        change_spk: sample_change_spk(),
-        ..Default::default()
-    };
-
-    let channel_id = ChannelId::v1_from_funding_outpoint(OutPoint {
-        txid: "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
-            .parse()
-            .unwrap(),
-        vout: 0,
-    });
-    let fs_bytes = Message::FundingSigned(FundingSigned {
-        channel_id,
-        signature: Signature::from_compact(&[0u8; 64]).expect("zero bytes parse as a signature"),
-    })
-    .encode();
-
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
-    executor.conn.queue_recv(fs_bytes);
-    executor.negotiations.insert(
-        TemporaryChannelId::new([0xbb; 32]),
-        sample_funding_negotiation(),
-    );
-    let err = executor
-        .execute(
-            &Program {
-                instructions: send_funding_created_and_recv_funding_signed_instructions(),
-            },
-            std::time::Instant::now(),
-        )
-        .unwrap_err();
+    let channel_id = funding_channel_id();
+    let err = Fixture::new()
+        .with_negotiation(sample_funding_negotiation())
+        .queue(&Message::FundingSigned(FundingSigned {
+            channel_id,
+            signature: Signature::from_compact(&[0u8; 64])
+                .expect("zero bytes parse as a signature"),
+        }))
+        .run_err(&Program {
+            instructions: send_funding_created_and_recv_funding_signed_instructions(),
+        });
     assert!(matches!(
         err,
         ExecuteError::Violation(Violation::InvalidCounterpartySignature(id)) if id == channel_id
@@ -1894,19 +1386,8 @@ fn execute_recv_funding_signed_invalid_signature() {
 
 #[test]
 fn execute_send_channel_ready() {
-    let channel_id = ChannelId::v1_from_funding_outpoint(OutPoint {
-        txid: "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
-            .parse()
-            .unwrap(),
-        vout: 0,
-    });
+    let channel_id = funding_channel_id();
     let alias = ShortChannelId::new(538_532, 845, 1);
-    let mock_cli = MockBitcoinCli {
-        utxos: vec![sample_utxo()],
-        change_spk: sample_change_spk(),
-        ..Default::default()
-    };
-
     let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
     instrs.extend([
         Instruction {
@@ -1927,38 +1408,21 @@ fn execute_send_channel_ready() {
         },
     ]);
 
-    let program = Program {
+    // We also need to queue a `funding_signed`, since the instructions reused
+    // by this test expect one to be present in the receive queue.
+    let mut fx = Fixture::new()
+        .with_negotiation(sample_funding_negotiation())
+        .queue(&funding_signed_reply(channel_id));
+    fx.run(&Program {
         instructions: instrs,
-    };
-
-    // We also need to send this `funding_signed`, since the instructions reused
-    // by this test expect one to be present in the executor's receive queue.
-    // The expected signature here was computed using LDK as the source of
-    // truth.
-    let fs_bytes = Message::FundingSigned(FundingSigned {
-        channel_id,
-        signature: "304402203dbf3dbf337b042a72576488c1fb019086089d8d790a47f652346cff2511b6e70220395fdf700cb82b0abfcfe8e0b7c822181f2ee72409c82c3ff8e04e36593662c7".parse().unwrap(),
-    })
-    .encode();
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
-    executor.conn.queue_recv(fs_bytes);
-    executor.negotiations.insert(
-        TemporaryChannelId::new([0xbb; 32]),
-        sample_funding_negotiation(),
-    );
-    executor
-        .execute(&program, std::time::Instant::now())
-        .unwrap();
+    });
 
     // The instructions send 1 `funding_created` and 2 `channel_ready` messages.
-    assert_eq!(executor.conn.sent.len(), 3);
+    assert_eq!(fx.sent_len(), 3);
 
     // The first channel_ready was sent with include_alias = false, so it must
     // not carry the short_channel_id TLV.
-    let cr1 = match Message::decode(&executor.conn.sent[1]).expect("valid message") {
-        Message::ChannelReady(cr) => cr,
-        other => panic!("expected channel_ready(36), got {other}"),
-    };
+    let cr1: ChannelReady = fx.sent(1);
     let expected_pcp1 =
         PublicKey::from_str("023da092f6980e58d2c037173180e9a465476026ee50f96695963e8efe436f54eb")
             .unwrap();
@@ -1968,10 +1432,7 @@ fn execute_send_channel_ready() {
 
     // The second channel_ready was sent with include_alias = true, so it must
     // carry the alias SCID we loaded in its short_channel_id TLV.
-    let cr2 = match Message::decode(&executor.conn.sent[2]).expect("valid message") {
-        Message::ChannelReady(cr) => cr,
-        other => panic!("expected channel_ready(36), got {other}"),
-    };
+    let cr2: ChannelReady = fx.sent(2);
     let expected_pcp2 =
         PublicKey::from_str("030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c1")
             .unwrap();
@@ -1981,7 +1442,7 @@ fn execute_send_channel_ready() {
 
     // The holder's next per-commitment point must hold the first
     // `channel_ready`'s point, not any subsequent one.
-    let state = executor.channel_states.get_mut(&channel_id).unwrap();
+    let state = fx.channel_state(&channel_id);
     assert_eq!(
         *state.next_holder_per_commitment_point(),
         Some(expected_pcp1)
@@ -2009,20 +1470,11 @@ fn execute_send_shutdown() {
         ],
     };
 
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor
-        .execute(&program, std::time::Instant::now())
-        .unwrap();
+    let mut fx = Fixture::new();
+    fx.run(&program);
 
-    assert_eq!(executor.conn.sent.len(), 1);
-    let sd = match Message::decode(&executor.conn.sent[0]).expect("valid message") {
-        Message::Shutdown(sd) => sd,
-        other => panic!("expected shutdown(38), got {other}"),
-    };
+    assert_eq!(fx.sent_len(), 1);
+    let sd: Shutdown = fx.sent(0);
     assert_eq!(sd.channel_id, channel_id);
     assert_eq!(sd.scriptpubkey, script.encode());
 }
@@ -2049,91 +1501,32 @@ fn execute_send_shutdown_empty_scriptpubkey() {
         ],
     };
 
-    let mut executor = Executor::new(
-        MockConnection::new(),
-        MockBitcoinCli::default(),
-        sample_context(),
-    );
-    executor
-        .execute(&program, std::time::Instant::now())
-        .unwrap();
+    let mut fx = Fixture::new();
+    fx.run(&program);
 
-    assert_eq!(executor.conn.sent.len(), 1);
-    let sd = match Message::decode(&executor.conn.sent[0]).expect("valid message") {
-        Message::Shutdown(sd) => sd,
-        other => panic!("expected shutdown(38), got {other}"),
-    };
+    assert_eq!(fx.sent_len(), 1);
+    let sd: Shutdown = fx.sent(0);
     assert_eq!(sd.channel_id, channel_id);
     assert!(sd.scriptpubkey.is_empty());
 }
 
-fn recv_channel_ready_executor() -> (
-    Executor<MockConnection, MockBitcoinCli>,
-    ChannelId,
-    PublicKey,
-) {
-    let channel_id = ChannelId::v1_from_funding_outpoint(OutPoint {
-        txid: "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
-            .parse()
-            .unwrap(),
-        vout: 0,
-    });
-    let mock_cli = MockBitcoinCli {
-        utxos: vec![sample_utxo()],
-        change_spk: sample_change_spk(),
-        ..Default::default()
-    };
-
-    // We also need to send this `funding_signed`, since the instructions reused
-    // by this test expect one to be present in the executor's receive queue.
-    // The expected signature here was computed using LDK as the source of
-    // truth.
-    let fs_bytes = Message::FundingSigned(FundingSigned {
-        channel_id,
-        signature: "304402203dbf3dbf337b042a72576488c1fb019086089d8d790a47f652346cff2511b6e70220395fdf700cb82b0abfcfe8e0b7c822181f2ee72409c82c3ff8e04e36593662c7".parse().unwrap(),
-    })
-    .encode();
-
-    let target_pcp = sample_pubkey(1);
-    let cr_bytes = Message::ChannelReady(ChannelReady {
-        channel_id,
-        second_per_commitment_point: target_pcp,
-        tlvs: ChannelReadyTlvs::default(),
-    })
-    .encode();
-
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
-    executor.conn.queue_recv(fs_bytes);
-    executor.conn.queue_recv(cr_bytes);
-    executor.negotiations.insert(
-        TemporaryChannelId::new([0xbb; 32]),
-        sample_funding_negotiation(),
-    );
-
-    (executor, channel_id, target_pcp)
-}
-
 #[test]
 fn execute_recv_channel_ready_invalid_funding_outpoint_is_noop() {
-    let (mut executor, channel_id, _) = recv_channel_ready_executor();
-
     // Corrupt the negotiated opener funding pubkey so the broadcast funding
     // transaction's output no longer pays the negotiated 2-of-2 script,
     // marking the funding outpoint invalid.
-    executor
-        .negotiations
-        .get_mut(&TemporaryChannelId::new([0xbb; 32]))
-        .unwrap()
-        .open_channel
-        .funding_pubkey = sample_pubkey(1);
+    let mut negotiation = sample_funding_negotiation();
+    negotiation.open_channel.funding_pubkey = sample_pubkey(1);
 
     // The corrupted pubkey changes the funding script, so our precomputed
     // funding_signed signature will no longer verify correctly. That
-    // exchange is not what this test is about, we just skip receiving the
-    // funding_signed.
+    // exchange is not what this test is about, so we neither queue the
+    // funding_signed nor receive it.
+    let mut fx = Fixture::new()
+        .with_negotiation(negotiation)
+        .queue(&channel_ready_reply(sample_pubkey(1)));
     let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
     instrs.pop();
-    executor.conn.recv_queue.pop_front();
 
     instrs.extend([
         Instruction {
@@ -2148,83 +1541,64 @@ fn execute_recv_channel_ready_invalid_funding_outpoint_is_noop() {
 
     // With invalid funding outpoint the target does not owe us a
     // `channel_ready`, so `RecvChannelReady` must be a no-op.
-    executor
-        .execute(
-            &Program {
-                instructions: instrs,
-            },
-            std::time::Instant::now(),
-        )
-        .unwrap();
+    fx.run(&Program {
+        instructions: instrs,
+    });
 
     // The target's next per-commitment point is still unknown and the queued
     // `channel_ready` remains untouched.
-    let state = executor.channel_states.get_mut(&channel_id).unwrap();
+    let state = fx.channel_state(&funding_channel_id());
     assert!(state.next_counterparty_per_commitment_point().is_none());
-    assert_eq!(executor.conn.recv_queue.len(), 1);
+    assert_eq!(fx.queued_len(), 1);
 }
 
 #[test]
 fn execute_recv_channel_ready_below_minimum_depth_is_noop() {
-    let (mut executor, channel_id, _) = recv_channel_ready_executor();
+    let (mut fx, _) = recv_channel_ready_fixture();
 
     // Mine one block fewer than the `minimum_depth` negotiated in `accept_channel` by
     // `sample_funding_negotiation()`.
-    let instrs = recv_channel_ready_instructions(5);
-
     // With fewer than the negotiated `minimum_depth` confirmations the target
     // does not yet owe us a `channel_ready`, so `RecvChannelReady` must be a
     // no-op.
-    executor
-        .execute(
-            &Program {
-                instructions: instrs,
-            },
-            std::time::Instant::now(),
-        )
-        .unwrap();
-    assert!(executor.bitcoin_cli.mined_private_mempool.is_empty());
+    fx.run(&Program {
+        instructions: recv_channel_ready_instructions(5),
+    });
+    assert!(fx.bitcoin().mined_private_mempool.is_empty());
 
     // The target's next per-commitment point is still unknown and the queued
     // `channel_ready` remains untouched.
-    let state = executor.channel_states.get_mut(&channel_id).unwrap();
+    let state = fx.channel_state(&funding_channel_id());
     assert!(state.next_counterparty_per_commitment_point().is_none());
-    assert_eq!(executor.conn.recv_queue.len(), 1);
+    assert_eq!(fx.queued_len(), 1);
 }
 
 #[test]
 fn execute_recv_channel_ready_at_minimum_depth_records_point() {
-    let (mut executor, channel_id, target_pcp) = recv_channel_ready_executor();
+    let (mut fx, target_pcp) = recv_channel_ready_fixture();
 
     // Mine exactly the `minimum_depth` negotiated in `accept_channel` by
     // `sample_funding_negotiation()`.
-    let instrs = recv_channel_ready_instructions(6);
-
     // At the negotiated `minimum_depth` confirmations the target owes us a
     // `channel_ready`, which `RecvChannelReady` receives and records.
-    executor
-        .execute(
-            &Program {
-                instructions: instrs,
-            },
-            std::time::Instant::now(),
-        )
-        .unwrap();
-    assert!(executor.bitcoin_cli.mined_private_mempool.is_empty());
+    fx.run(&Program {
+        instructions: recv_channel_ready_instructions(6),
+    });
+    assert!(fx.bitcoin().mined_private_mempool.is_empty());
 
     // The `channel_ready` was consumed and the target's next per-commitment
     // point is now recorded.
-    let state = executor.channel_states.get_mut(&channel_id).unwrap();
+    let state = fx.channel_state(&funding_channel_id());
     assert_eq!(
         *state.next_counterparty_per_commitment_point(),
         Some(target_pcp)
     );
-    assert!(executor.conn.recv_queue.is_empty());
+    assert_eq!(fx.queued_len(), 0);
 }
 
 #[test]
 fn execute_recv_channel_ready_funding_mined_prematurely_is_noop() {
-    let (mut executor, channel_id, _) = recv_channel_ready_executor();
+    let (mut fx, _) = recv_channel_ready_fixture();
 
     let mut instrs = create_and_broadcast_tx_instructions();
     instrs.extend([
@@ -2255,21 +1629,16 @@ fn execute_recv_channel_ready_funding_mined_prematurely_is_noop() {
     // The funding transaction confirmed before `funding_created`, so the
     // target may never observe the confirmation and `RecvChannelReady` must
     // be a no-op even though the confirmation count is sufficient.
-    executor
-        .execute(
-            &Program {
-                instructions: instrs,
-            },
-            std::time::Instant::now(),
-        )
-        .unwrap();
+    fx.run(&Program {
+        instructions: instrs,
+    });
 
     // The target's next per-commitment point is still unknown and the queued
     // `channel_ready` remains untouched.
-    let state = executor.channel_states.get_mut(&channel_id).unwrap();
+    let state = fx.channel_state(&funding_channel_id());
     assert!(state.was_funding_mined_prematurely);
     assert!(state.next_counterparty_per_commitment_point().is_none());
-    assert_eq!(executor.conn.recv_queue.len(), 1);
+    assert_eq!(fx.queued_len(), 1);
 }
 
 // -- extract_field tests --

@@ -8,21 +8,17 @@ use std::str::FromStr;
 
 // -- MockConnection --
 
-pub struct MockConnection {
-    pub recv_queue: VecDeque<Vec<u8>>,
-    pub sent: Vec<Vec<u8>>,
+struct MockConnection {
+    recv_queue: VecDeque<Vec<u8>>,
+    sent: Vec<Vec<u8>>,
 }
 
 impl MockConnection {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             recv_queue: VecDeque::new(),
             sent: Vec::new(),
         }
-    }
-
-    pub fn queue_recv(&mut self, msg_bytes: Vec<u8>) {
-        self.recv_queue.push_back(msg_bytes);
     }
 }
 
@@ -55,9 +51,9 @@ pub struct MockBitcoinCli {
     pub mined_private_mempool: Vec<String>,
     pub broadcast_calls: Vec<Transaction>,
     pub block_position_lookups: Vec<Txid>,
-    pub utxos: Vec<Utxo>,
-    pub change_spk: ScriptBuf,
-    pub confirmations: u32,
+    utxos: Vec<Utxo>,
+    change_spk: ScriptBuf,
+    confirmations: u32,
 }
 
 impl BitcoinRpc for MockBitcoinCli {
@@ -111,6 +107,158 @@ impl BitcoinRpc for MockBitcoinCli {
     }
 }
 
+// -- Fixture --
+
+/// An [`Executor`] wired to a mock peer and a mock bitcoind.
+pub struct Fixture {
+    executor: Executor<MockConnection, MockBitcoinCli>,
+}
+
+impl Fixture {
+    /// A fixture with a silent peer and a wallet holding [`sample_utxo`].
+    pub fn new() -> Self {
+        let bitcoin_cli = MockBitcoinCli {
+            utxos: vec![sample_utxo()],
+            change_spk: sample_change_spk(),
+            ..Default::default()
+        };
+        Self {
+            executor: Executor::new(MockConnection::new(), bitcoin_cli, sample_context()),
+        }
+    }
+
+    /// Funds the wallet with `utxos` instead of the default [`sample_utxo`].
+    pub fn with_utxos(mut self, utxos: Vec<Utxo>) -> Self {
+        self.executor.bitcoin_cli.utxos = utxos;
+        self
+    }
+
+    /// Records `pending` as the negotiation for its `temporary_channel_id`.
+    pub fn with_negotiation(mut self, pending: PendingChannel) -> Self {
+        self.executor
+            .negotiations
+            .insert(pending.open_channel.temporary_channel_id, pending);
+        self
+    }
+
+    /// Queues `msg` as the peer's next reply.
+    pub fn queue(mut self, msg: &Message) -> Self {
+        self.executor.conn.recv_queue.push_back(msg.encode());
+        self
+    }
+
+    /// Returns the number of queued peer replies the executor has not read.
+    pub fn queued_len(&self) -> usize {
+        self.executor.conn.recv_queue.len()
+    }
+
+    /// Runs `program` against the target, panicking if execution fails.
+    pub fn run(&mut self, program: &Program) {
+        self.executor
+            .execute(program, std::time::Instant::now())
+            .expect("program execution successful");
+    }
+
+    /// Runs `program` against the target, returning the error it fails with.
+    pub fn run_err(&mut self, program: &Program) -> ExecuteError {
+        self.executor
+            .execute(program, std::time::Instant::now())
+            .expect_err("program execution failure")
+    }
+
+    /// Returns the negotiation recorded for `id`.
+    pub fn negotiation(&self, id: &TemporaryChannelId) -> &PendingChannel {
+        self.executor
+            .negotiations
+            .get(id)
+            .expect("negotiation recorded")
+    }
+
+    /// Returns the channel state recorded for `id`.
+    pub fn channel_state(&self, id: &ChannelId) -> &ChannelState {
+        self.executor
+            .channel_states
+            .get(id)
+            .expect("channel state recorded")
+    }
+
+    /// Returns every channel state the executor recorded.
+    pub fn channel_states(&self) -> &HashMap<ChannelId, ChannelState> {
+        &self.executor.channel_states
+    }
+
+    /// Returns the mock bitcoind the executor drives.
+    pub fn bitcoin(&self) -> &MockBitcoinCli {
+        &self.executor.bitcoin_cli
+    }
+
+    /// Returns the transactions held outside Bitcoin Core's mempool.
+    pub fn private_mempool(&self) -> &[(Txid, String)] {
+        &self.executor.private_mempool
+    }
+
+    /// Returns the number of messages the executor sent.
+    pub fn sent_len(&self) -> usize {
+        self.executor.conn.sent.len()
+    }
+
+    /// Decodes the `n`th message the executor sent, panicking if it is not an
+    /// `M`.
+    pub fn sent<M: FromMessage>(&self, n: usize) -> M {
+        let bytes = self.executor.conn.sent.get(n).unwrap_or_else(|| {
+            panic!(
+                "expected at least {} sent messages, got {}",
+                n + 1,
+                self.sent_len()
+            )
+        });
+        let msg = Message::decode(bytes).expect("valid message");
+        let got = msg.to_string();
+        M::from_message(msg).unwrap_or_else(|| panic!("expected {}, got {got}", M::TYPE))
+    }
+}
+
+/// Extracts a specific BOLT message from a decoded [`Message`].
+pub trait FromMessage: Sized {
+    /// Wire type of the expected BOLT message.
+    const TYPE: MessageType;
+
+    /// Returns the extracted BOLT message if `msg`'s type matches, `None`
+    /// otherwise.
+    fn from_message(msg: Message) -> Option<Self>;
+}
+
+/// Implements [`FromMessage`] for BOLT messages whose [`Message`] variant has
+/// the same name.
+macro_rules! impl_from_message {
+    ($($bolt_msg:ident => $msg_type:ident,)*) => {
+        $(
+            impl FromMessage for $bolt_msg {
+                const TYPE: MessageType = MessageType::$msg_type;
+
+                fn from_message(msg: Message) -> Option<Self> {
+                    match msg {
+                        Message::$bolt_msg(bolt_msg) => Some(bolt_msg),
+                        _ => None,
+                    }
+                }
+            }
+        )*
+    };
+}
+
+impl_from_message! {
+    Pong => PONG,
+    OpenChannel => OPEN_CHANNEL,
+    FundingCreated => FUNDING_CREATED,
+    ChannelReady => CHANNEL_READY,
+    Shutdown => SHUTDOWN,
+    ChannelAnnouncement => CHANNEL_ANNOUNCEMENT,
+    NodeAnnouncement => NODE_ANNOUNCEMENT,
+    ChannelUpdate => CHANNEL_UPDATE,
+    AnnouncementSignatures => ANNOUNCEMENT_SIGNATURES,
+}
+
 // -- Helpers --
 
 pub fn sample_pubkey(byte: u8) -> PublicKey {
@@ -146,7 +294,7 @@ pub fn sample_utxo() -> Utxo {
     }
 }
 
-pub fn sample_change_spk() -> ScriptBuf {
+fn sample_change_spk() -> ScriptBuf {
     ScriptBuf::from(
         hex::decode("00142e532c12351a5c81e23c8a76d19345ca7b6de57a")
             .expect("valid P2WPKH scriptpubkey hex"),
@@ -176,17 +324,81 @@ pub fn sample_accept_channel() -> AcceptChannel {
     }
 }
 
+// -- Funding fixture --
+//
+// The funding keys are chosen from BOLT 3 test vectors. All other constants are
+// derived from these keys.
+
+/// The opener's funding key for the funding flow.
+pub fn opener_funding_sk() -> SecretKey {
+    SecretKey::from_str("30ff4956bbdd3222d44cc5e8a1261dab1e07957bdac5ae88fe3261ef321f3749")
+        .expect("valid secret key")
+}
+
+/// The acceptor's funding key for the funding flow.
+pub fn acceptor_funding_sk() -> SecretKey {
+    SecretKey::from_str("1552dfba4f6cf29a62a0af13c8d6981d36d0ef8d61ba10fb0fe90da7634d7e13")
+        .expect("valid secret key")
+}
+
+/// The outpoint of the funding transaction the funding-flow programs build.
+pub fn funding_outpoint() -> OutPoint {
+    OutPoint {
+        txid: "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
+            .parse()
+            .expect("valid txid"),
+        vout: 0,
+    }
+}
+
+/// The channel id the funding flow's transaction produces.
+pub fn funding_channel_id() -> ChannelId {
+    ChannelId::v1_from_funding_outpoint(funding_outpoint())
+}
+
+/// The acceptor's `funding_signed` for `channel_id`.
+///
+/// The signature was computed by LDK over this fixture's commitment, so the
+/// executor accepting it shows both implementations built the same commitment
+/// transaction.
+pub fn funding_signed_reply(channel_id: ChannelId) -> Message {
+    Message::FundingSigned(FundingSigned {
+        channel_id,
+        signature: "304402203dbf3dbf337b042a72576488c1fb019086089d8d790a47f652346cff2511b6e70220395fdf700cb82b0abfcfe8e0b7c822181f2ee72409c82c3ff8e04e36593662c7"
+            .parse()
+            .expect("valid DER signature"),
+    })
+}
+
+/// The target's `channel_ready` for the funding flow's channel.
+pub fn channel_ready_reply(second_per_commitment_point: PublicKey) -> Message {
+    Message::ChannelReady(ChannelReady {
+        channel_id: funding_channel_id(),
+        second_per_commitment_point,
+        tlvs: ChannelReadyTlvs::default(),
+    })
+}
+
+/// A fixture with the funding negotiation seeded and both target replies
+/// queued, plus the target's per-commitment point for the assertions.
+pub fn recv_channel_ready_fixture() -> (Fixture, PublicKey) {
+    let target_pcp = sample_pubkey(1);
+
+    // We also need to queue a `funding_signed`, since the instructions reused
+    // by these tests expect one to be present in the receive queue.
+    let fx = Fixture::new()
+        .with_negotiation(sample_funding_negotiation())
+        .queue(&funding_signed_reply(funding_channel_id()))
+        .queue(&channel_ready_reply(target_pcp));
+
+    (fx, target_pcp)
+}
+
 #[allow(clippy::similar_names)]
 pub fn sample_funding_negotiation() -> PendingChannel {
     let secp = Secp256k1::new();
-    let opener_sk =
-        SecretKey::from_str("30ff4956bbdd3222d44cc5e8a1261dab1e07957bdac5ae88fe3261ef321f3749")
-            .unwrap();
-    let acceptor_sk =
-        SecretKey::from_str("1552dfba4f6cf29a62a0af13c8d6981d36d0ef8d61ba10fb0fe90da7634d7e13")
-            .unwrap();
-    let opener_pk = PublicKey::from_secret_key(&secp, &opener_sk);
-    let acceptor_pk = PublicKey::from_secret_key(&secp, &acceptor_sk);
+    let opener_pk = PublicKey::from_secret_key(&secp, &opener_funding_sk());
+    let acceptor_pk = PublicKey::from_secret_key(&secp, &acceptor_funding_sk());
 
     PendingChannel {
         open_channel: OpenChannel {
