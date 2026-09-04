@@ -1,7 +1,10 @@
 //! BOLT 2 `accept_channel` oracle, for the v1 outbound channel funding flow.
 
 use super::Oracle;
-use crate::bolt::{AcceptChannel, Features, OpenChannel};
+use crate::bolt::{
+    AcceptChannel, ChannelTypeVariant, Features, OpenChannel, is_acceptable_shutdown_script,
+    is_standard_shutdown_script,
+};
 use crate::channel_tx::CommitmentCost;
 use crate::pending_channel::PendingChannel;
 use crate::violation::Violation;
@@ -10,7 +13,9 @@ use bitcoin::Amount;
 
 // Constants from the BOLT 2 `open_channel` and `accept_channel` requirements:
 // https://github.com/lightning/bolts/blob/master/02-peer-protocol.md#requirements-8
-const MAX_ACCEPTED_HTLCS_LIMIT: u16 = 483;
+const MAX_FUNDING_SATOSHIS_NO_WUMBO: u64 = (1 << 24) - 1;
+const MAX_ACCEPTED_HTLCS_ZERO_FEE_COMMITMENTS: u16 = 114;
+const MAX_ACCEPTED_HTLCS_DEFAULT: u16 = 483;
 const MIN_DUST_LIMIT_SATOSHIS: u64 = 354;
 
 /// Context for `AcceptChannelOracle`
@@ -20,6 +25,8 @@ pub struct AcceptChannelContext<'a> {
     /// The negotiation the `accept_channel` answers, identified by its
     /// `temporary_channel_id`, or `None` if no matching `open_channel` was sent.
     pub negotiation: Option<&'a PendingChannel>,
+    /// Features negotiated between the target node and Smite.
+    pub negotiated_features: &'a Features,
 }
 
 /// Checks whether the `open_channel` answered by an `accept_channel` satisfied
@@ -45,7 +52,8 @@ impl Oracle<AcceptChannelContext<'_>> for AcceptChannelOracle {
         };
 
         // Check that the `open_channel` was valid to accept.
-        if let Err(reason) = verify_accepted_open_channel(open_channel) {
+        if let Err(reason) = verify_accepted_open_channel(open_channel, context.negotiated_features)
+        {
             return Err(Violation::InvalidAcceptChannel(
                 context.accept_channel.temporary_channel_id,
                 format!("accepted invalid open_channel: {reason}"),
@@ -53,7 +61,11 @@ impl Oracle<AcceptChannelContext<'_>> for AcceptChannelOracle {
         }
 
         // Check that the `accept_channel` itself is valid.
-        if let Err(reason) = verify_accept_channel(context.accept_channel, open_channel) {
+        if let Err(reason) = verify_accept_channel(
+            context.accept_channel,
+            open_channel,
+            context.negotiated_features,
+        ) {
             return Err(Violation::InvalidAcceptChannel(
                 context.accept_channel.temporary_channel_id,
                 format!("invalid accept_channel: {reason}"),
@@ -83,13 +95,20 @@ impl Oracle<AcceptChannelContext<'_>> for AcceptChannelOracle {
 ///   be less than or equal to the channel reserve. However, implementations
 ///   such as LDK accept zero channel reserves on the receiving side, so we do
 ///   not enforce this check on the target's receiving side.
-fn verify_accepted_open_channel(open_channel: &OpenChannel) -> Result<(), String> {
+fn verify_accepted_open_channel(
+    open_channel: &OpenChannel,
+    negotiated_features: &Features,
+) -> Result<(), String> {
+    // Check that option_dual_fund has not been negotiated.
+    if negotiated_features.supports_feature(Features::OPTION_DUAL_FUND) {
+        return Err("option_dual_fund has been negotiated".to_string());
+    }
+
     // Check that the funding amounts are valid.
-    // FIXME: Varies if `option_support_large_channel` is not negotiated.
-    let total_supply_satoshis = Amount::MAX_MONEY.to_sat();
-    if open_channel.funding_satoshis > total_supply_satoshis {
+    let max_funding = max_funding_satoshis(negotiated_features);
+    if open_channel.funding_satoshis > max_funding {
         return Err(format!(
-            "funding_satoshis {} exceeds maximum funding of {total_supply_satoshis} sat",
+            "funding_satoshis {} exceeds maximum funding of {max_funding} sat",
             open_channel.funding_satoshis,
         ));
     }
@@ -102,9 +121,24 @@ fn verify_accepted_open_channel(open_channel: &OpenChannel) -> Result<(), String
         ));
     }
 
+    // Check that the upfront shutdown script is present and valid when negotiated.
+    if negotiated_features.supports_feature(Features::OPTION_UPFRONT_SHUTDOWN_SCRIPT) {
+        if let Some(script) = &open_channel.tlvs.upfront_shutdown_script {
+            if !script.is_empty() && !is_acceptable_shutdown_script(script, negotiated_features) {
+                return Err("upfront_shutdown_script is not valid".to_string());
+            }
+        } else {
+            return Err("open_channel does not include upfront_shutdown_script".to_string());
+        }
+    }
+
+    // Check option_channel_type in negotiated features since it is assumed to
+    // be supported.
+    if !negotiated_features.supports_feature(Features::OPTION_CHANNEL_TYPE) {
+        return Err("option_channel_type is not supported".to_string());
+    }
+
     // Check that the channel type was included.
-    // TODO: Check option_channel_type in negotiated features since it is
-    // assumed to be supported.
     let Some(channel_type) = open_channel
         .tlvs
         .channel_type
@@ -114,13 +148,40 @@ fn verify_accepted_open_channel(open_channel: &OpenChannel) -> Result<(), String
         return Err("open_channel does not include a channel_type".to_string());
     };
 
-    // Check the HTLC limit is within the maximum.
-    // FIXME: Does not apply to channels whose `channel_type` includes
-    // `zero_fee_commitments`. These channel types have a lower upper limit on
-    // `max_accepted_htlcs`, so we are currently safe.
-    if open_channel.max_accepted_htlcs > MAX_ACCEPTED_HTLCS_LIMIT {
+    // Check that the channel type only contains negotiated features.
+    if !channel_type.is_supported(negotiated_features) {
+        return Err("channel_type contains features that were not negotiated".to_string());
+    }
+
+    // Check that the channel type is one of the known variants.
+    if !ChannelTypeVariant::ALL
+        .iter()
+        .any(|variant| channel_type == variant.to_features())
+    {
+        return Err("channel_type is not a known variant".to_string());
+    }
+
+    // Check that feerate_per_kw is 0 when `zero_fee_commitments` is negotiated.
+    if channel_type.supports_feature(Features::ZERO_FEE_COMMITMENTS)
+        && open_channel.feerate_per_kw != 0
+    {
         return Err(format!(
-            "max_accepted_htlcs {} exceeds the limit of {MAX_ACCEPTED_HTLCS_LIMIT}",
+            "zero_fee_commitments requires feerate_per_kw to be 0, but got {}",
+            open_channel.feerate_per_kw,
+        ));
+    }
+
+    // Check that option_scid_alias is only negotiated for private channels.
+    let announce_channel = (open_channel.channel_flags & 1) == 1;
+    if announce_channel && channel_type.supports_feature(Features::OPTION_SCID_ALIAS) {
+        return Err("option_scid_alias requires the channel to be private".to_string());
+    }
+
+    // Check the HTLC limit is within the maximum.
+    let htlc_limit = max_accepted_htlcs_limit(&channel_type);
+    if open_channel.max_accepted_htlcs > htlc_limit {
+        return Err(format!(
+            "max_accepted_htlcs {} exceeds the limit of {htlc_limit}",
             open_channel.max_accepted_htlcs,
         ));
     }
@@ -153,7 +214,19 @@ fn verify_accepted_open_channel(open_channel: &OpenChannel) -> Result<(), String
 fn verify_accept_channel(
     accept_channel: &AcceptChannel,
     open_channel: &OpenChannel,
+    negotiated_features: &Features,
 ) -> Result<(), String> {
+    // Check that the upfront shutdown script is present and valid when negotiated.
+    if negotiated_features.supports_feature(Features::OPTION_UPFRONT_SHUTDOWN_SCRIPT) {
+        if let Some(script) = &accept_channel.tlvs.upfront_shutdown_script {
+            if !script.is_empty() && !is_standard_shutdown_script(script, negotiated_features) {
+                return Err("upfront_shutdown_script is not valid".to_string());
+            }
+        } else {
+            return Err("accept_channel does not include upfront_shutdown_script".to_string());
+        }
+    }
+
     // Check that the channel type was included.
     let Some(channel_type) = accept_channel
         .tlvs
@@ -176,6 +249,15 @@ fn verify_accept_channel(
         return Err("accept_channel channel_type does not match open_channel".to_string());
     }
 
+    // Check that option_zeroconf has a minimum depth of 0.
+    if channel_type.supports_feature(Features::OPTION_ZEROCONF) && accept_channel.minimum_depth != 0
+    {
+        return Err(format!(
+            "option_zeroconf requires minimum_depth to be 0, but got {}",
+            accept_channel.minimum_depth,
+        ));
+    }
+
     // Check the acceptor's channel reserve covers the opener's dust limit.
     if accept_channel.channel_reserve_satoshis < open_channel.dust_limit_satoshis {
         return Err(format!(
@@ -193,12 +275,10 @@ fn verify_accept_channel(
     }
 
     // Check the HTLC limit is within the maximum.
-    // FIXME: Does not apply to channels whose `channel_type` includes
-    // `zero_fee_commitments`. These channel types have a lower upper limit on
-    // `max_accepted_htlcs`, so we are currently safe.
-    if accept_channel.max_accepted_htlcs > MAX_ACCEPTED_HTLCS_LIMIT {
+    let htlc_limit = max_accepted_htlcs_limit(&channel_type);
+    if accept_channel.max_accepted_htlcs > htlc_limit {
         return Err(format!(
-            "max_accepted_htlcs {} exceeds the limit of {MAX_ACCEPTED_HTLCS_LIMIT}",
+            "max_accepted_htlcs {} exceeds the limit of {htlc_limit}",
             accept_channel.max_accepted_htlcs,
         ));
     }
@@ -223,22 +303,24 @@ fn verify_accept_channel(
 /// channel reserve requirement, returning an error if it breaches either, or
 /// `Ok(())` if both are met.
 ///
-/// NOTE: This check is safe from false positives for `zero_fee_commitments`
-/// and `option_simple_taproot`, although the reported error may be misleading:
+/// NOTE: Validation is skipped for channel types we do not yet fully support,
+/// such as 0FC and Taproot, to avoid misleading errors.
 ///
-/// - `zero_fee_commitments` requires `feerate_per_kw == 0`, which we currently
-///   do not enforce. A non-zero feerate may cause the error to be reported here
-///   even though it is invalid for this channel type.
-/// - `option_simple_taproot` has a different commitment fee (968-byte weight),
-///   but we calculate it using the lower 724-byte weight. This may allow some
-///   invalid cases through, but cannot cause a false positive.
-/// - Anchor costs are only included when `option_anchors` is negotiated, so
-///   they are not unnecessarily subtracted for these channel types.
+/// TODO: Enable validation once we support commitment handling for these
+/// channel types.
 fn verify_initial_commitment(
     open_channel: &OpenChannel,
     channel_type: &Features,
     channel_reserve_satoshis: u64,
 ) -> Result<(), String> {
+    // Skip validation for channel types we don't yet fully support.
+    if channel_type.supports_feature(Features::ZERO_FEE_COMMITMENTS)
+        || channel_type.supports_feature(Features::OPTION_SIMPLE_TAPROOT)
+        || channel_type.supports_feature(Features::OPTION_SIMPLE_TAPROOT_STAGING)
+    {
+        return Ok(());
+    }
+
     // Check that the opener can afford the proposed feerate.
     let opener_balance_sat = (open_channel.funding_satoshis * 1000 - open_channel.push_msat) / 1000;
     let commitment_cost = CommitmentCost::new(open_channel.feerate_per_kw, channel_type);
@@ -269,11 +351,31 @@ fn verify_initial_commitment(
     Ok(())
 }
 
+/// Returns the maximum funding amount allowed by the negotiated features.
+pub fn max_funding_satoshis(negotiated_features: &Features) -> u64 {
+    if negotiated_features.supports_feature(Features::OPTION_SUPPORT_LARGE_CHANNEL) {
+        Amount::MAX_MONEY.to_sat()
+    } else {
+        MAX_FUNDING_SATOSHIS_NO_WUMBO
+    }
+}
+
+/// Returns the maximum number of inbound HTLCs allowed by the channel type.
+pub fn max_accepted_htlcs_limit(channel_type: &Features) -> u16 {
+    if channel_type.supports_feature(Features::ZERO_FEE_COMMITMENTS) {
+        MAX_ACCEPTED_HTLCS_ZERO_FEE_COMMITMENTS
+    } else {
+        MAX_ACCEPTED_HTLCS_DEFAULT
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bolt::{AcceptChannelTlvs, OpenChannelTlvs, TemporaryChannelId};
+    use bitcoin::hashes::Hash;
     use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+    use bitcoin::{PubkeyHash, ScriptBuf, WPubkeyHash};
 
     fn pubkey(seed: u8) -> PublicKey {
         let sk = SecretKey::from_slice(&[seed; 32]).expect("valid secret key");
@@ -343,11 +445,30 @@ mod tests {
         }
     }
 
+    /// Valid negotiated features for testing.
+    fn sample_negotiated_features() -> Features {
+        Features::from_bits(&[
+            Features::OPTION_STATIC_REMOTEKEY,
+            Features::OPTION_ANCHORS,
+            Features::ZERO_FEE_COMMITMENTS,
+            Features::OPTION_CHANNEL_TYPE,
+            Features::OPTION_SCID_ALIAS,
+            Features::OPTION_ZEROCONF,
+            Features::OPTION_SIMPLE_TAPROOT,
+            Features::OPTION_SIMPLE_TAPROOT_STAGING,
+        ])
+    }
+
     #[track_caller]
-    fn assert_pass(accept_channel: &AcceptChannel, negotiation: Option<&PendingChannel>) {
+    fn assert_pass(
+        accept_channel: &AcceptChannel,
+        negotiation: Option<&PendingChannel>,
+        negotiated_features: &Features,
+    ) {
         if let Err(err) = AcceptChannelOracle.evaluate(&AcceptChannelContext {
             accept_channel,
             negotiation,
+            negotiated_features,
         }) {
             panic!("expected pass, got: {err}");
         }
@@ -357,11 +478,13 @@ mod tests {
     fn assert_fail(
         accept_channel: &AcceptChannel,
         negotiation: Option<&PendingChannel>,
+        negotiated_features: &Features,
         expected: &str,
     ) {
         match AcceptChannelOracle.evaluate(&AcceptChannelContext {
             accept_channel,
             negotiation,
+            negotiated_features,
         }) {
             Err(Violation::InvalidAcceptChannel(chan_id, reason)) => {
                 assert_eq!(accept_channel.temporary_channel_id, chan_id);
@@ -379,7 +502,55 @@ mod tests {
         assert_pass(
             &accept_channel(),
             Some(&pending_negotiation(open_channel())),
+            &sample_negotiated_features(),
         );
+    }
+
+    #[test]
+    fn conforming_zero_fee_commitments_channel_passes() {
+        let mut oc = open_channel();
+        oc.tlvs.channel_type = Some(ChannelTypeVariant::ZeroFeeCommitments.encode());
+        oc.feerate_per_kw = 0;
+        oc.max_accepted_htlcs = MAX_ACCEPTED_HTLCS_ZERO_FEE_COMMITMENTS;
+        let mut ac = accept_channel();
+        ac.tlvs.channel_type = Some(ChannelTypeVariant::ZeroFeeCommitments.encode());
+        ac.max_accepted_htlcs = MAX_ACCEPTED_HTLCS_ZERO_FEE_COMMITMENTS;
+
+        assert_pass(
+            &ac,
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+        );
+    }
+
+    #[test]
+    fn conforming_option_zeroconf_with_valid_minimum_depth_passes() {
+        let mut oc = open_channel();
+        oc.tlvs.channel_type = Some(ChannelTypeVariant::StaticRemoteKeyZeroConf.encode());
+        let mut ac = accept_channel();
+        ac.tlvs.channel_type = Some(ChannelTypeVariant::StaticRemoteKeyZeroConf.encode());
+        ac.minimum_depth = 0;
+
+        assert_pass(
+            &ac,
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+        );
+    }
+
+    #[test]
+    fn conforming_compliant_shutdown_script_passes() {
+        let mut negotiated_features = sample_negotiated_features();
+        negotiated_features.set_bit(Features::OPTION_UPFRONT_SHUTDOWN_SCRIPT);
+        let legacy_script = ScriptBuf::new_p2pkh(&PubkeyHash::all_zeros()).into_bytes();
+        let segwit_script = ScriptBuf::new_p2wpkh(&WPubkeyHash::all_zeros()).into_bytes();
+
+        let mut oc = open_channel();
+        oc.tlvs.upfront_shutdown_script = Some(legacy_script.clone());
+        let mut ac = accept_channel();
+        ac.tlvs.upfront_shutdown_script = Some(segwit_script);
+
+        assert_pass(&ac, Some(&pending_negotiation(oc)), &negotiated_features);
     }
 
     #[test]
@@ -387,19 +558,50 @@ mod tests {
         assert_fail(
             &accept_channel(),
             None,
+            &sample_negotiated_features(),
             "unknown temporary_channel_id: no open_channel was sent for this negotiation",
         );
     }
 
     #[test]
-    fn funding_satoshis_above_bitcoins_total_supply() {
+    fn open_channel_option_dual_fund_negotiated() {
+        let mut negotiated_features = sample_negotiated_features();
+        negotiated_features.set_bit(Features::OPTION_DUAL_FUND);
+
+        assert_fail(
+            &accept_channel(),
+            Some(&pending_negotiation(open_channel())),
+            &negotiated_features,
+            "invalid open_channel: option_dual_fund has been negotiated",
+        );
+    }
+
+    #[test]
+    fn funding_satoshis_above_non_wumbo_limit_without_option_support_large_channel() {
         let mut oc = open_channel();
-        oc.funding_satoshis = Amount::MAX_MONEY.to_sat() + 1;
+        oc.funding_satoshis = MAX_FUNDING_SATOSHIS_NO_WUMBO + 1;
 
         assert_fail(
             &accept_channel(),
             Some(&pending_negotiation(oc)),
-            "invalid open_channel: funding_satoshis 2100000000000001 exceeds maximum funding",
+            &sample_negotiated_features(),
+            "invalid open_channel: funding_satoshis 16777216 exceeds maximum funding of 16777215 sat",
+        );
+    }
+
+    #[test]
+    fn funding_satoshis_above_bitcoins_total_supply_with_option_support_large_channel() {
+        let mut oc = open_channel();
+        oc.funding_satoshis = Amount::MAX_MONEY.to_sat() + 1;
+
+        let mut negotiated_features = sample_negotiated_features();
+        negotiated_features.set_bit(Features::OPTION_SUPPORT_LARGE_CHANNEL);
+
+        assert_fail(
+            &accept_channel(),
+            Some(&pending_negotiation(oc)),
+            &negotiated_features,
+            "invalid open_channel: funding_satoshis 2100000000000001 exceeds maximum funding of 2100000000000000 sat",
         );
     }
 
@@ -411,7 +613,49 @@ mod tests {
         assert_fail(
             &accept_channel(),
             Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
             "invalid open_channel: push_msat 10000000001 exceeds funding amount",
+        );
+    }
+
+    #[test]
+    fn open_channel_invalid_upfront_shutdown_script() {
+        let mut oc = open_channel();
+        oc.tlvs.upfront_shutdown_script = Some(vec![0xFF, 0xFF]);
+
+        let mut negotiated_features = sample_negotiated_features();
+        negotiated_features.set_bit(Features::OPTION_UPFRONT_SHUTDOWN_SCRIPT);
+
+        assert_fail(
+            &accept_channel(),
+            Some(&pending_negotiation(oc)),
+            &negotiated_features,
+            "invalid open_channel: upfront_shutdown_script is not valid",
+        );
+    }
+
+    #[test]
+    fn open_channel_missing_upfront_shutdown_script() {
+        let mut negotiated_features = sample_negotiated_features();
+        negotiated_features.set_bit(Features::OPTION_UPFRONT_SHUTDOWN_SCRIPT);
+
+        assert_fail(
+            &accept_channel(),
+            Some(&pending_negotiation(open_channel())),
+            &negotiated_features,
+            "invalid open_channel: open_channel does not include upfront_shutdown_script",
+        );
+    }
+
+    #[test]
+    fn open_channel_option_channel_type_not_supported() {
+        let negotiated_features = Features::new();
+
+        assert_fail(
+            &accept_channel(),
+            Some(&pending_negotiation(open_channel())),
+            &negotiated_features,
+            "invalid open_channel: option_channel_type is not supported",
         );
     }
 
@@ -423,19 +667,98 @@ mod tests {
         assert_fail(
             &accept_channel(),
             Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
             "invalid open_channel: open_channel does not include a channel_type",
         );
     }
 
     #[test]
-    fn open_channel_max_accepted_htlcs_above_the_limit() {
+    fn open_channel_channel_type_contains_non_negotiated_features() {
         let mut oc = open_channel();
-        oc.max_accepted_htlcs = MAX_ACCEPTED_HTLCS_LIMIT + 1;
+        oc.tlvs.channel_type = Some(vec![0x10, 0x00]);
+
+        let negotiated_features = Features::from_bits(&[
+            Features::ZERO_FEE_COMMITMENTS,
+            Features::OPTION_CHANNEL_TYPE,
+        ]);
 
         assert_fail(
             &accept_channel(),
             Some(&pending_negotiation(oc)),
+            &negotiated_features,
+            "invalid open_channel: channel_type contains features that were not negotiated",
+        );
+    }
+
+    #[test]
+    fn open_channel_with_unknown_channel_type_variant() {
+        let mut oc = open_channel();
+        oc.tlvs.channel_type = Some(vec![0x40, 0x40, 0x10, 0x00]);
+
+        let mut negotiated_features = Features::from(vec![0x40, 0x40, 0x10, 0x00]);
+        negotiated_features.set_bit(Features::OPTION_CHANNEL_TYPE);
+
+        assert_fail(
+            &accept_channel(),
+            Some(&pending_negotiation(oc)),
+            &negotiated_features,
+            "invalid open_channel: channel_type is not a known variant",
+        );
+    }
+
+    #[test]
+    fn open_channel_zero_fee_commitments_with_nonzero_feerate() {
+        let mut oc = open_channel();
+        oc.tlvs.channel_type = Some(ChannelTypeVariant::ZeroFeeCommitments.encode());
+        oc.feerate_per_kw = 1;
+
+        assert_fail(
+            &accept_channel(),
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+            "invalid open_channel: zero_fee_commitments requires feerate_per_kw to be 0",
+        );
+    }
+
+    #[test]
+    fn open_channel_option_scid_alias_for_public_channel() {
+        let mut oc = open_channel();
+        oc.channel_flags = 1;
+        oc.tlvs.channel_type = Some(ChannelTypeVariant::StaticRemoteKeyScidAlias.encode());
+
+        assert_fail(
+            &accept_channel(),
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+            "invalid open_channel: option_scid_alias requires the channel to be private",
+        );
+    }
+
+    #[test]
+    fn open_channel_max_accepted_htlcs_above_the_default_limit() {
+        let mut oc = open_channel();
+        oc.max_accepted_htlcs = MAX_ACCEPTED_HTLCS_DEFAULT + 1;
+
+        assert_fail(
+            &accept_channel(),
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
             "invalid open_channel: max_accepted_htlcs 484 exceeds the limit of 483",
+        );
+    }
+
+    #[test]
+    fn open_channel_max_accepted_htlcs_above_the_zero_fee_commitments_limit() {
+        let mut oc = open_channel();
+        oc.tlvs.channel_type = Some(ChannelTypeVariant::ZeroFeeCommitments.encode());
+        oc.feerate_per_kw = 0;
+        oc.max_accepted_htlcs = MAX_ACCEPTED_HTLCS_ZERO_FEE_COMMITMENTS + 1;
+
+        assert_fail(
+            &accept_channel(),
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+            "invalid open_channel: max_accepted_htlcs 115 exceeds the limit of 114",
         );
     }
 
@@ -447,6 +770,7 @@ mod tests {
         assert_fail(
             &accept_channel(),
             Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
             "invalid open_channel: dust_limit_satoshis 353 is below the minimum of 354 sat",
         );
     }
@@ -459,6 +783,7 @@ mod tests {
         assert_fail(
             &accept_channel(),
             Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
             "invalid open_channel: opener balance 10000 sat cannot cover the commitment fee",
         );
     }
@@ -472,6 +797,7 @@ mod tests {
         assert_fail(
             &accept_channel(),
             Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
             "invalid open_channel: opener balance 17000 sat cannot cover anchor cost of 660 sat (after fee deduction)",
         );
     }
@@ -484,7 +810,45 @@ mod tests {
         assert_fail(
             &accept_channel(),
             Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
             "invalid open_channel: neither side exceeds channel reserve",
+        );
+    }
+
+    #[test]
+    fn accept_channel_invalid_upfront_shutdown_script() {
+        let mut oc = open_channel();
+        let legacy_script = ScriptBuf::new_p2pkh(&PubkeyHash::all_zeros()).into_bytes();
+        oc.tlvs.upfront_shutdown_script = Some(legacy_script.clone());
+
+        let mut ac = accept_channel();
+        ac.tlvs.upfront_shutdown_script = Some(legacy_script);
+
+        let mut negotiated_features = sample_negotiated_features();
+        negotiated_features.set_bit(Features::OPTION_UPFRONT_SHUTDOWN_SCRIPT);
+
+        assert_fail(
+            &ac,
+            Some(&pending_negotiation(oc)),
+            &negotiated_features,
+            "invalid accept_channel: upfront_shutdown_script is not valid",
+        );
+    }
+
+    #[test]
+    fn accept_channel_missing_upfront_shutdown_script() {
+        let mut oc = open_channel();
+        let valid_script = ScriptBuf::new_p2wpkh(&WPubkeyHash::all_zeros()).into_bytes();
+        oc.tlvs.upfront_shutdown_script = Some(valid_script);
+
+        let mut negotiated_features = sample_negotiated_features();
+        negotiated_features.set_bit(Features::OPTION_UPFRONT_SHUTDOWN_SCRIPT);
+
+        assert_fail(
+            &accept_channel(),
+            Some(&pending_negotiation(oc)),
+            &negotiated_features,
+            "accept_channel does not include upfront_shutdown_script",
         );
     }
 
@@ -496,6 +860,7 @@ mod tests {
         assert_fail(
             &ac,
             Some(&pending_negotiation(open_channel())),
+            &sample_negotiated_features(),
             "invalid accept_channel: accept_channel does not include a channel_type",
         );
     }
@@ -508,6 +873,7 @@ mod tests {
         assert_fail(
             &ac,
             Some(&pending_negotiation(open_channel())),
+            &sample_negotiated_features(),
             "invalid accept_channel: accept_channel channel_type does not match open_channel",
         );
     }
@@ -517,7 +883,27 @@ mod tests {
         let mut oc = open_channel();
         oc.tlvs.channel_type = Some(vec![0x00, 0x00, 0x10, 0x00]);
 
-        assert_pass(&accept_channel(), Some(&pending_negotiation(oc)));
+        assert_pass(
+            &accept_channel(),
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+        );
+    }
+
+    #[test]
+    fn accept_channel_option_zeroconf_with_nonzero_minimum_depth() {
+        let mut oc = open_channel();
+        oc.tlvs.channel_type = Some(ChannelTypeVariant::StaticRemoteKeyZeroConf.encode());
+        let mut ac = accept_channel();
+        ac.tlvs.channel_type = Some(ChannelTypeVariant::StaticRemoteKeyZeroConf.encode());
+        ac.minimum_depth = 1;
+
+        assert_fail(
+            &ac,
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+            "invalid accept_channel: option_zeroconf requires minimum_depth to be 0",
+        );
     }
 
     #[test]
@@ -529,6 +915,7 @@ mod tests {
         assert_fail(
             &ac,
             Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
             "invalid accept_channel: channel_reserve_satoshis 545 is below the open_channel dust_limit_satoshis 546",
         );
     }
@@ -542,19 +929,39 @@ mod tests {
         assert_fail(
             &ac,
             Some(&pending_negotiation(open_channel())),
+            &sample_negotiated_features(),
             "invalid accept_channel: dust_limit_satoshis 5000 exceeds channel_reserve_satoshis 4000",
         );
     }
 
     #[test]
-    fn accept_channel_max_accepted_htlcs_above_the_limit() {
+    fn accept_channel_max_accepted_htlcs_above_the_default_limit() {
         let mut ac = accept_channel();
-        ac.max_accepted_htlcs = MAX_ACCEPTED_HTLCS_LIMIT + 1;
+        ac.max_accepted_htlcs = MAX_ACCEPTED_HTLCS_DEFAULT + 1;
 
         assert_fail(
             &ac,
             Some(&pending_negotiation(open_channel())),
+            &sample_negotiated_features(),
             "invalid accept_channel: max_accepted_htlcs 484 exceeds the limit of 483",
+        );
+    }
+
+    #[test]
+    fn accept_channel_max_accepted_htlcs_above_the_zero_fee_commitments_limit() {
+        let mut oc = open_channel();
+        oc.tlvs.channel_type = Some(ChannelTypeVariant::ZeroFeeCommitments.encode());
+        oc.feerate_per_kw = 0;
+        oc.max_accepted_htlcs = MAX_ACCEPTED_HTLCS_ZERO_FEE_COMMITMENTS;
+        let mut ac = accept_channel();
+        ac.tlvs.channel_type = Some(ChannelTypeVariant::ZeroFeeCommitments.encode());
+        ac.max_accepted_htlcs = MAX_ACCEPTED_HTLCS_ZERO_FEE_COMMITMENTS + 1;
+
+        assert_fail(
+            &ac,
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+            "invalid accept_channel: max_accepted_htlcs 115 exceeds the limit of 114",
         );
     }
 
@@ -566,6 +973,7 @@ mod tests {
         assert_fail(
             &ac,
             Some(&pending_negotiation(open_channel())),
+            &sample_negotiated_features(),
             "invalid accept_channel: dust_limit_satoshis 353 is below the minimum of 354 sat",
         );
     }
@@ -578,7 +986,41 @@ mod tests {
         assert_fail(
             &ac,
             Some(&pending_negotiation(open_channel())),
+            &sample_negotiated_features(),
             "invalid accept_channel: neither side exceeds channel reserve",
+        );
+    }
+
+    #[test]
+    fn commitment_validation_skipped_for_zero_fee_commitments() {
+        let mut oc = open_channel();
+        oc.tlvs.channel_type = Some(ChannelTypeVariant::ZeroFeeCommitments.encode());
+        oc.feerate_per_kw = 0;
+        oc.push_msat = oc.funding_satoshis * 1000;
+        oc.max_accepted_htlcs = MAX_ACCEPTED_HTLCS_ZERO_FEE_COMMITMENTS;
+        let mut ac = accept_channel();
+        ac.tlvs.channel_type = Some(ChannelTypeVariant::ZeroFeeCommitments.encode());
+        ac.max_accepted_htlcs = MAX_ACCEPTED_HTLCS_ZERO_FEE_COMMITMENTS;
+
+        assert_pass(
+            &ac,
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+        );
+    }
+
+    #[test]
+    fn commitment_validation_skipped_for_option_simple_taproot() {
+        let mut oc = open_channel();
+        oc.tlvs.channel_type = Some(ChannelTypeVariant::SimpleTaproot.encode());
+        oc.push_msat = oc.funding_satoshis * 1000;
+        let mut ac = accept_channel();
+        ac.tlvs.channel_type = Some(ChannelTypeVariant::SimpleTaproot.encode());
+
+        assert_pass(
+            &ac,
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
         );
     }
 
@@ -590,6 +1032,7 @@ mod tests {
         assert_fail(
             &accept_channel(),
             Some(&negotiation),
+            &sample_negotiated_features(),
             "temporary_channel_id reuse: previous negotiation has not reached funding_created",
         );
     }
@@ -600,6 +1043,10 @@ mod tests {
         negotiation.accept_channel = Some(accept_channel());
         negotiation.funding_built = true;
 
-        assert_pass(&accept_channel(), Some(&negotiation));
+        assert_pass(
+            &accept_channel(),
+            Some(&negotiation),
+            &sample_negotiated_features(),
+        );
     }
 }

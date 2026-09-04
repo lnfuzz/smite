@@ -73,7 +73,7 @@ impl<T: Target> SnapshotSetup<T> for PostInitSetup {
         // Echo features but strip the bits that would take us off the
         // single-funded `open_channel` path this setup is built for.
         let our_init = init_for_single_funded(&target_init);
-        conn.send_message(&Message::Init(our_init).encode())?;
+        conn.send_message(&Message::Init(our_init.clone()).encode())?;
 
         // Drain any remaining post-init noise so the snapshot starts with a
         // clean connection.
@@ -86,7 +86,11 @@ impl<T: Target> SnapshotSetup<T> for PostInitSetup {
             // this is the floor. Dynamic per-target queries can replace it
             // later.
             block_height: u32::try_from(INITIAL_BLOCKS).expect("fits in u32"),
-            target_features: target_init.features,
+            // Since we echo the same features the target sent, but strip both
+            // required and optional bits to exercise only the single funded
+            // flow and avoid unrelated noise, negotiated features are just the
+            // features we sent in our init.
+            negotiated_features: Features::from(our_init.features),
         };
 
         Ok((conn, context))

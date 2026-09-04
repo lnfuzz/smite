@@ -134,8 +134,8 @@ pub struct ProgramContext {
     pub chain_hash: [u8; 32],
     /// Current block height at snapshot time.
     pub block_height: u32,
-    /// Target's advertised feature bits from init message.
-    pub target_features: Vec<u8>,
+    /// Features negotiated between the target node and Smite.
+    pub negotiated_features: Features,
 }
 
 /// Abstraction over a Noise-encrypted connection, allowing mock implementations
@@ -490,6 +490,7 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                     AcceptChannelOracle.evaluate(&AcceptChannelContext {
                         accept_channel: &ac,
                         negotiation: self.negotiations.get(&ac.temporary_channel_id),
+                        negotiated_features: &self.context.negotiated_features,
                     })?;
                     record_recv_accept_channel(&mut self.negotiations, &ac);
                     Some(Variable::AcceptChannel(ac))
