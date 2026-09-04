@@ -18,7 +18,9 @@ use smite::channel_tx::{
     build_funding_transaction,
 };
 use smite::noise::{ConnectionError, NoiseConnection};
-use smite::oracles::{AcceptChannelContext, AcceptChannelOracle, Oracle};
+use smite::oracles::{
+    AcceptChannelContext, AcceptChannelOracle, Oracle, ShutdownContext, ShutdownOracle,
+};
 use smite::pending_channel::PendingChannel;
 use smite::violation::Violation;
 use smite_ir::operation::AcceptChannelField;
@@ -472,6 +474,7 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
 
                 Operation::SendShutdown => {
                     let sd = build_shutdown(&variables, &instr.inputs);
+                    let channel_id = sd.channel_id;
                     let encoded = Message::Shutdown(sd).encode();
                     log::debug!(
                         "[{:?}] SendShutdown: {} bytes",
@@ -479,7 +482,7 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                         encoded.len()
                     );
                     self.conn.send_message(&encoded)?;
-                    Some(Variable::SentShutdown)
+                    Some(Variable::SentShutdown(channel_id))
                 }
 
                 Operation::RecvAcceptChannel => {
@@ -511,6 +514,31 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                         log::debug!("[{:?}] RecvChannelReady: received", start.elapsed());
                     }
                     None
+                }
+
+                Operation::RecvShutdown => {
+                    let channel_id = consume_sent_shutdown(&mut variables, instr.inputs[0]);
+                    // TODO(htlc): we only expect `shutdown` when all HTLCs are resolved, else this
+                    // is a no-op.
+                    if is_shutdown_expected(&self.channel_states, channel_id) {
+                        log::debug!("[{:?}] RecvShutdown: waiting", start.elapsed());
+                        let sd = recv_shutdown(&mut self.conn)?;
+                        log::debug!("[{:?}] RecvShutdown: received", start.elapsed());
+                        let negotiated_features =
+                            Features::from(self.context.target_features.as_slice());
+                        ShutdownOracle.evaluate(&ShutdownContext {
+                            shutdown: &sd,
+                            channel_states: &self.channel_states,
+                            negotiated_features: &negotiated_features,
+                        })?;
+                        self.channel_states
+                            .get_mut(&channel_id)
+                            .expect("is_shutdown_expected guarantees a tracked channel")
+                            .peer_shutdown_received = true;
+                        Some(Variable::Bytes(sd.scriptpubkey))
+                    } else {
+                        Some(Variable::Bytes(Vec::new()))
+                    }
                 }
 
                 Operation::MineBlocks(v) => {
@@ -793,6 +821,21 @@ fn consume_sent_funding_created(variables: &mut [Option<Variable>], index: usize
     }
 }
 
+fn consume_sent_shutdown(variables: &mut [Option<Variable>], index: usize) -> ChannelId {
+    match resolve(variables, index) {
+        Variable::SentShutdown(channel_id) => {
+            let channel_id = *channel_id;
+            // Consume the affine `SentShutdown`.
+            variables[index] = None;
+            channel_id
+        }
+        other => panic!(
+            "variable {index}: expected SentShutdown, got {:?}",
+            other.var_type(),
+        ),
+    }
+}
+
 // -- Operation handlers --
 
 /// Create a funding transaction by querying the bitcoind for UTXOs and a
@@ -984,6 +1027,7 @@ fn build_funding_created(
                 state,
                 is_funding_outpoint_valid,
                 mined_txids.contains(&funding_outpoint.txid),
+                accept_channel.tlvs.upfront_shutdown_script.clone(),
             )
         });
     }
@@ -1327,6 +1371,17 @@ fn recv_channel_ready(
     Ok(())
 }
 
+/// Receives and decodes a `shutdown` message.
+fn recv_shutdown(conn: &mut impl Connection) -> Result<Shutdown, ExecuteError> {
+    match recv_non_ping(conn, RECV_IDLE_TIMEOUT)? {
+        Message::Shutdown(sd) => Ok(sd),
+        other => Err(ExecuteError::UnexpectedMessage {
+            expected: MessageType::SHUTDOWN,
+            got: other.msg_type(),
+        }),
+    }
+}
+
 /// Returns `true` if the target owes us a `channel_ready` message.
 ///
 /// A `channel_ready` is expected when a tracked channel is still at commitment
@@ -1347,6 +1402,16 @@ fn is_channel_ready_expected(
             && bitcoin_cli.get_transaction_confirmations(state.config.funding_outpoint.txid)
                 >= state.config.minimum_depth
     })
+}
+
+/// Returns `true` if the target still owes us a `shutdown` response on the given channel.
+fn is_shutdown_expected(
+    channel_states: &HashMap<ChannelId, ChannelState>,
+    channel_id: ChannelId,
+) -> bool {
+    channel_states
+        .get(&channel_id)
+        .is_some_and(|state| !state.peer_shutdown_received)
 }
 
 /// Verifies the counterparty's signature from a `funding_signed` message using

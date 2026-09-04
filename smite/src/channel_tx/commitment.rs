@@ -107,7 +107,7 @@ pub struct CommitmentState {
     pub opener: CommitmentPartyState,
     /// Parameters for the channel acceptor.
     pub acceptor: CommitmentPartyState,
-    // TODO: When adding HTLC support, store pending HTLCs (offered/received) for both sides
+    // TODO(htlc): When adding HTLC support, store pending HTLCs (offered/received) for both sides
     // to correctly compute balances and construct HTLC outputs in the commitment transaction.
 }
 
@@ -148,6 +148,14 @@ pub struct ChannelState {
     /// after the block height at which they receive `funding_created`, so they
     /// may never observe it and never send `channel_ready`.
     pub was_funding_mined_prematurely: bool,
+    /// Whether the peer has already responded to our `shutdown`. A target may
+    /// ignore any `shutdown` after the first, so a later `RecvShutdown` for
+    /// this channel is a no-op.
+    pub peer_shutdown_received: bool,
+    /// The `upfront_shutdown_script` the peer committed to in its
+    /// `accept_channel`, if any. When set, the peer's `shutdown` must carry this
+    /// exact `scriptpubkey`.
+    pub peer_upfront_shutdown_script: Option<Vec<u8>>,
 }
 
 impl Side {
@@ -177,6 +185,7 @@ impl ChannelState {
         commitment: CommitmentState,
         is_funding_outpoint_valid: bool,
         was_funding_mined_prematurely: bool,
+        peer_upfront_shutdown_script: Option<Vec<u8>>,
     ) -> Self {
         Self {
             config,
@@ -186,6 +195,8 @@ impl ChannelState {
             acceptor_next_per_commitment_point: None,
             is_funding_outpoint_valid,
             was_funding_mined_prematurely,
+            peer_shutdown_received: false,
+            peer_upfront_shutdown_script,
         }
     }
 
@@ -462,7 +473,7 @@ impl CommitmentState {
         }
     }
 
-    // TODO: When adding HTLC support, add `get_next_commitment_state` to build the next
+    // TODO(htlc): When adding HTLC support, add `get_next_commitment_state` to build the next
     // commitment state based on the previous state and the HTLCs claimed by both sides.
 }
 

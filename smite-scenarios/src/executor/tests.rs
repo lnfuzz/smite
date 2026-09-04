@@ -2067,6 +2067,229 @@ fn execute_send_shutdown_empty_scriptpubkey() {
     assert!(sd.scriptpubkey.is_empty());
 }
 
+fn send_and_recv_shutdown_instructions(
+    channel_id: ChannelId,
+    script: ShutdownScriptVariant,
+) -> Vec<Instruction> {
+    let mut instrs = recv_channel_ready_instructions(6);
+    let channel_id_idx = instrs.len();
+    let script_idx = channel_id_idx + 1;
+    let send_idx = channel_id_idx + 2;
+    instrs.extend([
+        Instruction {
+            operation: Operation::LoadChannelId(channel_id.0),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadShutdownScript(script),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::SendShutdown,
+            inputs: vec![channel_id_idx, script_idx],
+        },
+        Instruction {
+            operation: Operation::RecvShutdown,
+            inputs: vec![send_idx],
+        },
+    ]);
+    instrs
+}
+
+#[test]
+fn execute_recv_shutdown() {
+    let (mut executor, channel_id, _) = recv_channel_ready_executor();
+    let script = ShutdownScriptVariant::P2wpkh([0xab; 20]);
+    let reply = Shutdown::for_channel(channel_id, script.encode());
+    let instrs = send_and_recv_shutdown_instructions(channel_id, script.clone());
+
+    executor.conn.queue_recv(Message::Shutdown(reply).encode());
+    executor
+        .execute(
+            &Program {
+                instructions: instrs,
+            },
+            std::time::Instant::now(),
+        )
+        .unwrap();
+    assert!(executor.conn.recv_queue.is_empty());
+}
+
+#[test]
+fn execute_recv_shutdown_unknown_channel() {
+    let (mut executor, channel_id, _) = recv_channel_ready_executor();
+    let unknown = ChannelId::new([0x7a; 32]);
+    let script = ShutdownScriptVariant::P2wpkh([0xcd; 20]);
+    let reply = Shutdown::for_channel(unknown, script.encode());
+    let instrs = send_and_recv_shutdown_instructions(channel_id, script.clone());
+
+    executor.conn.queue_recv(Message::Shutdown(reply).encode());
+    let err = executor
+        .execute(
+            &Program {
+                instructions: instrs,
+            },
+            std::time::Instant::now(),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExecuteError::Violation(Violation::UnknownChannel(id)) if id == unknown
+    ));
+}
+
+#[test]
+fn execute_recv_shutdown_non_standard_script() {
+    let (mut executor, channel_id, _) = recv_channel_ready_executor();
+    // Legacy P2PKH is never a standard script for a sender, even for a
+    // channel we know and even with every shutdown feature negotiated.
+    let non_standard = ShutdownScriptVariant::P2pkh([0x11; 20]).encode();
+    let reply = Shutdown::for_channel(channel_id, non_standard.clone());
+    let script = ShutdownScriptVariant::P2wpkh([0xab; 20]);
+    let instrs = send_and_recv_shutdown_instructions(channel_id, script);
+
+    executor.conn.queue_recv(Message::Shutdown(reply).encode());
+    let err = executor
+        .execute(
+            &Program {
+                instructions: instrs,
+            },
+            std::time::Instant::now(),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExecuteError::Violation(Violation::NonStandardShutdownScript(id, spk))
+            if id == channel_id && spk == non_standard
+    ));
+}
+
+#[test]
+fn execute_recv_shutdown_after_response_is_noop() {
+    let (mut executor, channel_id, _) = recv_channel_ready_executor();
+    let script = ShutdownScriptVariant::P2wpkh([0xab; 20]);
+    let reply = Shutdown::for_channel(channel_id, script.encode());
+
+    let mut instrs = send_and_recv_shutdown_instructions(channel_id, script);
+    // Reuse inputs from existing SendShutdown op in instructions
+    let send_inputs = instrs[instrs.len() - 2].inputs.clone();
+    let send_idx = instrs.len();
+    instrs.extend([
+        Instruction {
+            operation: Operation::SendShutdown,
+            inputs: send_inputs,
+        },
+        Instruction {
+            operation: Operation::RecvShutdown,
+            inputs: vec![send_idx],
+        },
+    ]);
+
+    // Only one reply is queued: once the target has responded, the second
+    // RecvShutdown must be a no-op rather than block on an empty queue.
+    executor.conn.queue_recv(Message::Shutdown(reply).encode());
+    executor
+        .execute(
+            &Program {
+                instructions: instrs,
+            },
+            std::time::Instant::now(),
+        )
+        .unwrap();
+    assert!(executor.conn.recv_queue.is_empty());
+}
+
+#[test]
+fn execute_recv_shutdown_untracked_channel_is_noop() {
+    let (mut executor, _, _) = recv_channel_ready_executor();
+    let untracked = ChannelId::new([0x99; 32]);
+    let script = ShutdownScriptVariant::P2wpkh([0xab; 20]);
+    let instrs = send_and_recv_shutdown_instructions(untracked, script);
+
+    // No shutdown reply is queued: a RecvShutdown for a channel we never
+    // established must be a no-op rather than block on an empty queue.
+    executor
+        .execute(
+            &Program {
+                instructions: instrs,
+            },
+            std::time::Instant::now(),
+        )
+        .unwrap();
+    assert!(executor.conn.recv_queue.is_empty());
+}
+
+/// Commits `script` as the peer's `upfront_shutdown_script` in the recorded
+/// negotiation, so the established channel carries it.
+fn commit_upfront_shutdown_script(
+    executor: &mut Executor<MockConnection, MockBitcoinCli>,
+    script: Vec<u8>,
+) {
+    executor
+        .negotiations
+        .get_mut(&TemporaryChannelId::new([0xbb; 32]))
+        .unwrap()
+        .accept_channel
+        .as_mut()
+        .unwrap()
+        .tlvs
+        .upfront_shutdown_script = Some(script);
+}
+
+#[test]
+fn execute_recv_shutdown_matches_upfront_script() {
+    let (mut executor, channel_id, _) = recv_channel_ready_executor();
+    let script = ShutdownScriptVariant::P2wpkh([0xab; 20]);
+    let committed = script.encode();
+    commit_upfront_shutdown_script(&mut executor, committed.clone());
+    let reply = Shutdown::for_channel(channel_id, committed);
+    let instrs = send_and_recv_shutdown_instructions(channel_id, script);
+
+    executor.conn.queue_recv(Message::Shutdown(reply).encode());
+    executor
+        .execute(
+            &Program {
+                instructions: instrs,
+            },
+            std::time::Instant::now(),
+        )
+        .unwrap();
+    assert!(executor.conn.recv_queue.is_empty());
+}
+
+#[test]
+fn execute_recv_shutdown_mismatched_upfront_script() {
+    let (mut executor, channel_id, _) = recv_channel_ready_executor();
+    commit_upfront_shutdown_script(
+        &mut executor,
+        ShutdownScriptVariant::P2wpkh([0xab; 20]).encode(),
+    );
+    // The target replies with a different (still standard) script than the one
+    // it committed to.
+    let other = ShutdownScriptVariant::P2wpkh([0xcd; 20]).encode();
+    let reply = Shutdown::for_channel(channel_id, other.clone());
+    let instrs =
+        send_and_recv_shutdown_instructions(channel_id, ShutdownScriptVariant::P2wpkh([0x11; 20]));
+
+    executor.conn.queue_recv(Message::Shutdown(reply).encode());
+    let err = executor
+        .execute(
+            &Program {
+                instructions: instrs,
+            },
+            std::time::Instant::now(),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExecuteError::Violation(Violation::UpfrontShutdownScriptMismatch(id, spk))
+            if id == channel_id && spk == other
+    ));
+}
+
 fn recv_channel_ready_executor() -> (
     Executor<MockConnection, MockBitcoinCli>,
     ChannelId,

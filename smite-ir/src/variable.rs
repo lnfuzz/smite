@@ -60,7 +60,7 @@ pub enum Variable {
     SentFundingCreated,
     /// `shutdown` has been sent, so the counterparty's `shutdown` may now be
     /// received.
-    SentShutdown,
+    SentShutdown(ChannelId),
 }
 
 impl Variable {
@@ -88,7 +88,7 @@ impl Variable {
             Self::FundingTransaction(_) => VariableType::FundingTransaction,
             Self::SentOpenChannel => VariableType::SentOpenChannel,
             Self::SentFundingCreated => VariableType::SentFundingCreated,
-            Self::SentShutdown => VariableType::SentShutdown,
+            Self::SentShutdown(_) => VariableType::SentShutdown,
         }
     }
 }
