@@ -34,6 +34,7 @@ mod tx_complete;
 mod tx_init_rbf;
 mod tx_remove_input;
 mod tx_remove_output;
+mod tx_signatures;
 mod types;
 mod update_add_htlc;
 mod update_fail_htlc;
@@ -73,6 +74,7 @@ pub use tx_complete::TxComplete;
 pub use tx_init_rbf::{TxInitRbf, TxInitRbfTlvs};
 pub use tx_remove_input::TxRemoveInput;
 pub use tx_remove_output::TxRemoveOutput;
+pub use tx_signatures::{TxSignatures, TxSignaturesTlvs};
 pub use types::{
     BigSize, CHANNEL_ID_SIZE, COMPACT_SIGNATURE_SIZE, ChannelId, MAX_MESSAGE_SIZE,
     PAYMENT_ONION_PACKET_SIZE, PER_COMMITMENT_SECRET_SIZE, PUBLIC_KEY_SIZE, SHA256_HASH_SIZE,
@@ -181,6 +183,8 @@ impl MessageType {
     pub const TX_REMOVE_OUTPUT: MessageType = MessageType(69);
     /// `tx_complete` message (BOLT 2).
     pub const TX_COMPLETE: MessageType = MessageType(70);
+    /// `tx_signatures` message (BOLT 2).
+    pub const TX_SIGNATURES: MessageType = MessageType(71);
     /// `tx_init_rbf` message (BOLT 2).
     pub const TX_INIT_RBF: MessageType = MessageType(72);
     /// `tx_ack_rbf` message (BOLT 2).
@@ -246,6 +250,7 @@ impl MessageType {
             Self::TX_REMOVE_INPUT => "tx_remove_input",
             Self::TX_REMOVE_OUTPUT => "tx_remove_output",
             Self::TX_COMPLETE => "tx_complete",
+            Self::TX_SIGNATURES => "tx_signatures",
             Self::TX_INIT_RBF => "tx_init_rbf",
             Self::TX_ACK_RBF => "tx_ack_rbf",
             Self::TX_ABORT => "tx_abort",
@@ -313,6 +318,8 @@ pub enum Message {
     TxRemoveOutput(TxRemoveOutput),
     /// `tx_complete` message (type 70).
     TxComplete(TxComplete),
+    /// `tx_signatures` message (type 71).
+    TxSignatures(TxSignatures),
     /// `tx_init_rbf` message (type 72).
     TxInitRbf(TxInitRbf),
     /// `tx_ack_rbf` message (type 73).
@@ -383,6 +390,7 @@ impl Message {
             Self::TxRemoveInput(_) => MessageType::TX_REMOVE_INPUT,
             Self::TxRemoveOutput(_) => MessageType::TX_REMOVE_OUTPUT,
             Self::TxComplete(_) => MessageType::TX_COMPLETE,
+            Self::TxSignatures(_) => MessageType::TX_SIGNATURES,
             Self::TxInitRbf(_) => MessageType::TX_INIT_RBF,
             Self::TxAckRbf(_) => MessageType::TX_ACK_RBF,
             Self::TxAbort(_) => MessageType::TX_ABORT,
@@ -426,6 +434,7 @@ impl Message {
             Self::TxRemoveInput(m) => out.extend(m.encode()),
             Self::TxRemoveOutput(m) => out.extend(m.encode()),
             Self::TxComplete(m) => out.extend(m.encode()),
+            Self::TxSignatures(m) => out.extend(m.encode()),
             Self::TxInitRbf(m) => out.extend(m.encode()),
             Self::TxAckRbf(m) => out.extend(m.encode()),
             Self::TxAbort(m) => out.extend(m.encode()),
@@ -484,6 +493,7 @@ impl Message {
                 Ok(Self::TxRemoveOutput(TxRemoveOutput::decode(cursor)?))
             }
             MessageType::TX_COMPLETE => Ok(Self::TxComplete(TxComplete::decode(cursor)?)),
+            MessageType::TX_SIGNATURES => Ok(Self::TxSignatures(TxSignatures::decode(cursor)?)),
             MessageType::TX_INIT_RBF => Ok(Self::TxInitRbf(TxInitRbf::decode(cursor)?)),
             MessageType::TX_ACK_RBF => Ok(Self::TxAckRbf(TxAckRbf::decode(cursor)?)),
             MessageType::TX_ABORT => Ok(Self::TxAbort(TxAbort::decode(cursor)?)),
@@ -935,6 +945,25 @@ mod tests {
         assert_eq!(decoded, Message::TxComplete(tx_complete));
     }
 
+    /// Valid `TxSignatures` message for testing.
+    fn sample_tx_signatures() -> TxSignatures {
+        TxSignatures {
+            channel_id: ChannelId::new([0xab; CHANNEL_ID_SIZE]),
+            txid: Txid::from_byte_array([0xcd; TXID_SIZE]),
+            witnesses: vec![vec![0xde, 0xad, 0xbe, 0xef], vec![0x01, 0x02]],
+            tlvs: TxSignaturesTlvs::default(),
+        }
+    }
+
+    #[test]
+    fn message_tx_signatures_roundtrip() {
+        let tx_signatures = sample_tx_signatures();
+        let msg = Message::TxSignatures(tx_signatures.clone());
+        let encoded = msg.encode();
+        let decoded = Message::decode(&encoded).unwrap();
+        assert_eq!(decoded, Message::TxSignatures(tx_signatures));
+    }
+
     #[test]
     fn message_tx_init_rbf_roundtrip() {
         let tx_init_rbf = TxInitRbf {
@@ -1310,6 +1339,11 @@ mod tests {
                 }),
                 "tx_complete",
                 MessageType::TX_COMPLETE,
+            ),
+            (
+                Message::TxSignatures(sample_tx_signatures()),
+                "tx_signatures",
+                MessageType::TX_SIGNATURES,
             ),
             (
                 Message::TxInitRbf(TxInitRbf {
