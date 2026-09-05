@@ -30,6 +30,7 @@ mod tlv;
 mod tx_abort;
 mod tx_ack_rbf;
 mod tx_add_input;
+mod tx_add_output;
 mod tx_complete;
 mod tx_init_rbf;
 mod tx_remove_input;
@@ -69,6 +70,7 @@ pub use tlv::{TlvRecord, TlvStream};
 pub use tx_abort::TxAbort;
 pub use tx_ack_rbf::{TxAckRbf, TxAckRbfTlvs};
 pub use tx_add_input::{TxAddInput, TxAddInputTlvs};
+pub use tx_add_output::TxAddOutput;
 pub use tx_complete::TxComplete;
 pub use tx_init_rbf::{TxInitRbf, TxInitRbfTlvs};
 pub use tx_remove_input::TxRemoveInput;
@@ -175,6 +177,8 @@ impl MessageType {
     pub const ACCEPT_CHANNEL2: MessageType = MessageType(65);
     /// `tx_add_input` message (BOLT 2).
     pub const TX_ADD_INPUT: MessageType = MessageType(66);
+    /// `tx_add_output` message (BOLT 2).
+    pub const TX_ADD_OUTPUT: MessageType = MessageType(67);
     /// `tx_remove_input` message (BOLT 2).
     pub const TX_REMOVE_INPUT: MessageType = MessageType(68);
     /// `tx_remove_output` message (BOLT 2).
@@ -243,6 +247,7 @@ impl MessageType {
             Self::OPEN_CHANNEL2 => "open_channel2",
             Self::ACCEPT_CHANNEL2 => "accept_channel2",
             Self::TX_ADD_INPUT => "tx_add_input",
+            Self::TX_ADD_OUTPUT => "tx_add_output",
             Self::TX_REMOVE_INPUT => "tx_remove_input",
             Self::TX_REMOVE_OUTPUT => "tx_remove_output",
             Self::TX_COMPLETE => "tx_complete",
@@ -307,6 +312,8 @@ pub enum Message {
     AcceptChannel2(AcceptChannel2),
     /// `tx_add_input` message (type 66).
     TxAddInput(TxAddInput),
+    /// `tx_add_output` message (type 67).
+    TxAddOutput(TxAddOutput),
     /// `tx_remove_input` message (type 68).
     TxRemoveInput(TxRemoveInput),
     /// `tx_remove_output` message (type 69).
@@ -380,6 +387,7 @@ impl Message {
             Self::OpenChannel2(_) => MessageType::OPEN_CHANNEL2,
             Self::AcceptChannel2(_) => MessageType::ACCEPT_CHANNEL2,
             Self::TxAddInput(_) => MessageType::TX_ADD_INPUT,
+            Self::TxAddOutput(_) => MessageType::TX_ADD_OUTPUT,
             Self::TxRemoveInput(_) => MessageType::TX_REMOVE_INPUT,
             Self::TxRemoveOutput(_) => MessageType::TX_REMOVE_OUTPUT,
             Self::TxComplete(_) => MessageType::TX_COMPLETE,
@@ -423,6 +431,7 @@ impl Message {
             Self::OpenChannel2(m) => out.extend(m.encode()),
             Self::AcceptChannel2(m) => out.extend(m.encode()),
             Self::TxAddInput(m) => out.extend(m.encode()),
+            Self::TxAddOutput(m) => out.extend(m.encode()),
             Self::TxRemoveInput(m) => out.extend(m.encode()),
             Self::TxRemoveOutput(m) => out.extend(m.encode()),
             Self::TxComplete(m) => out.extend(m.encode()),
@@ -479,6 +488,7 @@ impl Message {
                 Ok(Self::AcceptChannel2(AcceptChannel2::decode(cursor)?))
             }
             MessageType::TX_ADD_INPUT => Ok(Self::TxAddInput(TxAddInput::decode(cursor)?)),
+            MessageType::TX_ADD_OUTPUT => Ok(Self::TxAddOutput(TxAddOutput::decode(cursor)?)),
             MessageType::TX_REMOVE_INPUT => Ok(Self::TxRemoveInput(TxRemoveInput::decode(cursor)?)),
             MessageType::TX_REMOVE_OUTPUT => {
                 Ok(Self::TxRemoveOutput(TxRemoveOutput::decode(cursor)?))
@@ -900,6 +910,25 @@ mod tests {
         assert_eq!(decoded, Message::TxAddInput(tx_add_input));
     }
 
+    /// Valid `TxAddOutput` message for testing.
+    fn sample_tx_add_output() -> TxAddOutput {
+        TxAddOutput {
+            channel_id: ChannelId::new([0xab; CHANNEL_ID_SIZE]),
+            serial_id: 30,
+            sats: 49_999_845,
+            script: vec![0x00, 0x14, 0x1c, 0xa1],
+        }
+    }
+
+    #[test]
+    fn message_tx_add_output_roundtrip() {
+        let tx_add_output = sample_tx_add_output();
+        let msg = Message::TxAddOutput(tx_add_output.clone());
+        let encoded = msg.encode();
+        let decoded = Message::decode(&encoded).unwrap();
+        assert_eq!(decoded, Message::TxAddOutput(tx_add_output));
+    }
+
     #[test]
     fn message_tx_remove_input_roundtrip() {
         let tx_remove_input = TxRemoveInput {
@@ -1287,6 +1316,11 @@ mod tests {
                 Message::TxAddInput(sample_tx_add_input()),
                 "tx_add_input",
                 MessageType::TX_ADD_INPUT,
+            ),
+            (
+                Message::TxAddOutput(sample_tx_add_output()),
+                "tx_add_output",
+                MessageType::TX_ADD_OUTPUT,
             ),
             (
                 Message::TxRemoveInput(TxRemoveInput {
