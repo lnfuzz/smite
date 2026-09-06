@@ -4,6 +4,7 @@ use rand::{Rng, RngExt};
 
 use super::Generator;
 use crate::builder::ProgramBuilder;
+use crate::operation::ChannelTypeVariant;
 use crate::{Operation, VariableType};
 
 /// Generates an unsolicited `channel_announcement` send backed by a real
@@ -58,6 +59,14 @@ impl Generator for ChannelAnnouncementGenerator {
             &[],
         );
 
+        // The announced bitcoin keys are validated against the funding output's
+        // witness script, so the channel type must stay on the 2-of-2 P2WSH
+        // form rather than a taproot output that reveals no keys.
+        let channel_type = builder.append(
+            Operation::LoadChannelType(ChannelTypeVariant::StaticRemoteKey),
+            &[],
+        );
+
         // Create the 2-of-2 P2WSH funding transaction and confirm it.
         let funding_transaction = builder.append(
             Operation::CreateFundingTransaction,
@@ -66,6 +75,7 @@ impl Generator for ChannelAnnouncementGenerator {
                 funding_pubkey_2,
                 funding_satoshis,
                 feerate_per_kw,
+                channel_type,
             ],
         );
         builder.append(Operation::BroadcastTransaction, &[funding_transaction]);

@@ -4,6 +4,7 @@
 
 use crate::executor::*;
 use smite_ir::Instruction;
+use smite_ir::operation::ChannelTypeVariant;
 use std::str::FromStr;
 
 /// Builds the 20 `open_channel` input instructions in wire order.
@@ -128,12 +129,16 @@ pub fn create_and_broadcast_tx_instructions() -> Vec<Instruction> {
             inputs: vec![],
         },
         Instruction {
+            operation: Operation::LoadChannelType(ChannelTypeVariant::StaticRemoteKey),
+            inputs: vec![],
+        },
+        Instruction {
             operation: Operation::CreateFundingTransaction,
-            inputs: vec![1, 3, 4, 5],
+            inputs: vec![1, 3, 4, 5, 6],
         },
         Instruction {
             operation: Operation::BroadcastTransaction,
-            inputs: vec![6],
+            inputs: vec![7],
         },
     ]
 }
@@ -218,11 +223,11 @@ pub fn send_funding_created_and_recv_funding_signed_instructions() -> Vec<Instru
         },
         Instruction {
             operation: Operation::SendFundingCreated,
-            inputs: vec![6, 0, 8],
+            inputs: vec![7, 0, 9],
         },
         Instruction {
             operation: Operation::RecvFundingSigned,
-            inputs: vec![9],
+            inputs: vec![10],
         },
     ]);
     instrs

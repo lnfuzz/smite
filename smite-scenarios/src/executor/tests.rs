@@ -8,9 +8,9 @@ use bitcoin::Amount;
 use bitcoin::secp256k1::{Secp256k1, SecretKey};
 use harness::*;
 use programs::*;
-use smite::bolt::{AcceptChannelTlvs, GossipTimestampFilter, Init, Ping};
+use smite::bolt::{AcceptChannelTlvs, FundingSignedTlvs, GossipTimestampFilter, Init, Ping};
 use smite_ir::Instruction;
-use smite_ir::operation::ShutdownScriptVariant;
+use smite_ir::operation::{ChannelTypeVariant, ShutdownScriptVariant};
 
 /// Decodes a sent message expected to be a `channel_announcement`.
 fn decode_sent_channel_announcement(bytes: &[u8]) -> ChannelAnnouncement {
@@ -506,6 +506,52 @@ fn execute_build_open_channel_with_tlvs() {
         Some(vec![0x00, 0x14, 0xab])
     );
     assert_eq!(oc.tlvs.channel_type, Some(vec![0x01, 0x02]));
+}
+
+/// A simple taproot `channel_type` makes `open_channel` carry a `MuSig2`
+/// verification nonce, which every other channel type must omit.
+#[test]
+fn execute_build_open_channel_adds_taproot_nonce() {
+    let taproot_nonce = |channel_type: ChannelTypeVariant| {
+        let mut instrs = open_channel_instructions();
+        instrs[19] = Instruction {
+            operation: Operation::LoadChannelType(channel_type),
+            inputs: vec![],
+        };
+        instrs.push(Instruction {
+            operation: Operation::BuildOpenChannel,
+            inputs: (0..20).collect(),
+        });
+        instrs.push(Instruction {
+            operation: Operation::SendOpenChannel,
+            inputs: vec![20],
+        });
+
+        let mut executor = Executor::new(
+            MockConnection::new(),
+            MockBitcoinCli::default(),
+            sample_context(),
+        );
+        executor
+            .execute(
+                &Program {
+                    instructions: instrs,
+                },
+                std::time::Instant::now(),
+            )
+            .unwrap();
+
+        decode_open_channel(&executor.conn.sent[0])
+            .tlvs
+            .next_local_nonce
+    };
+
+    let nonce = taproot_nonce(ChannelTypeVariant::SimpleTaproot)
+        .expect("taproot channels must publish a verification nonce");
+    assert!(smite::musig::is_valid_public_nonce(&nonce));
+
+    assert_eq!(taproot_nonce(ChannelTypeVariant::Anchors), None);
+    assert_eq!(taproot_nonce(ChannelTypeVariant::StaticRemoteKey), None);
 }
 
 #[test]
@@ -1295,13 +1341,16 @@ fn execute_lookup_short_channel_id_confirmed() {
     });
     instrs.push(Instruction {
         // Feed the FundingTransaction produced by
-        // CreateFundingTransaction (instruction 6) into the lookup. The
-        // resulting ShortChannelId is variable 9.
+        // CreateFundingTransaction (instruction 7) into the lookup. The
+        // resulting ShortChannelId is variable 10.
         operation: Operation::LookupShortChannelId,
-        inputs: vec![6],
+        inputs: vec![7],
     });
     // Build and send a channel_announcement carrying the looked-up SCID.
-    instrs.extend(channel_announcement_from_scid_instructions(instrs.len(), 9));
+    instrs.extend(channel_announcement_from_scid_instructions(
+        instrs.len(),
+        10,
+    ));
 
     let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
     executor
@@ -1368,16 +1417,20 @@ fn execute_lookup_short_channel_id_unconfirmed_returns_sentinel() {
             inputs: vec![],
         },
         Instruction {
-            operation: Operation::CreateFundingTransaction,
-            inputs: vec![1, 3, 4, 5],
+            operation: Operation::LoadChannelType(ChannelTypeVariant::StaticRemoteKey),
+            inputs: vec![],
         },
-        // The looked-up SCID is variable 7.
+        Instruction {
+            operation: Operation::CreateFundingTransaction,
+            inputs: vec![1, 3, 4, 5, 6],
+        },
+        // The looked-up SCID is variable 8.
         Instruction {
             operation: Operation::LookupShortChannelId,
-            inputs: vec![6],
+            inputs: vec![7],
         },
     ];
-    instrs.extend(channel_announcement_from_scid_instructions(instrs.len(), 7));
+    instrs.extend(channel_announcement_from_scid_instructions(instrs.len(), 8));
 
     let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
     executor
@@ -1467,7 +1520,8 @@ fn execute_create_funding_transaction_insufficient_funds() {
             std::time::Instant::now(),
         )
         .unwrap_err();
-    let ExecuteError::InsufficientFunds(funds_err) = err else {
+    let ExecuteError::Funding(smite::channel_tx::FundingError::InsufficientFunds(funds_err)) = err
+    else {
         panic!("expected InsufficientFunds, got {err:?}");
     };
     assert_eq!(funds_err.available, Amount::from_sat(1_000));
@@ -1496,6 +1550,7 @@ fn execute_send_funding_created_and_recv_funding_signed() {
     let fs_bytes = Message::FundingSigned(FundingSigned {
         channel_id,
         signature: "304402203dbf3dbf337b042a72576488c1fb019086089d8d790a47f652346cff2511b6e70220395fdf700cb82b0abfcfe8e0b7c822181f2ee72409c82c3ff8e04e36593662c7".parse().unwrap(),
+        tlvs: FundingSignedTlvs::default(),
     })
     .encode();
 
@@ -1571,6 +1626,7 @@ fn execute_send_funding_created_uses_wire_funding_pubkey() {
     let fs_bytes = Message::FundingSigned(FundingSigned {
         channel_id,
         signature: "304402203dbf3dbf337b042a72576488c1fb019086089d8d790a47f652346cff2511b6e70220395fdf700cb82b0abfcfe8e0b7c822181f2ee72409c82c3ff8e04e36593662c7".parse().unwrap(),
+        tlvs: FundingSignedTlvs::default(),
     })
     .encode();
 
@@ -1578,7 +1634,7 @@ fn execute_send_funding_created_uses_wire_funding_pubkey() {
     // constructed channel config, which uses the negotiated pubkeys. It
     // should only change the signature sent to the target.
     let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
-    instrs[9].inputs[1] = 2;
+    instrs[10].inputs[1] = 2;
 
     let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
     executor.conn.queue_recv(fs_bytes);
@@ -1649,11 +1705,11 @@ fn execute_send_funding_created_after_funding_built_does_not_track_channel() {
         // Different funding spk, hence a different outpoint.
         Instruction {
             operation: Operation::CreateFundingTransaction,
-            inputs: vec![1, 1, 4, 5],
+            inputs: vec![1, 1, 4, 5, 6],
         },
         Instruction {
             operation: Operation::SendFundingCreated,
-            inputs: vec![10, 0, 8],
+            inputs: vec![11, 0, 9],
         },
     ]);
 
@@ -1829,6 +1885,7 @@ fn execute_recv_funding_signed_unknown_channel() {
     let fs_bytes = Message::FundingSigned(FundingSigned {
         channel_id,
         signature: "304402203dbf3dbf337b042a72576488c1fb019086089d8d790a47f652346cff2511b6e70220395fdf700cb82b0abfcfe8e0b7c822181f2ee72409c82c3ff8e04e36593662c7".parse().unwrap(),
+        tlvs: FundingSignedTlvs::default(),
     })
     .encode();
 
@@ -1869,6 +1926,7 @@ fn execute_recv_funding_signed_invalid_signature() {
     let fs_bytes = Message::FundingSigned(FundingSigned {
         channel_id,
         signature: Signature::from_compact(&[0u8; 64]).expect("zero bytes parse as a signature"),
+        tlvs: FundingSignedTlvs::default(),
     })
     .encode();
 
@@ -1917,13 +1975,13 @@ fn execute_send_channel_ready() {
             operation: Operation::SendChannelReady {
                 include_alias: false,
             },
-            inputs: vec![10, 1, 11],
+            inputs: vec![11, 1, 12],
         },
         Instruction {
             operation: Operation::SendChannelReady {
                 include_alias: true,
             },
-            inputs: vec![10, 3, 11],
+            inputs: vec![11, 3, 12],
         },
     ]);
 
@@ -1938,6 +1996,7 @@ fn execute_send_channel_ready() {
     let fs_bytes = Message::FundingSigned(FundingSigned {
         channel_id,
         signature: "304402203dbf3dbf337b042a72576488c1fb019086089d8d790a47f652346cff2511b6e70220395fdf700cb82b0abfcfe8e0b7c822181f2ee72409c82c3ff8e04e36593662c7".parse().unwrap(),
+        tlvs: FundingSignedTlvs::default(),
     })
     .encode();
     let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
@@ -2091,6 +2150,7 @@ fn recv_channel_ready_executor() -> (
     let fs_bytes = Message::FundingSigned(FundingSigned {
         channel_id,
         signature: "304402203dbf3dbf337b042a72576488c1fb019086089d8d790a47f652346cff2511b6e70220395fdf700cb82b0abfcfe8e0b7c822181f2ee72409c82c3ff8e04e36593662c7".parse().unwrap(),
+        tlvs: FundingSignedTlvs::default(),
     })
     .encode();
 
@@ -2240,11 +2300,11 @@ fn execute_recv_channel_ready_funding_mined_prematurely_is_noop() {
         },
         Instruction {
             operation: Operation::SendFundingCreated,
-            inputs: vec![6, 0, 9],
+            inputs: vec![7, 0, 10],
         },
         Instruction {
             operation: Operation::RecvFundingSigned,
-            inputs: vec![10],
+            inputs: vec![11],
         },
         Instruction {
             operation: Operation::RecvChannelReady,

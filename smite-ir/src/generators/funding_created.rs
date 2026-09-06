@@ -26,6 +26,7 @@ impl Generator for FundingCreatedGenerator {
         let funding_satoshis = builder.pick_variable(VariableType::Amount, rng);
         let feerate_per_kw = builder.pick_variable(VariableType::FeeratePerKw, rng);
         let temporary_channel_id = builder.pick_variable(VariableType::ChannelId, rng);
+        let channel_type = builder.pick_variable(VariableType::Features, rng);
 
         // Create the BOLT 3 funding transaction.
         let funding_transaction = builder.append(
@@ -35,6 +36,7 @@ impl Generator for FundingCreatedGenerator {
                 acceptor_funding_pubkey,
                 funding_satoshis,
                 feerate_per_kw,
+                channel_type,
             ],
         );
 

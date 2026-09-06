@@ -35,6 +35,43 @@ pub const PAYMENT_ONION_PACKET_SIZE: usize = 1366;
 /// Size of a per-commitment secret in bytes.
 pub const PER_COMMITMENT_SECRET_SIZE: usize = 32;
 
+/// Size of a `MuSig2` public nonce: two compressed secp256k1 points.
+pub const PUBLIC_NONCE_SIZE: usize = 2 * PUBLIC_KEY_SIZE;
+
+/// Size of a `MuSig2` partial signature: the `s` scalar.
+pub const PARTIAL_SIGNATURE_SIZE: usize = 32;
+
+/// Size of a `partial_signature_with_nonce`: `partial_signature || public_nonce`.
+pub const PARTIAL_SIGNATURE_WITH_NONCE_SIZE: usize = PARTIAL_SIGNATURE_SIZE + PUBLIC_NONCE_SIZE;
+
+/// A `MuSig2` public nonce as it appears on the wire: `point_1 || point_2`.
+///
+/// Deliberately an opaque byte container rather than a parsed pair of points.
+/// Decoding must not reject a malformed nonce: a target that sends one is
+/// violating the taproot channel spec, and smite reports that as a finding
+/// instead of failing to parse the message. [`crate::musig`] interprets these
+/// bytes when they are actually used for signing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PublicNonce(pub [u8; PUBLIC_NONCE_SIZE]);
+
+/// A `MuSig2` partial signature paired with the public nonce used to produce
+/// it, carried in `funding_created`, `funding_signed` and `commitment_signed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PartialSignatureWithNonce {
+    /// The `s` scalar of the signer's partial signature.
+    pub partial_signature: [u8; PARTIAL_SIGNATURE_SIZE],
+    /// The public nonce the signature was produced with.
+    pub public_nonce: PublicNonce,
+}
+
+impl PublicNonce {
+    /// Returns the wire encoding.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8; PUBLIC_NONCE_SIZE] {
+        &self.0
+    }
+}
+
 /// A 32-byte channel identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct ChannelId(pub [u8; CHANNEL_ID_SIZE]);

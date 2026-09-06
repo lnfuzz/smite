@@ -653,8 +653,9 @@ fn postcard_roundtrip() {
                 inputs: vec![],
             },
             Instruction {
+                // v6 is LoadFeatures, standing in for the channel type.
                 operation: Operation::CreateFundingTransaction,
-                inputs: vec![1, 9, 5, 10],
+                inputs: vec![1, 9, 5, 10, 6],
             },
             Instruction {
                 operation: Operation::BroadcastTransaction,
@@ -708,6 +709,7 @@ fn create_and_broadcast_tx_operation() {
             VariableType::Point,
             VariableType::Amount,
             VariableType::FeeratePerKw,
+            VariableType::Features,
         ],
     );
     assert_eq!(op.output_type(), Some(VariableType::FundingTransaction));
@@ -761,12 +763,16 @@ fn create_and_broadcast_tx_instructions() -> Vec<Instruction> {
             inputs: vec![],
         },
         Instruction {
+            operation: Operation::LoadChannelType(ChannelTypeVariant::StaticRemoteKey),
+            inputs: vec![],
+        },
+        Instruction {
             operation: Operation::CreateFundingTransaction,
-            inputs: vec![1, 3, 4, 5],
+            inputs: vec![1, 3, 4, 5, 6],
         },
         Instruction {
             operation: Operation::BroadcastTransaction,
-            inputs: vec![6],
+            inputs: vec![7],
         },
     ]
 }
@@ -797,8 +803,9 @@ fn displays_create_and_broadcast_tx_program() {
         "v3 = DerivePoint(v2)".into(),
         "v4 = LoadAmount(10000000)".into(),
         "v5 = LoadFeeratePerKw(15000)".into(),
-        "v6 = CreateFundingTransaction(v1, v3, v4, v5)".into(),
-        "BroadcastTransaction(v6)".into(),
+        "v6 = LoadChannelType(StaticRemoteKey)".into(),
+        "v7 = CreateFundingTransaction(v1, v3, v4, v5, v6)".into(),
+        "BroadcastTransaction(v7)".into(),
     ];
     assert_eq!(lines, expected);
 }
@@ -1465,6 +1472,18 @@ fn generated_channel_announcement_commits_to_its_funding_output() {
             funding_pos + 1,
         );
     }
+
+    // The witness script only exists for the P2WSH funding form, so the
+    // channel type (CreateFundingTransaction input 4) must not be taproot.
+    let channel_type = &program.instructions[create.inputs[4]];
+    assert!(
+        matches!(
+            channel_type.operation,
+            Operation::LoadChannelType(ChannelTypeVariant::StaticRemoteKey)
+        ),
+        "channel_announcement funding must use a P2WSH channel type, got {:?}",
+        channel_type.operation,
+    );
 }
 
 // Coin selection fails outright for amounts above Bitcoin's maximum supply, so

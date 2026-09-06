@@ -170,6 +170,7 @@ pub fn sample_accept_channel() -> AcceptChannel {
         htlc_basepoint: sample_pubkey(5),
         first_per_commitment_point: sample_pubkey(6),
         tlvs: AcceptChannelTlvs {
+            next_local_nonce: None,
             upfront_shutdown_script: Some(vec![0xde, 0xad]),
             channel_type: Some(vec![0x40, 0x10, 0x00]),
         },

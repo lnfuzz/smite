@@ -75,11 +75,18 @@ pub enum Operation {
     ExtractAcceptChannel(AcceptChannelField),
     /// Create a BOLT 3 funding transaction for the channel funding flow.
     ///
-    /// Inputs (4):
+    /// The `channel_type` selects the funding output format: simple taproot
+    /// channels pay to a single P2TR key aggregated from both funding pubkeys,
+    /// every other type to a 2-of-2 P2WSH. It must match the `channel_type`
+    /// given to `BuildOpenChannel`, or the target will never see the funding
+    /// output it negotiated.
+    ///
+    /// Inputs (5):
     ///   0: `opener_funding_pubkey` (`Point`)
     ///   1: `acceptor_funding_pubkey` (`Point`)
     ///   2: `funding_satoshis` (`Amount`)
     ///   3: `feerate_per_kw` (`FeeratePerKw`)
+    ///   4: `channel_type` (`Features`, empty = 2-of-2 P2WSH)
     CreateFundingTransaction,
 
     // -- Build: construct a BOLT message from inputs --
@@ -519,6 +526,18 @@ impl ChannelTypeVariant {
         Self::ScriptEnforcedLeaseScidAliasZeroConf,
     ];
 
+    /// Returns whether this type requires the channel to be unannounced.
+    ///
+    /// Taproot channels cannot be gossiped, so both lnd and eclair reject an
+    /// `open_channel` that sets the `announce_channel` bit alongside one of
+    /// these types.
+    #[must_use]
+    pub fn requires_unannounced_channel(self) -> bool {
+        self.bits().iter().any(|&bit| {
+            bit == Features::OPTION_SIMPLE_TAPROOT || bit == Features::OPTION_SIMPLE_TAPROOT_STAGING
+        })
+    }
+
     /// The feature bits (even/required) contained in this channel type.
     #[must_use]
     pub fn bits(self) -> &'static [FeatureBit] {
@@ -829,6 +848,7 @@ impl Operation {
                 VariableType::Point,        // acceptor_funding_pubkey
                 VariableType::Amount,       // funding_satoshis
                 VariableType::FeeratePerKw, // feerate_per_kw
+                VariableType::Features,     // channel_type
             ],
             Self::BuildOpenChannel => vec![
                 VariableType::ChainHash,    // chain_hash
