@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::str::FromStr;
 
-use bitcoin::consensus::encode::serialize_hex;
+use bitcoin::consensus::encode::{deserialize, serialize_hex};
 use bitcoin::{Address, Amount, Network, OutPoint, ScriptBuf, Transaction, Txid};
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +49,15 @@ pub struct TxBlockPosition {
     pub tx_index: u32,
 }
 
+/// Parsed response from `signrawtransactionwithwallet <hex>`.
+#[derive(Deserialize)]
+struct SignRawTransactionResponse {
+    /// Consensus-serialized transaction with every signable input signed.
+    hex: String,
+    /// Whether every input now has a complete signature set.
+    complete: bool,
+}
+
 /// Parsed response from `getrawtransaction <txid> 1`.
 #[derive(Deserialize)]
 struct RawTransactionInfo {
@@ -58,6 +67,8 @@ struct RawTransactionInfo {
     confirmations: u32,
     /// Omitted while the transaction is unconfirmed (in the mempool).
     blockhash: Option<String>,
+    /// Consensus-serialized transaction, always present.
+    hex: String,
 }
 
 /// Connection info for invoking `bitcoin-cli` against the regtest `bitcoind`
@@ -271,6 +282,50 @@ impl BitcoinCli {
             .expect("getnewaddress should return a valid address")
     }
 
+    /// Signs the wallet-owned inputs of `tx`, returning the partially or fully
+    /// signed transaction, or `None` if the node does not know how to sign any
+    /// of them.
+    ///
+    /// # Panics
+    ///
+    /// - If `bitcoin-cli signrawtransactionwithwallet` fails to execute.
+    /// - If the command succeeds but its output is not valid JSON, or its `hex`
+    ///   field does not decode as a transaction.
+    #[must_use]
+    pub fn sign_tx(&self, tx: &Transaction) -> Option<Transaction> {
+        let signed = self
+            .sign_raw_transaction_with_wallet(tx)
+            .inspect_err(|stderr| {
+                log::debug!("bitcoin-cli signrawtransactionwithwallet failed: {stderr}");
+            })
+            .ok()?;
+        Some(
+            deserialize(&hex::decode(&signed.hex).expect("signing should return valid hex"))
+                .expect("signing should return a valid transaction"),
+        )
+    }
+
+    /// Runs `signrawtransactionwithwallet`, returning the raw response, or the
+    /// command's stderr if it exits non-zero.
+    fn sign_raw_transaction_with_wallet(
+        &self,
+        tx: &Transaction,
+    ) -> Result<SignRawTransactionResponse, String> {
+        let signed_out = self
+            .run()
+            .arg("signrawtransactionwithwallet")
+            .arg(serialize_hex(tx))
+            .output()
+            .expect("bitcoin-cli signrawtransactionwithwallet should not fail");
+
+        if !signed_out.status.success() {
+            return Err(String::from_utf8_lossy(&signed_out.stderr).into_owned());
+        }
+
+        Ok(serde_json::from_slice(&signed_out.stdout)
+            .expect("signrawtransactionwithwallet should return valid JSON"))
+    }
+
     /// Signs and broadcasts a transaction, unless it is already confirmed.
     ///
     /// If the signed transaction is accepted by the mempool, it is broadcast
@@ -278,29 +333,22 @@ impl BitcoinCli {
     /// the minimum relay feerate or creates a dust output), it is returned
     /// instead so the caller can mine it later, bypassing mempool policy.
     ///
-    /// Returns `None` if the transaction was already confirmed or was broadcast
-    /// successfully, or hex-encoded raw transaction if it was rejected by the
-    /// mempool.
+    /// Returns `None` if the transaction was already confirmed, could not be
+    /// fully signed, or was broadcast successfully; or the hex-encoded raw
+    /// transaction if it was rejected by the mempool.
     ///
     /// # Panics
     ///
     /// - If `bitcoin-cli signrawtransactionwithwallet` fails to execute or
     ///   exits non-zero.
     /// - If the sign output is not valid JSON.
-    /// - If signing returns `complete=false`.
     /// - If `bitcoin-cli sendrawtransaction` fails to execute.
-    /// - If the broadcast is rejected for any reason other than a below-dust
-    ///   output or a below-minimum relay feerate.
+    /// - If the broadcast is rejected for a reason other than a known mempool
+    ///   policy rule or the transaction already being known to the node.
     /// - If a successful broadcast does not return a valid UTF-8 txid.
     /// - If the broadcasted txid does not match the given transaction's txid.
     #[must_use]
     pub fn sign_and_broadcast_tx(&self, tx: &Transaction) -> Option<String> {
-        #[derive(Deserialize)]
-        struct SignRawTransactionResponse {
-            hex: String,
-            complete: bool,
-        }
-
         // A confirmed transaction may be broadcast again by the fuzzer. Its
         // inputs are spent, so the wallet can no longer fully sign it, skip
         // signing and broadcasting it again.
@@ -309,26 +357,18 @@ impl BitcoinCli {
             return None;
         }
 
-        let tx_hex = serialize_hex(tx);
+        let signed_tx = self
+            .sign_raw_transaction_with_wallet(tx)
+            .unwrap_or_else(|stderr| {
+                panic!("bitcoin-cli signrawtransactionwithwallet failed: {stderr}")
+            });
 
-        let signed_out = self
-            .run()
-            .arg("signrawtransactionwithwallet")
-            .arg(&tx_hex)
-            .output()
-            .expect("bitcoin-cli signrawtransactionwithwallet should not fail");
-        assert!(
-            signed_out.status.success(),
-            "bitcoin-cli signrawtransactionwithwallet failed: {}",
-            String::from_utf8_lossy(&signed_out.stderr)
-        );
-
-        let signed_tx: SignRawTransactionResponse = serde_json::from_slice(&signed_out.stdout)
-            .expect("signrawtransactionwithwallet should return valid JSON");
-        assert!(
-            signed_tx.complete,
-            "signrawtransactionwithwallet returned complete=false"
-        );
+        if !signed_tx.complete {
+            log::debug!(
+                "signrawtransactionwithwallet could not fully sign {txid}, not broadcasting"
+            );
+            return None;
+        }
 
         let broadcast_out = self
             .run()
@@ -346,6 +386,24 @@ impl BitcoinCli {
             // they can be mined directly, bypassing mempool policy.
             if stderr.contains("tx with dust output") || stderr.contains("min relay fee not met") {
                 return Some(signed_tx.hex);
+            }
+            // The transaction may already be known to the node: the fuzzer can
+            // broadcast the same transaction twice before mining, and in
+            // channel establishment v2 the peer broadcasts the funding
+            // transaction as well. Either way it is already where we want it,
+            // nothing to mine privately.
+            if stderr.contains("txn-already-in-mempool")
+                || stderr.contains("txn-already-known")
+                || stderr.contains("Transaction already in block chain")
+            {
+                return None;
+            }
+            // A channel establishment v2 funding transaction takes its
+            // `nLockTime` from `open_channel2.locktime`, which the fuzzer picks
+            // freely, so it is routinely in the future.
+            if stderr.contains("non-final") {
+                log::debug!("{txid} is not final yet, not broadcasting");
+                return None;
             }
             panic!("bitcoin-cli sendrawtransaction failed: {stderr}");
         }
@@ -451,6 +509,20 @@ impl BitcoinCli {
     pub fn get_transaction_confirmations(&self, txid: Txid) -> u32 {
         self.get_raw_transaction_info(txid)
             .map_or(0, |info| info.confirmations)
+    }
+
+    /// Returns the consensus-serialized transaction with the given txid, or
+    /// `None` if it is unknown to the node.
+    ///
+    /// # Panics
+    ///
+    /// - If the `bitcoin-cli getrawtransaction` command fails to execute.
+    /// - If the command succeeds but its output is not valid JSON or its `hex`
+    ///   field is not valid hex.
+    #[must_use]
+    pub fn get_raw_transaction(&self, txid: Txid) -> Option<Vec<u8>> {
+        let info = self.get_raw_transaction_info(txid)?;
+        Some(hex::decode(&info.hex).expect("getrawtransaction should return valid hex"))
     }
 
     /// Returns the position of the confirmed transaction with the given txid,

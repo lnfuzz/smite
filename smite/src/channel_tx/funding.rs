@@ -187,6 +187,7 @@ impl FundingTransaction {
 }
 
 /// Builds the funding output witness script per BOLT 3.
+#[must_use]
 pub fn build_funding_witness_script(pubkey1: &PublicKey, pubkey2: &PublicKey) -> ScriptBuf {
     let key1_bytes = pubkey1.serialize();
     let key2_bytes = pubkey2.serialize();
