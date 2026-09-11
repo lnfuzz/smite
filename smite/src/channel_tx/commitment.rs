@@ -25,6 +25,9 @@ const COMMITMENT_TX_BASE_WEIGHT_NON_ANCHOR: u64 = 724;
 /// Weight of an anchor commitment transaction without HTLCs.
 const COMMITMENT_TX_BASE_WEIGHT_ANCHOR: u64 = 1124;
 
+/// Additional commitment weight per non-trimmed HTLC output.
+const COMMITMENT_TX_WEIGHT_PER_HTLC: u64 = 172;
+
 /// Errors that can occur when constructing or validating commitment transactions.
 #[derive(Debug, thiserror::Error)]
 pub enum CommitmentError {
@@ -481,7 +484,7 @@ impl CommitmentCost {
     #[must_use]
     pub fn new(feerate_per_kw: u32, channel_type: &Features) -> CommitmentCost {
         CommitmentCost {
-            fee_sat: commit_tx_fee_sat(feerate_per_kw, channel_type),
+            fee_sat: commit_tx_fee_sat(feerate_per_kw, 0, channel_type),
             anchor_cost_sat: total_anchors_sat(channel_type),
         }
     }
@@ -514,14 +517,18 @@ impl TxCreationKeys {
     }
 }
 
-/// Get the fee cost of a commitment tx in satoshis.
-fn commit_tx_fee_sat(feerate_per_kw: u32, channel_type: &Features) -> u64 {
-    let commitment_weight = if channel_type.supports_feature(Features::OPTION_ANCHORS) {
+/// Get the fee cost of a commitment tx with a given number of HTLC outputs in
+/// satoshis.
+/// Note that `num_htlcs` should not include dust HTLCs.
+fn commit_tx_fee_sat(feerate_per_kw: u32, num_htlcs: usize, channel_type: &Features) -> u64 {
+    let commitment_base_weight = if channel_type.supports_feature(Features::OPTION_ANCHORS) {
         COMMITMENT_TX_BASE_WEIGHT_ANCHOR
     } else {
         COMMITMENT_TX_BASE_WEIGHT_NON_ANCHOR
     };
 
+    let commitment_weight =
+        commitment_base_weight + (num_htlcs as u64) * COMMITMENT_TX_WEIGHT_PER_HTLC;
     u64::from(feerate_per_kw) * commitment_weight / 1000
 }
 
