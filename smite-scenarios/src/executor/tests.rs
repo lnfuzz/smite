@@ -46,7 +46,7 @@ fn execute_load_build_send() {
     };
     let mut executor = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     );
@@ -131,7 +131,7 @@ fn execute_build_channel_announcement() {
     };
     let mut executor = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     );
@@ -199,7 +199,7 @@ fn execute_build_node_announcement() {
     };
     let mut executor = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     );
@@ -292,7 +292,7 @@ fn execute_build_channel_update() {
     };
     let mut executor = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     );
@@ -404,7 +404,7 @@ fn execute_build_announcement_signatures() {
     };
     let mut executor = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     );
@@ -498,7 +498,7 @@ fn execute_build_open_channel_with_tlvs() {
     };
     let mut executor = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     );
@@ -548,7 +548,7 @@ fn execute_derive_point() {
     };
     let mut executor = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     );
@@ -610,7 +610,7 @@ fn execute_recv_and_extract_all_fields() {
     };
     let mut executor = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     );
@@ -636,7 +636,7 @@ fn execute_recv_unexpected_message() {
     };
     let mut executor = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     );
@@ -670,7 +670,7 @@ fn execute_recv_peer_error() {
     };
     let mut executor = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     );
@@ -703,7 +703,7 @@ fn execute_recv_auto_pong() {
     };
     let mut executor = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     );
@@ -744,7 +744,7 @@ fn execute_recv_skips_gossip() {
     });
     let mut executor = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     );
@@ -781,7 +781,7 @@ fn execute_records_negotiation_for_open_and_accept() {
     });
     let mut executor = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     );
@@ -822,7 +822,7 @@ fn execute_recv_accept_channel_unknown_channel() {
     });
     let mut executor = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     );
@@ -867,7 +867,7 @@ fn execute_recv_accept_channel_opener_cannot_afford_fee() {
 
     let mut executor = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     );
@@ -916,7 +916,7 @@ fn execute_recv_accept_channel_rejects_reuse_before_funding() {
 
     let mut executor = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     );
@@ -969,7 +969,7 @@ fn execute_records_only_first_open_channel_for_duplicate_id_before_funding() {
 
     let mut executor = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     );
@@ -1000,7 +1000,7 @@ fn execute_records_only_first_open_channel_for_duplicate_id_before_funding() {
 #[test]
 fn execute_records_open_channel_for_duplicate_id_after_funding() {
     let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
-    let mock_cli = MockBitcoinCli {
+    let mock_cli = MockBitcoindClient {
         utxos: vec![sample_utxo()],
         change_spk: sample_change_spk(),
         ..Default::default()
@@ -1057,7 +1057,7 @@ fn execute_wrong_input_count_panics() {
     };
     let _ = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     )
@@ -1081,7 +1081,7 @@ fn execute_type_mismatch_panics() {
     };
     let _ = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     )
@@ -1099,7 +1099,7 @@ fn execute_variable_out_of_bounds_panics() {
     };
     let _ = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     )
@@ -1123,7 +1123,7 @@ fn execute_forward_variable_reference_panics() {
     };
     let _ = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     )
@@ -1148,7 +1148,7 @@ fn execute_void_variable_reference_panics() {
     };
     let _ = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     )
@@ -1172,7 +1172,7 @@ fn execute_invalid_private_key_panics() {
     };
     let _ = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     )
@@ -1199,7 +1199,7 @@ fn execute_send_open_channel_wrong_type_panics() {
 
     let _ = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     )
@@ -1227,7 +1227,7 @@ fn execute_affine_overuse_panics() {
     let ac_bytes = Message::AcceptChannel(sample_accept_channel()).encode();
     let mut executor = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     );
@@ -1247,7 +1247,7 @@ fn execute_mine_blocks_invokes_cli() {
     };
     let mut executor = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     );
@@ -1256,8 +1256,8 @@ fn execute_mine_blocks_invokes_cli() {
         .unwrap();
 
     // Verify that mine_blocks was called with the correct number
-    assert_eq!(executor.bitcoin_cli.mine_blocks_calls, vec![6]);
-    assert!(executor.bitcoin_cli.mined_private_mempool.is_empty());
+    assert_eq!(executor.bitcoind_client.mine_blocks_calls, vec![6]);
+    assert!(executor.bitcoind_client.mined_private_mempool.is_empty());
     assert_eq!(executor.rpc.chain_syncs, 1);
 }
 
@@ -1279,7 +1279,7 @@ fn execute_mine_blocks_wrong_input() {
     };
     let _ = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     )
@@ -1288,7 +1288,7 @@ fn execute_mine_blocks_wrong_input() {
 
 #[test]
 fn execute_create_and_broadcast_tx() {
-    let mock_cli = MockBitcoinCli {
+    let mock_cli = MockBitcoindClient {
         utxos: vec![sample_utxo()],
         change_spk: sample_change_spk(),
         ..Default::default()
@@ -1308,8 +1308,8 @@ fn execute_create_and_broadcast_tx() {
         )
         .expect("tx construction and broadcast should succeed");
 
-    assert_eq!(executor.bitcoin_cli.broadcast_calls.len(), 1);
-    let broadcast_tx = &executor.bitcoin_cli.broadcast_calls[0];
+    assert_eq!(executor.bitcoind_client.broadcast_calls.len(), 1);
+    let broadcast_tx = &executor.bitcoind_client.broadcast_calls[0];
     assert_eq!(
         broadcast_tx.compute_txid().to_string(),
         "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
@@ -1322,7 +1322,7 @@ fn execute_create_and_broadcast_tx() {
 // by feeding it into a channel_announcement and decoding the sent message.
 #[test]
 fn execute_lookup_short_channel_id_confirmed() {
-    let mock_cli = MockBitcoinCli {
+    let mock_cli = MockBitcoindClient {
         utxos: vec![sample_utxo()],
         change_spk: sample_change_spk(),
         ..Default::default()
@@ -1357,13 +1357,13 @@ fn execute_lookup_short_channel_id_confirmed() {
         )
         .expect("lookup after confirmation should succeed");
 
-    assert_eq!(executor.bitcoin_cli.mine_blocks_calls, vec![6]);
+    assert_eq!(executor.bitcoind_client.mine_blocks_calls, vec![6]);
     // The executor must have queried the mock with the broadcast
     // transaction's txid.
-    assert_eq!(executor.bitcoin_cli.block_position_lookups.len(), 1);
-    let broadcast_txid = executor.bitcoin_cli.broadcast_calls[0].compute_txid();
+    assert_eq!(executor.bitcoind_client.block_position_lookups.len(), 1);
+    let broadcast_txid = executor.bitcoind_client.broadcast_calls[0].compute_txid();
     assert_eq!(
-        executor.bitcoin_cli.block_position_lookups[0],
+        executor.bitcoind_client.block_position_lookups[0],
         broadcast_txid,
     );
 
@@ -1379,7 +1379,7 @@ fn execute_lookup_short_channel_id_confirmed() {
 // via the SCID carried in a channel_announcement.
 #[test]
 fn execute_lookup_short_channel_id_unconfirmed_returns_sentinel() {
-    let mock_cli = MockBitcoinCli {
+    let mock_cli = MockBitcoindClient {
         utxos: vec![sample_utxo()],
         change_spk: sample_change_spk(),
         ..Default::default()
@@ -1439,8 +1439,8 @@ fn execute_lookup_short_channel_id_unconfirmed_returns_sentinel() {
         .expect("lookup on unconfirmed tx should not fail");
     // The mock was queried but returned None (zero confirmations), so the
     // executor took the sentinel path without panicking.
-    assert!(executor.bitcoin_cli.mine_blocks_calls.is_empty());
-    assert_eq!(executor.bitcoin_cli.block_position_lookups.len(), 1);
+    assert!(executor.bitcoind_client.mine_blocks_calls.is_empty());
+    assert_eq!(executor.bitcoind_client.block_position_lookups.len(), 1);
 
     let ca = decode_sent_channel_announcement(&executor.conn.sent[0]);
     assert_eq!(ca.short_channel_id, ShortChannelId::new(0, 0, 0));
@@ -1448,7 +1448,7 @@ fn execute_lookup_short_channel_id_unconfirmed_returns_sentinel() {
 
 #[test]
 fn execute_broadcast_dedupes_rejected_tx_in_private_mempool() {
-    let mock_cli = MockBitcoinCli {
+    let mock_cli = MockBitcoindClient {
         utxos: vec![sample_utxo()],
         change_spk: sample_change_spk(),
         ..Default::default()
@@ -1486,17 +1486,17 @@ fn execute_broadcast_dedupes_rejected_tx_in_private_mempool() {
         )
         .unwrap();
 
-    assert_eq!(executor.bitcoin_cli.broadcast_calls.len(), 2);
+    assert_eq!(executor.bitcoind_client.broadcast_calls.len(), 2);
     assert_eq!(
-        executor.bitcoin_cli.broadcast_calls[0].compute_txid(),
-        executor.bitcoin_cli.broadcast_calls[1].compute_txid(),
+        executor.bitcoind_client.broadcast_calls[0].compute_txid(),
+        executor.bitcoind_client.broadcast_calls[1].compute_txid(),
     );
 
     let rejected_hex =
-        bitcoin::consensus::encode::serialize_hex(&executor.bitcoin_cli.broadcast_calls[0]);
+        bitcoin::consensus::encode::serialize_hex(&executor.bitcoind_client.broadcast_calls[0]);
     assert!(executor.private_mempool.is_empty());
     assert_eq!(
-        executor.bitcoin_cli.mined_private_mempool,
+        executor.bitcoind_client.mined_private_mempool,
         vec![rejected_hex]
     );
 }
@@ -1508,7 +1508,7 @@ fn execute_create_funding_transaction_insufficient_funds() {
         amount: Amount::from_sat(1_000),
         ..sample_utxo()
     };
-    let mock_cli = MockBitcoinCli {
+    let mock_cli = MockBitcoindClient {
         utxos: vec![small_utxo],
         change_spk: sample_change_spk(),
         ..Default::default()
@@ -1535,7 +1535,7 @@ fn execute_create_funding_transaction_insufficient_funds() {
 
 #[test]
 fn execute_send_funding_created_and_recv_funding_signed() {
-    let mock_cli = MockBitcoinCli {
+    let mock_cli = MockBitcoindClient {
         utxos: vec![sample_utxo()],
         change_spk: sample_change_spk(),
         ..Default::default()
@@ -1617,7 +1617,7 @@ fn execute_send_funding_created_and_recv_funding_signed() {
 
 #[test]
 fn execute_send_funding_created_uses_wire_funding_pubkey() {
-    let mock_cli = MockBitcoinCli {
+    let mock_cli = MockBitcoindClient {
         utxos: vec![sample_utxo()],
         change_spk: sample_change_spk(),
         ..Default::default()
@@ -1699,7 +1699,7 @@ fn execute_send_funding_created_after_funding_built_does_not_track_channel() {
         },
         ..sample_utxo()
     };
-    let mock_cli = MockBitcoinCli {
+    let mock_cli = MockBitcoindClient {
         utxos: vec![sample_utxo(), second_utxo],
         change_spk: sample_change_spk(),
         ..Default::default()
@@ -1758,7 +1758,7 @@ fn execute_send_funding_created_push_exceeds_funding() {
     // commitment construction error.
     let mut negotiation = sample_funding_negotiation();
     negotiation.open_channel.push_msat = 20_000_000_000;
-    let mock_cli = MockBitcoinCli {
+    let mock_cli = MockBitcoindClient {
         utxos: vec![sample_utxo()],
         change_spk: sample_change_spk(),
         ..Default::default()
@@ -1792,7 +1792,7 @@ fn execute_send_funding_created_funding_msat_overflow() {
     // millisatoshis.
     let mut negotiation = sample_funding_negotiation();
     negotiation.open_channel.funding_satoshis = u64::MAX;
-    let mock_cli = MockBitcoinCli {
+    let mock_cli = MockBitcoindClient {
         utxos: vec![sample_utxo()],
         change_spk: sample_change_spk(),
         ..Default::default()
@@ -1825,7 +1825,7 @@ fn execute_send_funding_created_no_open_channel() {
     // No negotiation exists for this temporary_channel_id, so we get a
     // `funding_created` with an all-zero signature and no recorded channel
     // state.
-    let mock_cli = MockBitcoinCli {
+    let mock_cli = MockBitcoindClient {
         utxos: vec![sample_utxo()],
         change_spk: sample_change_spk(),
         ..Default::default()
@@ -1869,7 +1869,7 @@ fn execute_send_funding_created_no_accept_channel() {
     // state.
     let mut negotiation = sample_funding_negotiation();
     negotiation.accept_channel = None;
-    let mock_cli = MockBitcoinCli {
+    let mock_cli = MockBitcoindClient {
         utxos: vec![sample_utxo()],
         change_spk: sample_change_spk(),
         ..Default::default()
@@ -1911,7 +1911,7 @@ fn execute_send_funding_created_no_accept_channel() {
 
 #[test]
 fn execute_recv_funding_signed_unknown_channel() {
-    let mock_cli = MockBitcoinCli {
+    let mock_cli = MockBitcoindClient {
         utxos: vec![sample_utxo()],
         change_spk: sample_change_spk(),
         ..Default::default()
@@ -1954,7 +1954,7 @@ fn execute_recv_funding_signed_unknown_channel() {
 
 #[test]
 fn execute_recv_funding_signed_invalid_signature() {
-    let mock_cli = MockBitcoinCli {
+    let mock_cli = MockBitcoindClient {
         utxos: vec![sample_utxo()],
         change_spk: sample_change_spk(),
         ..Default::default()
@@ -2006,7 +2006,7 @@ fn execute_send_channel_ready() {
         vout: 0,
     });
     let alias = ShortChannelId::new(538_532, 845, 1);
-    let mock_cli = MockBitcoinCli {
+    let mock_cli = MockBitcoindClient {
         utxos: vec![sample_utxo()],
         change_spk: sample_change_spk(),
         ..Default::default()
@@ -2121,7 +2121,7 @@ fn execute_send_shutdown() {
 
     let mut executor = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     );
@@ -2162,7 +2162,7 @@ fn execute_send_shutdown_empty_scriptpubkey() {
 
     let mut executor = Executor::new(
         MockConnection::new(),
-        MockBitcoinCli::default(),
+        MockBitcoindClient::default(),
         MockTargetRpc::default(),
         sample_context(),
     );
@@ -2180,7 +2180,7 @@ fn execute_send_shutdown_empty_scriptpubkey() {
 }
 
 fn recv_channel_ready_executor() -> (
-    Executor<MockConnection, MockBitcoinCli, MockTargetRpc>,
+    Executor<MockConnection, MockBitcoindClient, MockTargetRpc>,
     ChannelId,
     PublicKey,
 ) {
@@ -2190,7 +2190,7 @@ fn recv_channel_ready_executor() -> (
             .unwrap(),
         vout: 0,
     });
-    let mock_cli = MockBitcoinCli {
+    let mock_cli = MockBitcoindClient {
         utxos: vec![sample_utxo()],
         change_spk: sample_change_spk(),
         ..Default::default()
@@ -2300,7 +2300,7 @@ fn execute_recv_channel_ready_below_minimum_depth_is_noop() {
             std::time::Instant::now(),
         )
         .unwrap();
-    assert!(executor.bitcoin_cli.mined_private_mempool.is_empty());
+    assert!(executor.bitcoind_client.mined_private_mempool.is_empty());
 
     // The target's next per-commitment point is still unknown and the queued
     // `channel_ready` remains untouched.
@@ -2327,7 +2327,7 @@ fn execute_recv_channel_ready_at_minimum_depth_records_point() {
             std::time::Instant::now(),
         )
         .unwrap();
-    assert!(executor.bitcoin_cli.mined_private_mempool.is_empty());
+    assert!(executor.bitcoind_client.mined_private_mempool.is_empty());
 
     // The `channel_ready` was consumed and the target's next per-commitment
     // point is now recorded.

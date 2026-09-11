@@ -47,10 +47,10 @@ impl Connection for MockConnection {
     }
 }
 
-// Mocking BitcoinCli via MockBitcoinCli
+// Mocking BitcoindClient via MockBitcoindClient
 
 #[derive(Default)]
-pub struct MockBitcoinCli {
+pub struct MockBitcoindClient {
     pub mine_blocks_calls: Vec<u8>,
     pub mined_private_mempool: Vec<String>,
     pub broadcast_calls: Vec<Transaction>,
@@ -60,7 +60,7 @@ pub struct MockBitcoinCli {
     pub confirmations: u32,
 }
 
-impl BitcoinRpc for MockBitcoinCli {
+impl BitcoinRpc for MockBitcoindClient {
     fn mine_blocks(&mut self, num_blocks: u8, private_mempool: &[String]) {
         self.mine_blocks_calls.push(num_blocks);
         self.mined_private_mempool = private_mempool.to_vec();

@@ -65,7 +65,6 @@ WORKDIR /tmp
 RUN wget https://bitcoincore.org/bin/bitcoin-core-${BITCOIN_VERSION}/bitcoin-${BITCOIN_VERSION}-x86_64-linux-gnu.tar.gz && \
     tar -xzf bitcoin-${BITCOIN_VERSION}-x86_64-linux-gnu.tar.gz && \
     mv bitcoin-${BITCOIN_VERSION}/bin/bitcoind /usr/local/bin/bitcoind && \
-    mv bitcoin-${BITCOIN_VERSION}/bin/bitcoin-cli /usr/local/bin/bitcoin-cli && \
     rm -rf bitcoin-${BITCOIN_VERSION}*
 
 # Clone CLN and build with AFL instrumentation.
@@ -166,9 +165,8 @@ COPY --from=builder /usr/local/bin/lightningd /usr/local/bin/lightningd
 COPY --from=builder /usr/local/bin/lightning-cli /usr/local/bin/lightning-cli
 COPY --from=builder /usr/local/libexec/c-lightning/ /usr/local/libexec/c-lightning/
 
-# Copy Bitcoin Core binaries
+# Copy bitcoind
 COPY --from=builder /usr/local/bin/bitcoind /usr/local/bin/bitcoind
-COPY --from=builder /usr/local/bin/bitcoin-cli /usr/local/bin/bitcoin-cli
 
 # Copy crash handlers and cln-scenario binary
 COPY --from=builder /nyx-crash-handler.so /crash-handler.so /
@@ -176,7 +174,7 @@ COPY --from=builder /smite/target/release/cln_${SCENARIO} /cln-scenario
 
 # Default to the local crash handler; init.sh overrides with the Nyx version.
 # ClnTarget forwards this as LD_PRELOAD on lightningd only, so it doesn't
-# interfere with helper processes (lightning-cli, bitcoin-cli).
+# interfere with helper processes (lightning-cli).
 ENV SMITE_CRASH_HANDLER=/crash-handler.so
 
 # ASan options for CLN binaries (instrumented with -fsanitize=address):

@@ -11,7 +11,7 @@ pub use cln::{ClnConfig, ClnRpc, ClnTarget};
 pub use eclair::{EclairConfig, EclairRpc, EclairTarget};
 pub use ldk::{LdkConfig, LdkRpc, LdkTarget};
 pub use lnd::{LndConfig, LndRpc, LndTarget};
-use smite::bitcoin::BitcoinCli;
+use smite::bitcoin::BitcoindClient;
 use smite::scenarios::TargetError;
 
 use bitcoin::secp256k1;
@@ -76,8 +76,8 @@ pub trait Target: Sized {
     /// Target's RPC handle for executing commands.
     fn rpc(&self) -> Self::Rpc;
 
-    /// `bitcoin-cli` wrapper for the regtest `bitcoind` instance.
-    fn bitcoin_cli(&self) -> &BitcoinCli;
+    /// JSON-RPC client for the regtest `bitcoind` instance.
+    fn bitcoind_client(&self) -> &BitcoindClient;
 
     /// Check if target is still alive. Returns `Err(Crashed)` if dead.
     ///
