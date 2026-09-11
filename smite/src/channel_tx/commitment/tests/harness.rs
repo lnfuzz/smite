@@ -143,7 +143,9 @@ impl TestVectorFile {
         let mut failures = Vec::new();
 
         // Opener signs own commitment.
-        let local_signature = channel_config.sign_holder_commitment(&commitments, &opener_holder);
+        let local_signature = channel_config
+            .sign_holder_commitment(&commitments, &opener_holder)
+            .0;
         if local_signature != vector.local_signature {
             failures.push(format!(
                 "{}: local signature mismatch\n  expected: {}\n  actual:   {}",
@@ -152,18 +154,20 @@ impl TestVectorFile {
         }
 
         // Acceptor signs opener's commitment, then the opener verifies it.
-        let remote_signature =
-            channel_config.sign_counterparty_commitment(&commitments, &acceptor_holder);
+        let remote_signature = channel_config
+            .sign_counterparty_commitment(&commitments, &acceptor_holder)
+            .0;
         if remote_signature != vector.remote_signature {
             failures.push(format!(
                 "{}: remote signature mismatch\n  expected: {}\n  actual:   {}",
                 vector.name, vector.remote_signature, remote_signature,
             ));
         }
-        if !channel_config.verify_counterparty_signature(
+        if !channel_config.verify_counterparty_signatures(
             &commitments,
             &opener_holder,
             &vector.remote_signature,
+            &[],
         ) {
             failures.push(format!("{}: remote signature does not verify", vector.name));
         }
@@ -171,10 +175,11 @@ impl TestVectorFile {
         // Opener signs the acceptor's commitment, then the acceptor verifies it.
         let acceptor_commit_sig =
             channel_config.sign_counterparty_commitment(&commitments, &opener_holder);
-        if !channel_config.verify_counterparty_signature(
+        if !channel_config.verify_counterparty_signatures(
             &commitments,
             &acceptor_holder,
-            &acceptor_commit_sig,
+            &acceptor_commit_sig.0,
+            &[],
         ) {
             failures.push(format!(
                 "{}: acceptor commitment signature does not verify",
