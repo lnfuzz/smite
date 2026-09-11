@@ -129,7 +129,7 @@ impl HopPayload {
     }
 
     /// Encodes the payload as a TLV stream, without the `bigsize` length
-    /// prefix it carries inside `hop_payloads`.
+    /// prefix that [`OnionBuilder`](super::OnionBuilder) adds.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         let mut stream = TlvStream::new();
