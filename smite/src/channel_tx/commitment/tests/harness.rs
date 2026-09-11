@@ -57,8 +57,15 @@ struct CommitmentVector {
     name: String,
     /// Fee rate for the commitment transaction.
     feerate_per_kw: u32,
-    /// Dust limit both parties use for this vector.
-    dust_limit_satoshis: u64,
+    /// Default dust limit used by both parties unless overridden below.
+    #[serde(default)]
+    dust_limit_satoshis: Option<u64>,
+    /// Dust limit used for the opener's commitment, overriding the default.
+    #[serde(default)]
+    opener_dust_limit_satoshis: Option<u64>,
+    /// Dust limit used for the acceptor's commitment, overriding the default.
+    #[serde(default)]
+    acceptor_dust_limit_satoshis: Option<u64>,
     /// Opener's balance in millisatoshis, before fees and anchor outputs.
     to_opener_msat: u64,
     /// Acceptor's balance in millisatoshis.
@@ -135,16 +142,25 @@ impl PartyKeys {
 impl TestVectorFile {
     /// Builds the channel config for a vector.
     fn build_channel_config(&self, vector: &CommitmentVector) -> ChannelConfig {
+        let opener_dust_limit_satoshis = vector
+            .opener_dust_limit_satoshis
+            .or(vector.dust_limit_satoshis)
+            .expect("opener dust limit must be set");
+        let acceptor_dust_limit_satoshis = vector
+            .acceptor_dust_limit_satoshis
+            .or(vector.dust_limit_satoshis)
+            .expect("acceptor dust limit must be set");
+
         ChannelConfig {
             funding_outpoint: self.funding_outpoint,
             funding_satoshis: self.funding_amount_satoshis,
             channel_type: self.channel_type.to_features(),
             opener: self
                 .opener
-                .to_party_config(vector.dust_limit_satoshis, self.to_self_delay),
+                .to_party_config(opener_dust_limit_satoshis, self.to_self_delay),
             acceptor: self
                 .acceptor
-                .to_party_config(vector.dust_limit_satoshis, self.to_self_delay),
+                .to_party_config(acceptor_dust_limit_satoshis, self.to_self_delay),
             minimum_depth: 8,
         }
     }

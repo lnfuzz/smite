@@ -48,6 +48,115 @@
       "local_signature": "3045022100a51021a83202743cb336edad88ee08bd14f434779bff21351c8f39d78d035f9602200d889a4a98332aff37f02938157cd3d7cf336313e5663848ac18bcd09ad5ff13",
       "remote_signature": "304502210093f2074fdc4b2f3d9369eb841522907d1d5279f956348d48e2d3a7ad58db4ee7022012173ea8609bedd4e03e16b41b38b3abf8a87f4a55372c06294578733d3fd785",
       "acceptor_num_htlcs": 0
+    },
+    {
+      "name": "commitment tx with an htlc amount_msat not a multiple of 1000",
+      "comment": "Covers the case where an HTLC's amount_msat % 1000 != 0, to ensure there is no off-by-one error in the HTLC amount calculation.",
+      "feerate_per_kw": 647,
+      "dust_limit_satoshis": 546,
+      "to_opener_msat": 7000000000,
+      "to_acceptor_msat": 3000000000,
+      "outgoing_htlcs": [
+        {
+          "id": 0,
+          "amount_msat": 2000999,
+          "cltv_expiry": 500,
+          "payment_preimage": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "local_signature": "3045022100a40923481abb54013b0b85ae1fc6ec2a98bcfad532a902312acabbe1c0b5606302201c2b46e4beb40295c74dd85d3ac7637181c1c83d5a2b57fd1f33248ad78989e7",
+      "local_htlc_signatures": [
+        "3045022100db1854f0e554418c054f5537df9bcc99ee28af2a93e862cbb892612ee1f1041c02204b1ecb1845539f6055cc4de6a30d47cc36510b38f6a48d4ee0e0910707b34f60"
+      ],
+      "remote_signature": "30440220038e3d6736e250d487612065b7ff9e2298d8671c7238b33347e061da141f056b022033761ec4566de4e162214fed71ffb5e06f31a98b9de992d325d13b909f44bbf6",
+      "remote_htlc_signatures": [
+        "3045022100980b1185dcf7e8006686ce6f317b9dc6bc23eeaab95a6d0ba0be592c5179f5cc02203a21c044c542aaf3b6c24c4eb412850502cc6ce508044d2d05930417bff51a37"
+      ],
+      "acceptor_num_htlcs": 1
+    },
+    {
+      "name": "commitment tx with an htlc output value equal to a non-htlc output value",
+      "comment": "Covers the case where an HTLC output has the same value as a non-HTLC output, ensuring outputs with equal values are ordered by script_pubkey and the HTLC output index accounts for outputs inserted before it.",
+      "feerate_per_kw": 15000,
+      "dust_limit_satoshis": 546,
+      "to_opener_msat": 8000000000,
+      "to_acceptor_msat": 2000000000,
+      "outgoing_htlcs": [
+        {
+          "id": 0,
+          "amount_msat": 2000000000,
+          "cltv_expiry": 500,
+          "payment_preimage": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "local_signature": "3045022100cfe88de4c1e3fd036d73fe64bbdc70ba127f30721fbc912ba7bfde04522c948a02206b83377c3a43961f771596b501c5f704dd989c5a85a329a03a38582947174080",
+      "local_htlc_signatures": [
+        "304502210083c359c48414d8a86b7e5663bf59cd5024f8232a31653472e8ed46794b83cb7b022024b151cf06559c469f055ba3f18a892f092a8a86b42e64933719de88f7c3b68d"
+      ],
+      "remote_signature": "304402210090fc7f86ae691bf50820d719241ba8ea694ca66f46cb204428b5abdedd224f96021f3dee0cc5e214ce7cb4eb0ce50501732cc6421d7e411052a6561c1775020bd6",
+      "remote_htlc_signatures": [
+        "30450221009b9456712702f6dea040a67dbfd145a77ae8493a5a1a9bc3fdda463a1aebcd9702203f465742ca4c0cc3e13e74d5ff28cd26dd5b04d6fea57abfbe47e90b49a8078f"
+      ],
+      "acceptor_num_htlcs": 1
+    },
+    {
+      "name": "commitment tx with non-htlc outputs between htlc outputs",
+      "comment": "Covers the case where the non-HTLC outputs sort between two HTLC outputs, so only the HTLC outputs after each insertion point are shifted to later output indices.",
+      "feerate_per_kw": 15000,
+      "dust_limit_satoshis": 546,
+      "to_opener_msat": 7000000000,
+      "to_acceptor_msat": 3000000000,
+      "outgoing_htlcs": [
+        {
+          "id": 0,
+          "amount_msat": 2000000000,
+          "cltv_expiry": 500,
+          "payment_preimage": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "id": 1,
+          "amount_msat": 4000000000,
+          "cltv_expiry": 501,
+          "payment_preimage": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "local_signature": "3045022100d984f27ad3542ab2fdf12738ab1e0cff57a605ddc997aa3f8dcd8cc9c2fb71ff022025f76697020b8d45d73e8d98d32f70d45683936cfb28a0f5865a7681a9b9b183",
+      "local_htlc_signatures": [
+        "3045022100beaecfb05ea32a060af1787cedd71aa1617e0af643758772f222a8bc625ee76a0220391ede3ae420f58bc1647cbfddb1c6442a16e055c260ba4b5e031bf8fab29e92",
+        "3045022100e80f47393ea39ca3498bbfb13d8880779c29fdf193fc05ffcac7e19c6e94269c02206f97146dbf1194aa5a04f1793af9d9f664a47102ff8a3eaeab649c9b25f57239"
+      ],
+      "remote_signature": "304402202f3bb56245790a8ff39ec9b66a0c70f0e25e74cb5f2b6ddc5cabc315dbcc739e02203d59d538906080e3282ab1bce79d4c2725739c5a466dcc6206bd5f120013eff1",
+      "remote_htlc_signatures": [
+        "304402205677d1c9af31718ae4546acf3ebfc51d7e7c61f3aa9aa9097da8a1e6a2892c9602201bbeb9e658dee513701deb8c66afd3739498d744bd10ee9f933989bafdd9bd3a",
+        "30440220448bac8d929a870d75b3aa254ec7c75eaeb48af9fd3b6a6f7f9a61fa1f37fd10022052dbff5e4ce8c0b85f0900533f4c87bb30c796f68bdeabf36069f4c8528f497e"
+      ],
+      "acceptor_num_htlcs": 2
+    },
+    {
+      "name": "commitment tx with asymmetric dust limits",
+      "comment": "Covers the case where the two sides have asymmetric dust limits, so the same HTLC is an output on the opener's commitment and trimmed on the acceptor's.",
+      "feerate_per_kw": 15000,
+      "opener_dust_limit_satoshis": 546,
+      "acceptor_dust_limit_satoshis": 20000,
+      "to_opener_msat": 7000000000,
+      "to_acceptor_msat": 3000000000,
+      "incoming_htlcs": [
+        {
+          "id": 0,
+          "amount_msat": 20000000,
+          "cltv_expiry": 500,
+          "payment_preimage": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "local_signature": "304402203b294ce9542c604e7432e2bd149a9a58de5696385e17997c54a6cc3e32383e5f02207be0ac31c9d66315baea8431318b9b6f68928c2db607cdd0b571e2eb25573dad",
+      "local_htlc_signatures": [
+        "304402200f8a51289fd5635d0f759aa41d24ef9bfcb290b835eca25c112fee27510d13ba022005a518038ca6b2fe9fa7b395020fcd83f860e0e3275ecda4d0d016167b4075e0"
+      ],
+      "remote_signature": "30440220585c2c1de009b1d012dddd35f59fbd5090307b53e1b8771dfe7159ce746ab47c02204eea2ee75ab8c8d9adcfbf874e8a079a8488f9f14c9b418dca6c687b5372692f",
+      "remote_htlc_signatures": [
+        "304402206a3d24183ca3ee4dfba7b66452452895330caa285b34e5f2dca9e150ea8f1fcc0220796dd753225740974920313ea00ad111977475c3ba2a6cb6dac663f371cf4698"
+      ],
+      "acceptor_num_htlcs": 0
     }
   ]
 }
