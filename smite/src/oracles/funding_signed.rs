@@ -65,6 +65,7 @@ impl Oracle<FundingSignedContext<'_>> for FundingSignedOracle {
             &channel.commitments,
             &channel.holder,
             &context.funding_signed.signature,
+            &[],
         ) {
             return Err(Violation::InvalidFundingSigned(
                 context.funding_signed.channel_id,
@@ -152,7 +153,8 @@ mod tests {
             channel_id: ChannelId::v1_from_funding_outpoint(channel.config.funding_outpoint),
             signature: channel
                 .config
-                .sign_counterparty_commitment(&channel.commitments, &acceptor),
+                .sign_counterparty_commitment(&channel.commitments, &acceptor)
+                .0,
         }
     }
 

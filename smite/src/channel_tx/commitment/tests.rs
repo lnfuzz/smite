@@ -174,28 +174,28 @@ fn opener_balance_after_commitment_cost_total_sat_checks() {
     // Comfortably affordable
     let opener_balance_sat: u64 = 20_000;
     assert_eq!(
-        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &legacy).total_sat()),
+        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &legacy, 0).total_sat()),
         Some(9_140),
     );
 
     // Exact zero opener balance
     let opener_balance_sat: u64 = 10_860;
     assert_eq!(
-        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &legacy).total_sat()),
+        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &legacy, 0).total_sat()),
         Some(0),
     );
 
     // Balance does not cover the fee
     let opener_balance_sat: u64 = 10_000;
     assert_eq!(
-        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &legacy).total_sat()),
+        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &legacy, 0).total_sat()),
         None
     );
 
     // Balance covers the fee but not the anchor outputs
     let opener_balance_sat: u64 = 17_500;
     assert_eq!(
-        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &anchor).total_sat()),
+        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &anchor, 0).total_sat()),
         None,
     );
 }
@@ -249,10 +249,13 @@ fn commitment_dance_adds_and_resolves_htlc() {
             commitments.state(verifier.side).commitment_number,
             commitment_number + 1,
         );
-        // TODO: Once HTLC tx signing is supported, sign and verify those here as
-        // well, and check that the number of htlc_sigs matches what is expected.
-        let commitment_sig = config.sign_counterparty_commitment(commitments, signer);
-        assert!(config.verify_counterparty_signature(commitments, verifier, &commitment_sig));
+        let (commitment_sig, htlc_sigs) = config.sign_counterparty_commitment(commitments, signer);
+        assert!(config.verify_counterparty_signature(
+            commitments,
+            verifier,
+            &commitment_sig,
+            &htlc_sigs,
+        ));
     };
 
     // Opener sends two `update_add_htlc`, an `update_fee`, and
