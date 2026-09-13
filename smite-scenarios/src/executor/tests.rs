@@ -116,6 +116,57 @@ fn execute_build_node_announcement() {
     assert!(na.verify());
 }
 
+// The node secret must come from the context rather than the program, so that
+// gossip is signed with the identity the target knows us by.
+#[test]
+fn execute_load_local_node_secret_from_context() {
+    let instrs = vec![
+        Instruction {
+            operation: Operation::LoadLocalNodeSecretFromContext,
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadFeatures(vec![]),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadTimestamp(1_700_000_000),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadBytes(vec![]),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::BuildNodeAnnouncement {
+                rgb_color: [0; 3],
+                alias: [0; 32],
+            },
+            inputs: vec![0, 1, 2, 3],
+        },
+        Instruction {
+            operation: Operation::SendMessage,
+            inputs: vec![4],
+        },
+    ];
+
+    let mut fx = Fixture::new();
+    fx.run(&Program {
+        instructions: instrs,
+    });
+
+    assert_eq!(fx.sent_len(), 1);
+    let na: NodeAnnouncement = fx.sent(0);
+
+    let secp = Secp256k1::new();
+    let expected_node_id = PublicKey::from_secret_key(
+        &secp,
+        &SecretKey::from_slice(&sample_context().local_node_secret).unwrap(),
+    );
+    assert_eq!(na.node_id, expected_node_id);
+    assert!(na.verify());
+}
+
 #[test]
 fn execute_build_channel_update() {
     let mut sk_bytes = [0u8; 32];

@@ -260,6 +260,7 @@ pub fn sample_context() -> ProgramContext {
             Features::OPTION_STATIC_REMOTEKEY,
             Features::OPTION_ANCHORS,
         ]),
+        local_node_secret: [0xee; 32],
     }
 }
 
