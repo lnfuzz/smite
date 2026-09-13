@@ -5,6 +5,7 @@
 //! protocol flow but delegates value selection and variable reuse to
 //! `ProgramBuilder`.
 
+mod announcement_signatures;
 mod channel_announcement;
 mod channel_ready;
 mod channel_update;
@@ -13,6 +14,7 @@ mod funding_flow;
 mod node_announcement;
 mod open_channel;
 
+pub use announcement_signatures::AnnouncementSignaturesGenerator;
 pub use channel_announcement::ChannelAnnouncementGenerator;
 pub use channel_ready::ChannelReadyGenerator;
 pub use channel_update::ChannelUpdateGenerator;
@@ -36,6 +38,7 @@ pub trait Generator {
 /// here may be used by the custom mutator library.
 #[derive(Clone, Copy)]
 pub enum AnyGenerator {
+    AnnouncementSignatures(AnnouncementSignaturesGenerator),
     ChannelAnnouncement(ChannelAnnouncementGenerator),
     ChannelUpdate(ChannelUpdateGenerator),
     NodeAnnouncement(NodeAnnouncementGenerator),
@@ -48,6 +51,7 @@ pub enum AnyGenerator {
 impl AnyGenerator {
     /// All variants. Keep in sync with the enum definition.
     pub const ALL: &[Self] = &[
+        Self::AnnouncementSignatures(AnnouncementSignaturesGenerator),
         Self::ChannelAnnouncement(ChannelAnnouncementGenerator),
         Self::ChannelUpdate(ChannelUpdateGenerator),
         Self::NodeAnnouncement(NodeAnnouncementGenerator),
@@ -61,7 +65,8 @@ impl AnyGenerator {
     #[must_use]
     pub fn weight(&self) -> u32 {
         match self {
-            Self::ChannelAnnouncement(_)
+            Self::AnnouncementSignatures(_)
+            | Self::ChannelAnnouncement(_)
             | Self::ChannelUpdate(_)
             | Self::NodeAnnouncement(_)
             | Self::OpenChannel(_)
@@ -87,6 +92,7 @@ impl AnyGenerator {
 impl Generator for AnyGenerator {
     fn generate(&self, builder: &mut ProgramBuilder, rng: &mut impl Rng) {
         match self {
+            Self::AnnouncementSignatures(generator) => generator.generate(builder, rng),
             Self::ChannelAnnouncement(generator) => generator.generate(builder, rng),
             Self::ChannelUpdate(generator) => generator.generate(builder, rng),
             Self::NodeAnnouncement(generator) => generator.generate(builder, rng),
