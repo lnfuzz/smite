@@ -457,8 +457,10 @@ fn display_build_announcement_signatures_program() {
             operation: Operation::LoadShortChannelId(scid.as_u64()),
             inputs: vec![],
         },
+        // Our node secret key (input 4 to BuildAnnouncementSignatures): the
+        // Noise static key, which is the identity the target verifies against.
         Instruction {
-            operation: Operation::LoadPrivateKey(key(1)),
+            operation: Operation::LoadLocalNodeSecretFromContext,
             inputs: vec![],
         },
         // Target's node public key (input 5 to BuildAnnouncementSignatures).
@@ -499,7 +501,7 @@ fn display_build_announcement_signatures_program() {
         "v1 = LoadFeatures(0x0102)".into(),
         "v2 = LoadChainHashFromContext()".into(),
         format!("v3 = LoadShortChannelId({scid})"),
-        format!("v4 = LoadPrivateKey(0x{z31}01)"),
+        "v4 = LoadLocalNodeSecretFromContext()".into(),
         "v5 = LoadTargetPubkeyFromContext()".into(),
         format!("v6 = LoadPrivateKey(0x{z31}02)"),
         "v7 = LoadTargetPubkeyFromContext()".into(),

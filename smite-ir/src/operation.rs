@@ -63,6 +63,10 @@ pub enum Operation {
     LoadTargetPubkeyFromContext,
     /// Load the chain hash from the program context.
     LoadChainHashFromContext,
+    /// Load our node's secret key from the program context. This is the Noise
+    /// static key the connection was established with, so it is the identity
+    /// targets verify our gossip signatures against.
+    LoadLocalNodeSecretFromContext,
 
     // -- Compute: derive a variable from inputs --
     /// Derive a compressed public key from a private key. The executor
@@ -545,6 +549,9 @@ impl fmt::Display for Operation {
             Self::LoadChannelType(v) => write!(f, "LoadChannelType({v})"),
             Self::LoadTargetPubkeyFromContext => write!(f, "LoadTargetPubkeyFromContext()"),
             Self::LoadChainHashFromContext => write!(f, "LoadChainHashFromContext()"),
+            Self::LoadLocalNodeSecretFromContext => {
+                write!(f, "LoadLocalNodeSecretFromContext()")
+            }
             // Operations with inputs: parens added by Program::Display.
             Self::DerivePoint => write!(f, "DerivePoint"),
             Self::ExtractAcceptChannel(field) => write!(f, "Extract{field}"),
@@ -596,7 +603,9 @@ impl Operation {
             Self::LoadU8(_) => Some(VariableType::U8),
             Self::LoadBytes(_) | Self::LoadShutdownScript(_) => Some(VariableType::Bytes),
             Self::LoadFeatures(_) | Self::LoadChannelType(_) => Some(VariableType::Features),
-            Self::LoadPrivateKey(_) => Some(VariableType::PrivateKey),
+            Self::LoadPrivateKey(_) | Self::LoadLocalNodeSecretFromContext => {
+                Some(VariableType::PrivateKey)
+            }
             Self::LoadChannelId(_)
             | Self::DeriveTemporaryChannelIdV2
             | Self::DeriveChannelIdV2
@@ -643,6 +652,7 @@ impl Operation {
             | Self::LoadChannelType(_)
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadChainHashFromContext
+            | Self::LoadLocalNodeSecretFromContext
             | Self::RecvChannelReady
             | Self::MineBlocks(_) => vec![],
 
@@ -772,6 +782,7 @@ impl Operation {
             | Self::LoadChannelType(_)
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadChainHashFromContext
+            | Self::LoadLocalNodeSecretFromContext
             | Self::DerivePoint
             | Self::ExtractAcceptChannel(_)
             | Self::CreateFundingTransaction
@@ -821,6 +832,7 @@ impl Operation {
             | Self::LoadChannelType(_)
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadChainHashFromContext
+            | Self::LoadLocalNodeSecretFromContext
             | Self::DerivePoint
             | Self::ExtractAcceptChannel(_)
             | Self::DeriveTemporaryChannelIdV2
@@ -871,6 +883,7 @@ impl Operation {
             | Self::LoadChannelType(_)
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadChainHashFromContext
+            | Self::LoadLocalNodeSecretFromContext
             | Self::DerivePoint
             | Self::ExtractAcceptChannel(_)
             | Self::DeriveTemporaryChannelIdV2
@@ -936,6 +949,7 @@ impl Operation {
 
             Self::LoadTargetPubkeyFromContext
             | Self::LoadChainHashFromContext
+            | Self::LoadLocalNodeSecretFromContext
             | Self::DerivePoint
             | Self::CreateFundingTransaction
             | Self::DeriveTemporaryChannelIdV2
