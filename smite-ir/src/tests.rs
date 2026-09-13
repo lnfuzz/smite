@@ -4,7 +4,7 @@ use bitcoin::secp256k1::SecretKey;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use rand::{Rng, RngExt};
-use smite::bolt::{MAX_MESSAGE_SIZE, ShortChannelId};
+use smite::bolt::{ChannelTypeVariant, Features, MAX_MESSAGE_SIZE, ShortChannelId};
 
 use super::*;
 use generators::{
@@ -1133,8 +1133,9 @@ fn generated_open_channel_program_structure() {
 
 // Asserts that the channel parameters of the `open_channel` message built by
 // `program` are within the bounds the generators are supposed to respect.
+// `announce` is whether the generator should have announced the channel, and
 // `seed` only labels the failure message.
-fn assert_open_channel_params_are_bounded(program: &Program, seed: u64) {
+fn assert_open_channel_params_are_bounded(program: &Program, announce: bool, seed: u64) {
     let build = &program.instructions[find_operation!(program, Operation::BuildOpenChannel)];
     let open_channel_input = |i: usize| match &program.instructions[build.inputs[i]].operation {
         Operation::LoadAmount(v) => *v,
@@ -1211,19 +1212,43 @@ fn assert_open_channel_params_are_bounded(program: &Program, seed: u64) {
         OpenChannelGenerator::MIN_MAX_ACCEPTED_HTLCS,
         OpenChannelGenerator::MAX_MAX_ACCEPTED_HTLCS,
     );
+    let expected_flags = if announce {
+        u64::from(OpenChannelGenerator::ANNOUNCE_CHANNEL_FLAG)
+    } else {
+        0
+    };
     assert_eq!(
-        channel_flags,
-        u64::from(OpenChannelGenerator::CHANNEL_FLAGS),
-        "seed {seed}: channel_flags should be {} but got {channel_flags}",
-        OpenChannelGenerator::CHANNEL_FLAGS,
+        channel_flags, expected_flags,
+        "seed {seed}: channel_flags should be {expected_flags} but got {channel_flags}",
     );
 }
 
 #[test]
 fn generated_open_channel_params_are_bounded() {
     for seed in 0..100 {
-        assert_open_channel_params_are_bounded(&generate_open_channel_program(seed), seed);
+        assert_open_channel_params_are_bounded(&generate_open_channel_program(seed), false, seed);
     }
+}
+
+// Ensure ANNOUNCEABLE_CHANNEL_TYPES stays in sync with ChannelTypeVariant. It
+// must hold exactly the variants negotiating neither option_scid_alias nor
+// option_zeroconf, so that adding a variant fails here rather than silently
+// changing what announced channels may negotiate.
+#[test]
+fn announceable_channel_types_is_complete() {
+    let announceable: Vec<ChannelTypeVariant> = ChannelTypeVariant::ALL
+        .iter()
+        .filter(|variant| {
+            let bits = variant.bits();
+            !bits.contains(&Features::OPTION_SCID_ALIAS)
+                && !bits.contains(&Features::OPTION_ZEROCONF)
+        })
+        .copied()
+        .collect();
+    assert_eq!(
+        OpenChannelGenerator::ANNOUNCEABLE_CHANNEL_TYPES,
+        announceable
+    );
 }
 
 fn generate_funding_created_program(seed: u64) -> Program {
@@ -1333,7 +1358,7 @@ fn generated_funding_flow_program_is_type_correct() {
 #[test]
 fn generated_funding_flow_params_are_bounded() {
     for seed in 0..100 {
-        assert_open_channel_params_are_bounded(&generate_funding_flow_program(seed), seed);
+        assert_open_channel_params_are_bounded(&generate_funding_flow_program(seed), false, seed);
     }
 }
 

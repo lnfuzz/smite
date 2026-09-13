@@ -26,7 +26,7 @@ impl Generator for FundingFlowGenerator {
         let funding_pubkey = builder.append(Operation::DerivePoint, &[funding_privkey]);
 
         // Build and send open_channel.
-        let open_channel = append_open_channel(builder, rng, funding_pubkey);
+        let open_channel = append_open_channel(builder, rng, funding_pubkey, false);
 
         // Receive accept_channel.
         let accept_channel = builder.append(
