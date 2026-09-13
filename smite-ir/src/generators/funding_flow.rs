@@ -31,7 +31,7 @@ impl Generator for FundingFlowGenerator {
         let htlc_basepoint = builder.append(Operation::DerivePoint, &[htlc_basepoint_privkey]);
 
         // Build and send open_channel.
-        let open_channel = append_open_channel(builder, rng, funding_pubkey, htlc_basepoint);
+        let open_channel = append_open_channel(builder, rng, funding_pubkey, htlc_basepoint, false);
 
         // Receive accept_channel.
         let accept_channel = builder.append(
