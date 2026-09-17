@@ -6,7 +6,7 @@ use smite::bolt::{FeatureBit, Features, Init, InitTlvs, Message};
 use smite::noise::NoiseConnection;
 use smite::scenarios::ScenarioError;
 
-use super::{handshake_with_target, ping_pong};
+use super::{STATIC_KEY, handshake_with_target, ping_pong};
 use crate::executor::ProgramContext;
 use crate::targets::{INITIAL_BLOCKS, Target};
 
@@ -91,6 +91,7 @@ impl<T: Target> SnapshotSetup<T> for PostInitSetup {
             // flow and avoid unrelated noise, negotiated features are just the
             // features we sent in our init.
             negotiated_features: Features::from(our_init.features),
+            local_node_secret: STATIC_KEY,
         };
 
         Ok((conn, context))

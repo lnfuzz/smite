@@ -4,12 +4,13 @@ use bitcoin::secp256k1::SecretKey;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use rand::{Rng, RngExt};
-use smite::bolt::{MAX_MESSAGE_SIZE, ShortChannelId};
+use smite::bolt::{ChannelTypeVariant, Features, MAX_MESSAGE_SIZE, ShortChannelId};
 
 use super::*;
 use generators::{
-    AnyGenerator, ChannelAnnouncementGenerator, ChannelReadyGenerator, ChannelUpdateGenerator,
-    FundingCreatedGenerator, FundingFlowGenerator, NodeAnnouncementGenerator, OpenChannelGenerator,
+    AnnouncementSignaturesGenerator, AnyGenerator, ChannelAnnouncementGenerator,
+    ChannelReadyGenerator, ChannelUpdateGenerator, FundingCreatedGenerator, FundingFlowGenerator,
+    NodeAnnouncementGenerator, OpenChannelGenerator,
 };
 use minimizers::{CommonSubexpressionEliminator, DeadCodeEliminator, Minimizer};
 use mutators::{
@@ -457,8 +458,10 @@ fn display_build_announcement_signatures_program() {
             operation: Operation::LoadShortChannelId(scid.as_u64()),
             inputs: vec![],
         },
+        // Our node secret key (input 4 to BuildAnnouncementSignatures): the
+        // Noise static key, which is the identity the target verifies against.
         Instruction {
-            operation: Operation::LoadPrivateKey(key(1)),
+            operation: Operation::LoadLocalNodeSecretFromContext,
             inputs: vec![],
         },
         // Target's node public key (input 5 to BuildAnnouncementSignatures).
@@ -499,7 +502,7 @@ fn display_build_announcement_signatures_program() {
         "v1 = LoadFeatures(0x0102)".into(),
         "v2 = LoadChainHashFromContext()".into(),
         format!("v3 = LoadShortChannelId({scid})"),
-        format!("v4 = LoadPrivateKey(0x{z31}01)"),
+        "v4 = LoadLocalNodeSecretFromContext()".into(),
         "v5 = LoadTargetPubkeyFromContext()".into(),
         format!("v6 = LoadPrivateKey(0x{z31}02)"),
         "v7 = LoadTargetPubkeyFromContext()".into(),
@@ -909,13 +912,14 @@ fn accept_channel_field_all_is_complete() {
 fn any_generator_all_is_complete() {
     let variant_count = |f: AnyGenerator| -> usize {
         match f {
-            AnyGenerator::ChannelAnnouncement(_)
+            AnyGenerator::AnnouncementSignatures(_)
+            | AnyGenerator::ChannelAnnouncement(_)
             | AnyGenerator::ChannelUpdate(_)
             | AnyGenerator::NodeAnnouncement(_)
             | AnyGenerator::OpenChannel(_)
             | AnyGenerator::FundingCreated(_)
             | AnyGenerator::ChannelReady(_)
-            | AnyGenerator::FundingFlow(_) => 7,
+            | AnyGenerator::FundingFlow(_) => 8,
         }
     };
     assert_eq!(AnyGenerator::ALL.len(), variant_count(AnyGenerator::ALL[0]));
@@ -1131,8 +1135,9 @@ fn generated_open_channel_program_structure() {
 
 // Asserts that the channel parameters of the `open_channel` message built by
 // `program` are within the bounds the generators are supposed to respect.
+// `announce` is whether the generator should have announced the channel, and
 // `seed` only labels the failure message.
-fn assert_open_channel_params_are_bounded(program: &Program, seed: u64) {
+fn assert_open_channel_params_are_bounded(program: &Program, announce: bool, seed: u64) {
     let build = &program.instructions[find_operation!(program, Operation::BuildOpenChannel)];
     let open_channel_input = |i: usize| match &program.instructions[build.inputs[i]].operation {
         Operation::LoadAmount(v) => *v,
@@ -1209,19 +1214,43 @@ fn assert_open_channel_params_are_bounded(program: &Program, seed: u64) {
         OpenChannelGenerator::MIN_MAX_ACCEPTED_HTLCS,
         OpenChannelGenerator::MAX_MAX_ACCEPTED_HTLCS,
     );
+    let expected_flags = if announce {
+        u64::from(OpenChannelGenerator::ANNOUNCE_CHANNEL_FLAG)
+    } else {
+        0
+    };
     assert_eq!(
-        channel_flags,
-        u64::from(OpenChannelGenerator::CHANNEL_FLAGS),
-        "seed {seed}: channel_flags should be {} but got {channel_flags}",
-        OpenChannelGenerator::CHANNEL_FLAGS,
+        channel_flags, expected_flags,
+        "seed {seed}: channel_flags should be {expected_flags} but got {channel_flags}",
     );
 }
 
 #[test]
 fn generated_open_channel_params_are_bounded() {
     for seed in 0..100 {
-        assert_open_channel_params_are_bounded(&generate_open_channel_program(seed), seed);
+        assert_open_channel_params_are_bounded(&generate_open_channel_program(seed), false, seed);
     }
+}
+
+// Ensure ANNOUNCEABLE_CHANNEL_TYPES stays in sync with ChannelTypeVariant. It
+// must hold exactly the variants negotiating neither option_scid_alias nor
+// option_zeroconf, so that adding a variant fails here rather than silently
+// changing what announced channels may negotiate.
+#[test]
+fn announceable_channel_types_is_complete() {
+    let announceable: Vec<ChannelTypeVariant> = ChannelTypeVariant::ALL
+        .iter()
+        .filter(|variant| {
+            let bits = variant.bits();
+            !bits.contains(&Features::OPTION_SCID_ALIAS)
+                && !bits.contains(&Features::OPTION_ZEROCONF)
+        })
+        .copied()
+        .collect();
+    assert_eq!(
+        OpenChannelGenerator::ANNOUNCEABLE_CHANNEL_TYPES,
+        announceable
+    );
 }
 
 fn generate_funding_created_program(seed: u64) -> Program {
@@ -1331,7 +1360,7 @@ fn generated_funding_flow_program_is_type_correct() {
 #[test]
 fn generated_funding_flow_params_are_bounded() {
     for seed in 0..100 {
-        assert_open_channel_params_are_bounded(&generate_funding_flow_program(seed), seed);
+        assert_open_channel_params_are_bounded(&generate_funding_flow_program(seed), false, seed);
     }
 }
 
@@ -1600,6 +1629,208 @@ fn generated_channel_update_program_structure() {
         .filter(|op| matches!(op, Operation::BuildChannelUpdate))
         .count();
     assert_eq!(build_count, 1, "expected exactly one BuildChannelUpdate");
+}
+
+fn generate_announcement_signatures_program(seed: u64) -> Program {
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut builder = ProgramBuilder::new();
+    AnnouncementSignaturesGenerator.generate(&mut builder, &mut rng);
+    builder.build()
+}
+
+// If AnnouncementSignaturesGenerator completes without panicking, every
+// instruction has correct input types (enforced by ProgramBuilder::append).
+#[test]
+fn generated_announcement_signatures_program_is_type_correct() {
+    for seed in 0..100 {
+        generate_announcement_signatures_program(seed);
+    }
+}
+
+#[test]
+fn generated_announcement_signatures_params_are_bounded() {
+    for seed in 0..100 {
+        assert_open_channel_params_are_bounded(
+            &generate_announcement_signatures_program(seed),
+            true,
+            seed,
+        );
+    }
+}
+
+#[test]
+fn generated_announcement_signatures_program_structure() {
+    let program = generate_announcement_signatures_program(0);
+    let ops: Vec<_> = program.instructions.iter().map(|i| &i.operation).collect();
+
+    assert!(
+        matches!(ops[ops.len() - 1], Operation::SendMessage),
+        "last instruction should be SendMessage",
+    );
+    let build_count = ops
+        .iter()
+        .filter(|op| matches!(op, Operation::BuildAnnouncementSignatures))
+        .count();
+    assert_eq!(
+        build_count, 1,
+        "expected exactly one BuildAnnouncementSignatures"
+    );
+
+    // The channel must be open and confirmed before it can be announced.
+    let recv_accept_channel = find_operation!(program, Operation::RecvAcceptChannel);
+    let send_funding_created = find_operation!(program, Operation::SendFundingCreated);
+    let recv_funding_signed = find_operation!(program, Operation::RecvFundingSigned);
+    let broadcast = find_operation!(program, Operation::BroadcastTransaction);
+    let send_channel_ready = find_operation!(program, Operation::SendChannelReady { .. });
+    let recv_channel_ready = find_operation!(program, Operation::RecvChannelReady);
+    let lookup = find_operation!(program, Operation::LookupShortChannelId);
+    let build = find_operation!(program, Operation::BuildAnnouncementSignatures);
+
+    assert!(
+        recv_accept_channel < send_funding_created,
+        "RecvAcceptChannel should precede SendFundingCreated",
+    );
+    assert!(
+        recv_funding_signed < broadcast,
+        "RecvFundingSigned should precede BroadcastTransaction",
+    );
+    assert!(
+        broadcast < send_channel_ready,
+        "BroadcastTransaction should precede SendChannelReady",
+    );
+    assert!(
+        send_channel_ready < recv_channel_ready,
+        "SendChannelReady should precede RecvChannelReady",
+    );
+    assert!(
+        recv_channel_ready < lookup && lookup < build,
+        "the announced scid should be looked up after channel_ready and before the build, got {lookup} between {recv_channel_ready} and {build}",
+    );
+}
+
+// BOLT 7 only allows announcing a channel that both peers agreed to announce,
+// and only once its funding transaction has six confirmations.
+#[test]
+fn generated_announcement_signatures_announces_an_announceable_channel() {
+    for seed in 0..100 {
+        let program = generate_announcement_signatures_program(seed);
+        let build = &program.instructions[find_operation!(program, Operation::BuildOpenChannel)];
+
+        match &program.instructions[build.inputs[17]].operation {
+            Operation::LoadU8(flags) => assert_eq!(
+                *flags & OpenChannelGenerator::ANNOUNCE_CHANNEL_FLAG,
+                OpenChannelGenerator::ANNOUNCE_CHANNEL_FLAG,
+                "seed {seed}: channel should be announced, got channel_flags {flags}",
+            ),
+            op => panic!("seed {seed}: expected LoadU8, got {op}"),
+        }
+        match &program.instructions[build.inputs[19]].operation {
+            Operation::LoadChannelType(variant) => assert!(
+                OpenChannelGenerator::ANNOUNCEABLE_CHANNEL_TYPES.contains(variant),
+                "seed {seed}: {variant} cannot be announced",
+            ),
+            op => panic!("seed {seed}: expected LoadChannelType, got {op}"),
+        }
+
+        let mined: u32 = program
+            .instructions
+            .iter()
+            .filter_map(|i| match i.operation {
+                Operation::MineBlocks(blocks) => Some(u32::from(blocks)),
+                _ => None,
+            })
+            .sum();
+        assert!(
+            mined >= 6,
+            "seed {seed}: funding needs six confirmations to be announced, mined {mined}",
+        );
+    }
+}
+
+// The signatures only verify if they cover the channel_announcement body the
+// target rebuilds for itself, which means our node identity, the funding keys
+// the channel was opened with, and its real short_channel_id.
+#[test]
+fn generated_announcement_signatures_sign_the_announced_channel() {
+    let program = generate_announcement_signatures_program(0);
+
+    let create_idx = find_operation!(program, Operation::CreateFundingTransaction);
+    let lookup_idx = find_operation!(program, Operation::LookupShortChannelId);
+    let recv_funding_signed = find_operation!(program, Operation::RecvFundingSigned);
+    let send_funding_created = find_operation!(program, Operation::SendFundingCreated);
+    let build_idx = find_operation!(program, Operation::BuildAnnouncementSignatures);
+
+    let create = &program.instructions[create_idx];
+    let build = &program.instructions[build_idx];
+
+    assert_eq!(
+        build.inputs[0], recv_funding_signed,
+        "the message should carry the channel_id funding_signed assigned",
+    );
+    match &program.instructions[build.inputs[1]].operation {
+        Operation::LoadFeatures(features) => assert!(
+            features.is_empty(),
+            "channel features must be empty to match the target's body, got {features:?}",
+        ),
+        op => panic!("expected LoadFeatures, got {op}"),
+    }
+    assert_eq!(
+        program.instructions[lookup_idx].inputs[0], create_idx,
+        "the announced scid should come from the funding transaction just created",
+    );
+    assert_eq!(
+        build.inputs[3], lookup_idx,
+        "the message should carry the scid looked up from the funding transaction",
+    );
+    assert!(
+        matches!(
+            program.instructions[build.inputs[4]].operation,
+            Operation::LoadLocalNodeSecretFromContext
+        ),
+        "node_signature must be made with the identity the target knows us by",
+    );
+    assert!(
+        matches!(
+            program.instructions[build.inputs[5]].operation,
+            Operation::LoadTargetPubkeyFromContext
+        ),
+        "node_id_2 should be the target's node id",
+    );
+
+    // bitcoin_key_1 is the secret behind the funding pubkey we opened with and
+    // signed funding_created with; bitcoin_key_2 is the target's own.
+    let derive = &program.instructions[create.inputs[0]];
+    assert!(
+        matches!(derive.operation, Operation::DerivePoint),
+        "our funding pubkey should be a DerivePoint",
+    );
+    assert_eq!(
+        derive.inputs[0], build.inputs[6],
+        "bitcoin_key_1 must be the private key behind our funding pubkey",
+    );
+    assert_eq!(
+        program.instructions[send_funding_created].inputs[1], build.inputs[6],
+        "bitcoin_key_1 must be the key that signed funding_created",
+    );
+    assert_eq!(
+        create.inputs[1], build.inputs[7],
+        "bitcoin_key_2 must be the funding pubkey from accept_channel",
+    );
+    assert!(
+        matches!(
+            program.instructions[build.inputs[7]].operation,
+            Operation::ExtractAcceptChannel(AcceptChannelField::FundingPubkey)
+        ),
+        "bitcoin_key_2 should be extracted from accept_channel",
+    );
+}
+
+#[test]
+fn generated_announcement_signatures_program_postcard_roundtrip() {
+    let program = generate_announcement_signatures_program(42);
+    let bytes = postcard::to_allocvec(&program).expect("postcard serialization");
+    let decoded: Program = postcard::from_bytes(&bytes).expect("postcard deserialization");
+    assert_eq!(program, decoded);
 }
 
 #[test]
