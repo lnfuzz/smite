@@ -18,7 +18,10 @@ use smite::channel_tx::{
     build_funding_transaction,
 };
 use smite::noise::{ConnectionError, NoiseConnection};
-use smite::oracles::{AcceptChannelContext, AcceptChannelOracle, Oracle};
+use smite::oracles::{
+    AcceptChannelContext, AcceptChannelOracle, ChannelReadyContext, ChannelReadyOracle,
+    FundingSignedContext, FundingSignedOracle, Oracle,
+};
 use smite::pending_channel::PendingChannel;
 use smite::violation::Violation;
 
@@ -251,6 +254,9 @@ pub struct Executor<C, B, R> {
     /// `temporary_channel_id`, so the funding flow can build commitments from
     /// the parameters actually sent on the wire.
     negotiations: HashMap<TemporaryChannelId, PendingChannel>,
+    /// Per-commitment points revealed by either us or the target, used to
+    /// detect points revealed more than once by the target.
+    per_commitment_points: HashSet<PublicKey>,
     /// Transactions stored outside Bitcoin Core's mempool, typically because they
     /// were rejected by mempool policy, to be included in the next `MineBlocks`
     /// operation. Each is stored as `(txid, raw_hex)`: re-signing the same
@@ -277,6 +283,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
             context,
             channel_states: HashMap::new(),
             negotiations: HashMap::new(),
+            per_commitment_points: HashSet::new(),
             private_mempool: Vec::new(),
             unmined_txids: HashSet::new(),
             mined_txids: HashSet::new(),
@@ -434,7 +441,11 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
 
                 Operation::SendOpenChannel => {
                     let oc = resolve_open_channel_message(&variables, instr.inputs[0]);
-                    record_send_open_channel(&mut self.negotiations, oc);
+                    record_send_open_channel(
+                        &mut self.negotiations,
+                        &mut self.per_commitment_points,
+                        oc,
+                    );
                     let encoded = Message::OpenChannel(oc.clone()).encode();
                     log::debug!(
                         "[{:?}] SendOpenChannel: {} bytes",
@@ -469,6 +480,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         &instr.inputs,
                         *include_alias,
                         &mut self.channel_states,
+                        &mut self.per_commitment_points,
                     );
                     let encoded = Message::ChannelReady(cr).encode();
                     log::debug!(
@@ -505,8 +517,13 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         accept_channel: &ac,
                         negotiation: self.negotiations.get(&ac.temporary_channel_id),
                         negotiated_features: &self.context.negotiated_features,
+                        per_commitment_points: &self.per_commitment_points,
                     })?;
-                    record_recv_accept_channel(&mut self.negotiations, &ac);
+                    record_recv_accept_channel(
+                        &mut self.negotiations,
+                        &mut self.per_commitment_points,
+                        &ac,
+                    );
                     Some(Variable::AcceptChannel(ac))
                 }
 
@@ -519,15 +536,31 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     log::debug!("[{:?}] RecvFundingSigned: waiting", start.elapsed());
                     let fs: FundingSigned = recv_bolt(&mut self.conn, RECV_IDLE_TIMEOUT)?;
                     log::debug!("[{:?}] RecvFundingSigned: received", start.elapsed());
-                    verify_funding_signed(&fs, &self.channel_states)?;
+                    FundingSignedOracle.evaluate(&FundingSignedContext {
+                        funding_signed: &fs,
+                        channel: self.channel_states.get(&fs.channel_id),
+                    })?;
+                    record_recv_funding_signed(&mut self.channel_states, &fs);
                     Some(Variable::ChannelId(fs.channel_id))
                 }
 
                 Operation::RecvChannelReady => {
                     if is_channel_ready_expected(&self.channel_states, &mut self.bitcoin_cli) {
                         log::debug!("[{:?}] RecvChannelReady: waiting", start.elapsed());
-                        recv_channel_ready(&mut self.conn, &mut self.channel_states)?;
+                        let cr: ChannelReady =
+                            recv_bolt(&mut self.conn, RECV_CHANNEL_READY_TIMEOUT)?;
                         log::debug!("[{:?}] RecvChannelReady: received", start.elapsed());
+                        ChannelReadyOracle.evaluate(&ChannelReadyContext {
+                            channel_ready: &cr,
+                            channel: self.channel_states.get(&cr.channel_id),
+                            negotiated_features: &self.context.negotiated_features,
+                            per_commitment_points: &self.per_commitment_points,
+                        })?;
+                        record_recv_channel_ready(
+                            &mut self.channel_states,
+                            &mut self.per_commitment_points,
+                            &cr,
+                        );
                     }
                     None
                 }
@@ -852,17 +885,6 @@ fn build_funding_created(
     };
     let signature = config.sign_counterparty_commitment(&state, &holder);
 
-    let channel_id = ChannelId::v1_from_funding_outpoint(config.funding_outpoint);
-
-    // Check whether the funding outpoint is valid and contains the negotiated
-    // amount and funding script. If not, there is a good chance the target will
-    // neither complete the funding flow nor send an error message.
-    let is_funding_outpoint_valid = funding_tx.matches_funding_output(
-        &open_channel.funding_pubkey,
-        &accept_channel.funding_pubkey,
-        open_channel.funding_satoshis,
-    );
-
     // Only track a new channel when this negotiation has not built a
     // `funding_created` yet. If it has, we are likely resending one for the
     // same `temporary_channel_id` with a different outpoint, which the target
@@ -872,6 +894,24 @@ fn build_funding_created(
     // This also means that building the same message again must not clobber a
     // channel whose state has already been established (and possibly advanced).
     if !pending.funding_built {
+        let channel_id = ChannelId::v1_from_funding_outpoint(config.funding_outpoint);
+
+        // Check whether the funding outpoint is valid and contains the
+        // negotiated amount and funding script. If not, there is a good chance
+        // the target will neither complete the funding flow nor send an error
+        // message.
+        let is_funding_outpoint_valid = funding_tx.matches_funding_output(
+            &open_channel.funding_pubkey,
+            &accept_channel.funding_pubkey,
+            open_channel.funding_satoshis,
+        );
+        // TODO: Once we support sending malformed signatures, update this state
+        // when constructing one so that the peer's acceptance can be detected
+        // as a violation.
+        let opener_funding_pubkey =
+            PublicKey::from_secret_key(&Secp256k1::new(), &opener_funding_privkey);
+        let sent_invalid_signature = opener_funding_pubkey != open_channel.funding_pubkey;
+
         channel_states.entry(channel_id).or_insert_with(|| {
             ChannelState::new(
                 config,
@@ -879,6 +919,7 @@ fn build_funding_created(
                 state,
                 is_funding_outpoint_valid,
                 mined_txids.contains(&funding_outpoint.txid),
+                sent_invalid_signature,
             )
         });
     }
@@ -905,6 +946,7 @@ fn build_channel_ready(
     inputs: &[usize],
     include_alias: bool,
     channel_states: &mut HashMap<ChannelId, ChannelState>,
+    per_commitment_points: &mut HashSet<PublicKey>,
 ) -> ChannelReady {
     let channel_id = resolve_channel_id(variables, inputs[0]);
     let second_per_commitment_point = resolve_pubkey(variables, inputs[1]);
@@ -916,12 +958,15 @@ fn build_channel_ready(
     // yet recorded: `channel_ready` may be resent, but BOLT peers ignore
     // redundant ones, so recording a resend would leave us with the wrong point
     // and make us reject a valid received commitment signature as invalid.
+    //
+    // The same point is added to `per_commitment_points` as revealed by us.
     if let Some(state) = channel_states.get_mut(&channel_id)
         && state.commitment.commitment_number == 0
     {
         let next_point = state.next_holder_per_commitment_point_mut();
         if next_point.is_none() {
             *next_point = Some(second_per_commitment_point);
+            per_commitment_points.insert(second_per_commitment_point);
         }
     }
 
@@ -1186,38 +1231,14 @@ fn recv_bolt<M: FromMessage>(
     })
 }
 
-/// Receives and decodes a `channel_ready` message.
-///
-/// The `second_per_commitment_point` is recorded as the counterparty's next
-/// per-commitment point on the channel it identifies.
-///
-/// # Errors
-///
-/// Returns [`ExecuteError::UnexpectedMessage`] if the received message is not a
-/// `channel_ready`, or [`Violation::UnknownChannel`] if no channel state exists
-/// for the message's `channel_id`.
-fn recv_channel_ready(
-    conn: &mut impl Connection,
-    channel_states: &mut HashMap<ChannelId, ChannelState>,
-) -> Result<(), ExecuteError> {
-    let cr: ChannelReady = recv_bolt(conn, RECV_CHANNEL_READY_TIMEOUT)?;
-
-    let state = channel_states
-        .get_mut(&cr.channel_id)
-        .ok_or(Violation::UnknownChannel(cr.channel_id))?;
-    *state.next_counterparty_per_commitment_point_mut() = Some(cr.second_per_commitment_point);
-
-    Ok(())
-}
-
 /// Returns `true` if the target owes us a `channel_ready` message.
 ///
 /// A `channel_ready` is expected when a tracked channel is still at commitment
 /// number 0, the counterparty's next per-commitment point is unknown, the
 /// advertised funding outpoint pays the negotiated funding output, the funding
-/// transaction was mined only after we sent `funding_created`, and it has at
-/// least `minimum_depth` confirmations (as specified in the received
-/// `accept_channel`).
+/// transaction was mined only after we sent `funding_created`, we have not sent
+/// a signature the peer is required to reject, and it has at least
+/// `minimum_depth` confirmations (as specified in the received `accept_channel`).
 fn is_channel_ready_expected(
     channel_states: &HashMap<ChannelId, ChannelState>,
     bitcoin_cli: &mut impl BitcoinRpc,
@@ -1227,32 +1248,10 @@ fn is_channel_ready_expected(
             && state.next_counterparty_per_commitment_point().is_none()
             && state.is_funding_outpoint_valid
             && !state.was_funding_mined_prematurely
+            && !state.sent_invalid_signature
             && bitcoin_cli.get_transaction_confirmations(state.config.funding_outpoint.txid)
                 >= state.config.minimum_depth
     })
-}
-
-/// Verifies the counterparty's signature from a `funding_signed` message using
-/// the channel state associated with the message's `channel_id`.
-///
-/// # Errors
-///
-/// Returns [`Violation::UnknownChannel`] if no channel state exists for the
-/// given `channel_id`, or [`Violation::InvalidCounterpartySignature`] if the
-/// signature is invalid for the holder's initial commitment transaction.
-fn verify_funding_signed(
-    fs: &FundingSigned,
-    channel_states: &HashMap<ChannelId, ChannelState>,
-) -> Result<(), Violation> {
-    let state = channel_states
-        .get(&fs.channel_id)
-        .ok_or(Violation::UnknownChannel(fs.channel_id))?;
-
-    state
-        .config
-        .verify_counterparty_signature(&state.commitment, &state.holder, &fs.signature)
-        .then_some(())
-        .ok_or(Violation::InvalidCounterpartySignature(fs.channel_id))
 }
 
 /// Records a sent `open_channel`, keyed by `temporary_channel_id`, so the
@@ -1262,8 +1261,12 @@ fn verify_funding_signed(
 /// it is left untouched, preserving the first `open_channel`. Once a
 /// `funding_created` has been built, it is overwritten, allowing the
 /// `temporary_channel_id` to be reused for a new negotiation.
+///
+/// Whenever a negotiation is recorded, its `first_per_commitment_point` is
+/// added to `per_commitment_points` as revealed by us.
 fn record_send_open_channel(
     negotiations: &mut HashMap<TemporaryChannelId, PendingChannel>,
+    per_commitment_points: &mut HashSet<PublicKey>,
     open_channel: &OpenChannel,
 ) {
     if negotiations
@@ -1281,10 +1284,12 @@ fn record_send_open_channel(
             funding_built: false,
         },
     );
+    per_commitment_points.insert(open_channel.first_per_commitment_point);
 }
 
 /// Pairs a received `accept_channel` with the recorded `open_channel` of the
-/// same `temporary_channel_id`.
+/// same `temporary_channel_id`, and adds its `first_per_commitment_point` to
+/// `per_commitment_points` as revealed by the target.
 ///
 /// # Panics
 ///
@@ -1292,12 +1297,51 @@ fn record_send_open_channel(
 /// `AcceptChannelOracle` reports such messages as a [`Violation`].
 fn record_recv_accept_channel(
     negotiations: &mut HashMap<TemporaryChannelId, PendingChannel>,
+    per_commitment_points: &mut HashSet<PublicKey>,
     accept_channel: &AcceptChannel,
 ) {
     negotiations
         .get_mut(&accept_channel.temporary_channel_id)
         .expect("AcceptChannelOracle guaranteed this temporary_channel_id exists")
         .accept_channel = Some(accept_channel.clone());
+    per_commitment_points.insert(accept_channel.first_per_commitment_point);
+}
+
+/// Records that a `funding_signed` has been accepted for its channel.
+///
+/// # Panics
+///
+/// Panics if no matching channel exists. This should be unreachable, as
+/// `FundingSignedOracle` reports such messages as a [`Violation`].
+fn record_recv_funding_signed(
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    funding_signed: &FundingSigned,
+) {
+    channel_states
+        .get_mut(&funding_signed.channel_id)
+        .expect("FundingSignedOracle guaranteed this channel_id exists")
+        .funding_signed_received = true;
+}
+
+/// Records a received `channel_ready`'s `second_per_commitment_point` as the
+/// counterparty's next per-commitment point on the channel it identifies, and
+/// adds it to `per_commitment_points` as revealed by the target.
+///
+/// # Panics
+///
+/// Panics if no matching channel state exists. This should be unreachable, as
+/// `ChannelReadyOracle` reports such messages as a [`Violation`].
+fn record_recv_channel_ready(
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    per_commitment_points: &mut HashSet<PublicKey>,
+    channel_ready: &ChannelReady,
+) {
+    let state = channel_states
+        .get_mut(&channel_ready.channel_id)
+        .expect("ChannelReadyOracle guaranteed this channel_id exists");
+    *state.next_counterparty_per_commitment_point_mut() =
+        Some(channel_ready.second_per_commitment_point);
+    per_commitment_points.insert(channel_ready.second_per_commitment_point);
 }
 
 /// Extracts a field from a parsed `accept_channel` message.

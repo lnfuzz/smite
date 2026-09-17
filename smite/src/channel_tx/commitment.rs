@@ -133,6 +133,7 @@ struct TxCreationKeys {
 
 /// State of a single channel, including its static configuration, holder
 /// identity, and current commitment state.
+#[allow(clippy::struct_excessive_bools)] // Independent flags, not a state machine
 pub struct ChannelState {
     /// Channel configuration established at channel creation and unchanged
     /// for the lifetime of the channel.
@@ -159,6 +160,15 @@ pub struct ChannelState {
     /// after the block height at which they receive `funding_created`, so they
     /// may never observe it and never send `channel_ready`.
     pub was_funding_mined_prematurely: bool,
+    /// Whether we have ever sent a signature the peer was required to reject,
+    /// such as a `funding_created`, `commitment_signed`, or HTLC signature etc.
+    /// it cannot verify. Set on the first occurrence and never cleared, since
+    /// BOLT 2 requires the peer to fail the channel or disconnect in response,
+    /// any subsequent positive response is therefore a violation.
+    pub sent_invalid_signature: bool,
+    /// Whether a `funding_signed` has already been accepted for this channel.
+    /// Any later one means the target re-signed a channel it already funded.
+    pub funding_signed_received: bool,
 }
 
 impl Side {
@@ -188,6 +198,7 @@ impl ChannelState {
         commitment: CommitmentState,
         is_funding_outpoint_valid: bool,
         was_funding_mined_prematurely: bool,
+        sent_invalid_signature: bool,
     ) -> Self {
         Self {
             config,
@@ -197,6 +208,8 @@ impl ChannelState {
             acceptor_next_per_commitment_point: None,
             is_funding_outpoint_valid,
             was_funding_mined_prematurely,
+            sent_invalid_signature,
+            funding_signed_received: false,
         }
     }
 

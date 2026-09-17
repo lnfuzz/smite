@@ -3,9 +3,13 @@
 //! Oracles evaluate conditions beyond simple crashes.
 
 mod accept_channel;
+mod channel_ready;
+mod funding_signed;
 
 use super::violation::Violation;
 pub use accept_channel::{AcceptChannelContext, AcceptChannelOracle};
+pub use channel_ready::{ChannelReadyContext, ChannelReadyOracle};
+pub use funding_signed::{FundingSignedContext, FundingSignedOracle};
 
 /// `Oracle` evaluates a condition against some context
 pub trait Oracle<C> {
