@@ -102,6 +102,8 @@ pub enum StateError {
         path: PathBuf,
         source: serde_json::Error,
     },
+    #[error("unable to determine home directory")]
+    HomeDir,
 }
 
 impl CampaignState {
@@ -173,6 +175,17 @@ impl CampaignState {
             path: path.to_path_buf(),
             source,
         })
+    }
+
+    /// Loads state for campaign `id` from `~/.smitebot/runs/<id>/state.json`.
+    ///
+    /// Returns the state and its path (the path is needed by callers that
+    /// mutate and re-save state, e.g. `stop`).
+    pub fn load_campaign(id: &str) -> Result<(Self, PathBuf), StateError> {
+        let runs_dir = Self::runs_dir().ok_or(StateError::HomeDir)?;
+        let state_path = runs_dir.join(id).join("state.json");
+        let state = Self::load(&state_path)?;
+        Ok((state, state_path))
     }
 }
 
@@ -323,6 +336,11 @@ sharedir = "/tmp/nyx"
         assert_eq!(loaded.id, state.id);
         assert_eq!(loaded.status, Status::Stopped);
         assert_eq!(loaded.stop_time, Some(1_749_469_200));
+    }
+
+    #[test]
+    fn load_campaign_returns_err_for_missing_campaign() {
+        assert!(CampaignState::load_campaign("nonexistent-campaign-xkcd-abc123").is_err());
     }
 
     #[test]

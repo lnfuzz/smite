@@ -41,21 +41,10 @@ impl StopCommand {
     /// Stops a campaign: reaps its runner process groups, tears down the tmux
     /// session, and records the stop in state.json.
     pub fn execute(args: &StopArgs) -> bool {
-        let Some(runs_dir) = CampaignState::runs_dir() else {
-            log::error!("unable to determine home directory");
-            return false;
-        };
-        let state_path = runs_dir.join(&args.campaign_id).join("state.json");
-
-        let mut state = match CampaignState::load(&state_path) {
-            Ok(state) => state,
+        let (mut state, state_path) = match CampaignState::load_campaign(&args.campaign_id) {
+            Ok(x) => x,
             Err(e) => {
                 log::error!("{e}");
-                log::error!(
-                    "campaign '{}' not found; list campaigns with: ls {}",
-                    args.campaign_id,
-                    runs_dir.display()
-                );
                 return false;
             }
         };
