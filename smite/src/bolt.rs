@@ -9,6 +9,7 @@ mod announcement_signatures;
 mod attribution_data;
 mod channel_announcement;
 mod channel_ready;
+mod channel_reestablish;
 mod channel_update;
 mod closing_complete;
 mod closing_sig;
@@ -48,6 +49,9 @@ pub use announcement_signatures::AnnouncementSignatures;
 pub use attribution_data::{AttributionData, TruncatedHmac};
 pub use channel_announcement::ChannelAnnouncement;
 pub use channel_ready::{ChannelReady, ChannelReadyTlvs};
+pub use channel_reestablish::{
+    ChannelReestablish, ChannelReestablishTlvs, MyCurrentFundingLocked, NextFunding,
+};
 pub use channel_update::ChannelUpdate;
 pub use closing_complete::{ClosingComplete, ClosingTlvs};
 pub use closing_sig::ClosingSig;
@@ -200,6 +204,8 @@ impl MessageType {
     pub const REVOKE_AND_ACK: MessageType = MessageType(133);
     /// `update_fail_malformed_htlc` message (BOLT 2).
     pub const UPDATE_FAIL_MALFORMED_HTLC: MessageType = MessageType(135);
+    /// `channel_reestablish` message (BOLT 2).
+    pub const CHANNEL_REESTABLISH: MessageType = MessageType(136);
     /// `channel_announcement` message (BOLT 7).
     pub const CHANNEL_ANNOUNCEMENT: MessageType = MessageType(256);
     /// `node_announcement` message (BOLT 7).
@@ -256,6 +262,7 @@ impl MessageType {
             Self::COMMITMENT_SIGNED => "commitment_signed",
             Self::REVOKE_AND_ACK => "revoke_and_ack",
             Self::UPDATE_FAIL_MALFORMED_HTLC => "update_fail_malformed_htlc",
+            Self::CHANNEL_REESTABLISH => "channel_reestablish",
             Self::CHANNEL_ANNOUNCEMENT => "channel_announcement",
             Self::NODE_ANNOUNCEMENT => "node_announcement",
             Self::CHANNEL_UPDATE => "channel_update",
@@ -332,6 +339,8 @@ pub enum Message {
     RevokeAndAck(RevokeAndAck),
     /// `update_fail_malformed_htlc` message (type 135).
     UpdateFailMalformedHtlc(UpdateFailMalformedHtlc),
+    /// `channel_reestablish` message (type 136).
+    ChannelReestablish(ChannelReestablish),
     /// `channel_announcement` message (type 256).
     ChannelAnnouncement(ChannelAnnouncement),
     /// `node_announcement` message (type 257).
@@ -393,6 +402,7 @@ impl Message {
             Self::CommitmentSigned(_) => MessageType::COMMITMENT_SIGNED,
             Self::RevokeAndAck(_) => MessageType::REVOKE_AND_ACK,
             Self::UpdateFailMalformedHtlc(_) => MessageType::UPDATE_FAIL_MALFORMED_HTLC,
+            Self::ChannelReestablish(_) => MessageType::CHANNEL_REESTABLISH,
             Self::ChannelAnnouncement(_) => MessageType::CHANNEL_ANNOUNCEMENT,
             Self::NodeAnnouncement(_) => MessageType::NODE_ANNOUNCEMENT,
             Self::ChannelUpdate(_) => MessageType::CHANNEL_UPDATE,
@@ -436,6 +446,7 @@ impl Message {
             Self::CommitmentSigned(m) => out.extend(m.encode()),
             Self::RevokeAndAck(m) => out.extend(m.encode()),
             Self::UpdateFailMalformedHtlc(m) => out.extend(m.encode()),
+            Self::ChannelReestablish(m) => out.extend(m.encode()),
             Self::ChannelAnnouncement(m) => out.extend(m.encode()),
             Self::NodeAnnouncement(m) => out.extend(m.encode()),
             Self::ChannelUpdate(m) => out.extend(m.encode()),
@@ -501,6 +512,9 @@ impl Message {
             MessageType::REVOKE_AND_ACK => Ok(Self::RevokeAndAck(RevokeAndAck::decode(cursor)?)),
             MessageType::UPDATE_FAIL_MALFORMED_HTLC => Ok(Self::UpdateFailMalformedHtlc(
                 UpdateFailMalformedHtlc::decode(cursor)?,
+            )),
+            MessageType::CHANNEL_REESTABLISH => Ok(Self::ChannelReestablish(
+                ChannelReestablish::decode(cursor)?,
             )),
             MessageType::CHANNEL_ANNOUNCEMENT => Ok(Self::ChannelAnnouncement(
                 ChannelAnnouncement::decode(cursor)?,
@@ -588,6 +602,7 @@ impl_from_message! {
     CommitmentSigned => COMMITMENT_SIGNED,
     RevokeAndAck => REVOKE_AND_ACK,
     UpdateFailMalformedHtlc => UPDATE_FAIL_MALFORMED_HTLC,
+    ChannelReestablish => CHANNEL_REESTABLISH,
     ChannelAnnouncement => CHANNEL_ANNOUNCEMENT,
     NodeAnnouncement => NODE_ANNOUNCEMENT,
     ChannelUpdate => CHANNEL_UPDATE,
@@ -1144,6 +1159,39 @@ mod tests {
         assert_eq!(decoded, Message::UpdateFailMalformedHtlc(msg));
     }
 
+    /// Valid `ChannelReestablish` message for testing.
+    fn sample_channel_reestablish() -> ChannelReestablish {
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(&[0x11; 32]).expect("valid secret");
+        let pk = PublicKey::from_secret_key(&secp, &sk);
+
+        ChannelReestablish {
+            channel_id: ChannelId::new([0xaa; CHANNEL_ID_SIZE]),
+            next_commitment_number: 5,
+            next_revocation_number: 4,
+            your_last_per_commitment_secret: [0xcd; PER_COMMITMENT_SECRET_SIZE],
+            my_current_per_commitment_point: pk,
+            tlvs: ChannelReestablishTlvs {
+                next_funding: Some(NextFunding {
+                    next_funding_txid: Txid::from_byte_array([0xbb; TXID_SIZE]),
+                    retransmit_flags: 0x01,
+                }),
+                my_current_funding_locked: Some(MyCurrentFundingLocked {
+                    my_current_funding_locked_txid: Txid::from_byte_array([0xcc; TXID_SIZE]),
+                    retransmit_flags: 0x01,
+                }),
+            },
+        }
+    }
+
+    #[test]
+    fn message_channel_reestablish_roundtrip() {
+        let msg = sample_channel_reestablish();
+        let encoded = Message::ChannelReestablish(msg.clone()).encode();
+        let decoded = Message::decode(&encoded).unwrap();
+        assert_eq!(decoded, Message::ChannelReestablish(msg));
+    }
+
     /// Valid `ChannelAnnouncement` message for testing.
     fn sample_channel_announcement() -> ChannelAnnouncement {
         let secp = Secp256k1::new();
@@ -1444,6 +1492,11 @@ mod tests {
                 }),
                 "update_fail_malformed_htlc",
                 MessageType::UPDATE_FAIL_MALFORMED_HTLC,
+            ),
+            (
+                Message::ChannelReestablish(sample_channel_reestablish()),
+                "channel_reestablish",
+                MessageType::CHANNEL_REESTABLISH,
             ),
             (
                 Message::ChannelAnnouncement(sample_channel_announcement()),
