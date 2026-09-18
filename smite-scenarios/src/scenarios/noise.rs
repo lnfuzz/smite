@@ -46,9 +46,11 @@ const FUZZ_STATIC_KEY: [u8; 32] = [
 /// ping-pong on the sync connection ensures the target has some time to process
 /// the fuzz data before we check for crashes.
 pub struct NoiseScenario<T: Target> {
-    target: T,
+    /// Both peer connections are declared before `target` so the peer
+    /// connections close first and don't stall the target's shutdown.
     stream: TcpStream,
     sync_conn: NoiseConnection,
+    target: T,
 }
 
 impl<T: Target> NoiseScenario<T> {
@@ -245,9 +247,9 @@ impl<T: Target> Scenario for NoiseScenario<T> {
         stream.set_write_timeout(Some(TIMEOUT))?;
 
         Ok(Self {
-            target,
             stream,
             sync_conn,
+            target,
         })
     }
 

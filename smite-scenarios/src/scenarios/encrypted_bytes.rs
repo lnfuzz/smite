@@ -16,8 +16,10 @@ use crate::targets::Target;
 /// them over an encrypted Lightning connection. This can find parsing bugs or
 /// crashes from malformed messages.
 pub struct EncryptedBytesScenario<T: Target> {
-    target: T,
+    /// Declared before `target` so the peer connection closes first and doesn't
+    /// stall the target's shutdown.
     conn: NoiseConnection,
+    target: T,
 }
 
 impl<T: Target> Scenario for EncryptedBytesScenario<T> {
@@ -34,7 +36,7 @@ impl<T: Target> Scenario for EncryptedBytesScenario<T> {
         // speeding up every subsequent iteration.
         ping_pong(&mut conn)?;
 
-        Ok(Self { target, conn })
+        Ok(Self { conn, target })
     }
 
     fn run(&mut self, input: &[u8]) -> ScenarioResult {

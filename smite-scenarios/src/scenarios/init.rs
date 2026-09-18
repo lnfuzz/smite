@@ -25,8 +25,10 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 /// ping-pong on the same connection to ensure it has processed the data
 /// before checking for crashes.
 pub struct InitScenario<T: Target> {
-    target: T,
+    /// Declared before `target` so the peer connection closes first and doesn't
+    /// stall the target's shutdown.
     conn: NoiseConnection,
+    target: T,
 }
 
 impl<T: Target> Scenario for InitScenario<T> {
@@ -47,7 +49,7 @@ impl<T: Target> Scenario for InitScenario<T> {
         // the target's init.
         let (conn, _) = handshake_with_target(&target, TIMEOUT)?;
 
-        Ok(Self { target, conn })
+        Ok(Self { conn, target })
     }
 
     fn run(&mut self, input: &[u8]) -> ScenarioResult {

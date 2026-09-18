@@ -65,14 +65,15 @@ RUN git clone --depth 1 --branch ${CLN_VERSION} --recurse-submodules \
     https://github.com/ElementsProject/lightning.git /cln
 WORKDIR /cln
 RUN pip3 install --break-system-packages mako
-# Currently CLN does an unnecessary SIGKILL of per-peer subdaemons (openingd,
-# channeld, etc.) during node shutdown. If the SIGKILL arrives before the
-# subdaemon shuts down gracefully on its own, we lose coverage profile data
-# (profraw files) for that subdaemon.
+# When lightningd frees a per-peer subdaemon (openingd, channeld, etc.) that has
+# not exited yet, it SIGKILLs it. SIGKILL skips the atexit handler that writes
+# the profraw file, so we lose that subdaemon's entire coverage profile.
 #
-# Remove the SIGKILL to ensure we get full coverage data.
-RUN grep -q 'kill(sd->pid, SIGKILL)' lightningd/subd.c && \
-    sed -i '/kill(sd->pid, SIGKILL)/d' lightningd/subd.c
+# Close our end of its socket instead: the subdaemon then exits by itself and
+# flushes its profile. Note that destroy_subd() goes on to wait for the exit
+# with no timeout, so without this close it would block forever.
+RUN grep -q 'kill(sd->pid, SIGKILL);' lightningd/subd.c && \
+    sed -i 's/kill(sd->pid, SIGKILL);/sd->conn = tal_free(sd->conn);/' lightningd/subd.c
 # Reduce the block-polling interval from the 30s default to 2s. CLN only
 # notices newly confirmed transactions when this poll runs, so shorten the
 # interval to make block-related events available to scenarios promptly.

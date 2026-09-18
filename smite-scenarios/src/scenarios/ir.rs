@@ -20,11 +20,14 @@ use crate::targets::Target;
 /// mutators or generators; the executor panics on invariant violations
 /// (out-of-bounds variable refs, type mismatches, `MineBlocks(0)`, etc.).
 pub struct IrScenario<T: Target, S: SnapshotSetup<T>> {
-    target: T,
     /// Executes IR programs and owns the connection, bitcoin-cli handle,
     /// program context, and the target's RPC handle. Created once before the
     /// snapshot and reused across fuzzing runs.
+    ///
+    /// Declared before `target` so the peer connection closes first and doesn't
+    /// stall the target's shutdown.
     executor: Executor<NoiseConnection, BitcoinCli, T::Rpc>,
+    target: T,
     // S is only used for static dispatch on S::setup(), not stored.
     _phantom: PhantomData<S>,
 }
@@ -36,8 +39,8 @@ impl<T: Target, S: SnapshotSetup<T>> Scenario for IrScenario<T, S> {
         let bitcoin_cli = target.bitcoin_cli().clone();
         let executor = Executor::new(conn, bitcoin_cli, target.rpc(), context);
         Ok(Self {
-            target,
             executor,
+            target,
             _phantom: PhantomData,
         })
     }
