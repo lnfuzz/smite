@@ -260,6 +260,273 @@ pub enum Operation {
     ///
     /// Input: `FundingTransaction`.
     LookupShortChannelId,
+
+    /// Derive the v2 `temporary_channel_id` from our revocation basepoint,
+    /// using a zeroed basepoint for the not-yet-known peer (BOLT 2).
+    ///
+    /// Input: `Point` -- our `revocation_basepoint`.
+    DeriveTemporaryChannelIdV2,
+    /// Derive the v2 `channel_id` from both peers' revocation basepoints
+    /// (BOLT 2).
+    ///
+    /// Inputs (2):
+    ///   0: `revocation_basepoint` (`Point`) -- ours
+    ///   1: `revocation_basepoint` (`Point`) -- the peer's, from
+    ///      `accept_channel2`
+    DeriveChannelIdV2,
+    /// Extract a field from a parsed `accept_channel2` response.
+    /// Input: `AcceptChannel2`.
+    ExtractAcceptChannel2(AcceptChannel2Field),
+    /// Build an `open_channel2` message (BOLT 2, type 64).
+    ///
+    /// `require_confirmed_inputs` is a value-less TLV, so its presence is an
+    /// op-level param rather than an input.
+    ///
+    /// Inputs (21, matching wire order):
+    ///   0: `chain_hash` (`ChainHash`)
+    ///   1: `temporary_channel_id` (`ChannelId`)
+    ///   2: `funding_feerate_perkw` (`FeeratePerKw`)
+    ///   3: `commitment_feerate_perkw` (`FeeratePerKw`)
+    ///   4: `funding_satoshis` (`Amount`)
+    ///   5: `dust_limit_satoshis` (`Amount`)
+    ///   6: `max_htlc_value_in_flight_msat` (`Amount`)
+    ///   7: `htlc_minimum_msat` (`Amount`)
+    ///   8: `to_self_delay` (`U16`)
+    ///   9: `max_accepted_htlcs` (`U16`)
+    ///  10: `locktime` (`BlockHeight`)
+    ///  11: `funding_pubkey` (`Point`)
+    ///  12: `revocation_basepoint` (`Point`)
+    ///  13: `payment_basepoint` (`Point`)
+    ///  14: `delayed_payment_basepoint` (`Point`)
+    ///  15: `htlc_basepoint` (`Point`)
+    ///  16: `first_per_commitment_point` (`Point`)
+    ///  17: `second_per_commitment_point` (`Point`)
+    ///  18: `channel_flags` (`U8`)
+    ///  19: `upfront_shutdown_script` (`Bytes`, empty = opt out)
+    ///  20: `channel_type` (`Features`, empty = omit TLV)
+    BuildOpenChannel2 {
+        /// Whether to require the peer to contribute only confirmed inputs.
+        require_confirmed_inputs: bool,
+    },
+    /// Send an `open_channel2` message over the connection.
+    /// Produces a `SentOpenChannel2` variable.
+    /// Input: `OpenChannel2Message`.
+    SendOpenChannel2,
+    /// Receive and parse an `accept_channel2` response.
+    /// Produces an `AcceptChannel2` compound variable.
+    /// Input: `SentOpenChannel2`.
+    RecvAcceptChannel2,
+    /// Build and send a `tx_add_input` message (BOLT 2, type 66).
+    ///
+    /// The input is a wallet UTXO chosen by `utxo_index` modulo the spendable
+    /// set, so the index stays meaningful whatever the wallet holds, and
+    /// selecting the same index twice proposes the same outpoint twice, which
+    /// the peer must reject.
+    ///
+    /// Input: `channel_id` (`ChannelId`).
+    SendTxAddInput {
+        /// BOLT 2 requires the initiator to use even `serial_id`s. The parity
+        /// is part of the mutable value so programs can break that rule.
+        serial_id: u64,
+        /// Selects a wallet UTXO, modulo the number of spendable outputs.
+        utxo_index: u8,
+        /// `nSequence`, which BOLT 2 requires to be at most `0xfffffffd`.
+        sequence: u32,
+    },
+    /// Build and send a `tx_add_output` message (BOLT 2, type 67).
+    ///
+    /// `role` decides where the value and script come from; see
+    /// [`TxOutputRole`]. It is an op-level param, so the input count does not
+    /// depend on it and a mutator can switch roles without invalidating the
+    /// program.
+    ///
+    /// Inputs (3):
+    ///   0: `channel_id` (`ChannelId`)
+    ///   1: `sats` (`Amount`, used by [`TxOutputRole::Explicit`])
+    ///   2: `script` (`Bytes`, used by [`TxOutputRole::Explicit`])
+    SendTxAddOutput {
+        /// See [`Self::SendTxAddInput::serial_id`].
+        serial_id: u64,
+        /// Where the output's value and script come from.
+        role: TxOutputRole,
+    },
+    /// Build and send a `tx_remove_input` message (BOLT 2, type 68).
+    /// Input: `channel_id` (`ChannelId`).
+    SendTxRemoveInput {
+        /// The `serial_id` to remove.
+        serial_id: u64,
+    },
+    /// Build and send a `tx_remove_output` message (BOLT 2, type 69).
+    /// Input: `channel_id` (`ChannelId`).
+    SendTxRemoveOutput {
+        /// The `serial_id` to remove.
+        serial_id: u64,
+    },
+    /// Build and send a `tx_complete` message (BOLT 2, type 70), signalling
+    /// that we have nothing further to contribute.
+    /// Input: `channel_id` (`ChannelId`).
+    SendTxComplete,
+    /// Receive one interactive transaction construction message and apply it to
+    /// the negotiation it names.
+    ///
+    /// Interactive transaction construction is turn-based, so each message we
+    /// send earns exactly one reply; the affine input enforces that pairing in
+    /// generated programs while leaving mutators free to break it.
+    ///
+    /// Input: `SentInteractiveTx`.
+    RecvInteractiveTx,
+    /// Reconstruct the shared funding transaction from the negotiation, with
+    /// inputs and outputs sorted by ascending `serial_id` per BOLT 2.
+    ///
+    /// Produces an empty transaction when the negotiation is unknown, which
+    /// keeps the result well-typed for a mutated program without inventing a
+    /// channel the target never opened.
+    ///
+    /// Input: `channel_id` (`ChannelId`).
+    BuildFundingTransactionV2,
+    /// Build and send the v2 `commitment_signed` (BOLT 2, type 132) for the
+    /// initial commitment, and start tracking the channel.
+    ///
+    /// BOLT 2 requires the first `commitment_signed` of a v2 open to carry no
+    /// HTLCs.
+    ///
+    /// Inputs (3):
+    ///   0: `funding_transaction` (`FundingTransaction`)
+    ///   1: `opener_funding_privkey` (`PrivateKey`)
+    ///   2: `channel_id` (`ChannelId`)
+    SendCommitmentSigned,
+    /// Receive the peer's `commitment_signed` and verify its signature against
+    /// the holder's initial commitment.
+    /// Produces the `ChannelId` carried in the message.
+    /// Input: `SentCommitmentSigned`.
+    RecvCommitmentSigned,
+    /// Receive the peer's `tx_signatures`, recording the witnesses it carries
+    /// so the funding transaction can be assembled from both peers' signatures.
+    ///
+    /// This is a no-op unless the peer owes us one, because it signs first,
+    /// or because it has received ours, so a program that owes the first
+    /// signature does not block waiting for a message the peer is waiting on us
+    /// to send.
+    ///
+    /// Input: `channel_id` (`ChannelId`).
+    RecvTxSignatures,
+    /// Sign the shared funding transaction and send `tx_signatures` carrying
+    /// one witness per input we contributed, ordered by its `serial_id`.
+    ///
+    /// Inputs (2):
+    ///   0: `channel_id` (`ChannelId`)
+    ///   1: `funding_transaction` (`FundingTransaction`)
+    SendTxSignatures,
+}
+
+/// Where a `tx_add_output`'s value and script come from.
+///
+/// Keeping this an op-level param rather than separate operations fixes
+/// [`Operation::SendTxAddOutput`]'s input count, so `OperationParamMutator` can
+/// switch a funding output to an arbitrary one, which the peer must reject,
+/// without changing the program's shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TxOutputRole {
+    /// The channel funding output: a 2-of-2 P2WSH between both
+    /// `funding_pubkey`s, worth the sum of both peers' `funding_satoshis`.
+    /// The value and script inputs are ignored.
+    Funding,
+    /// Our change: whatever our inputs cover beyond our funding contribution
+    /// and our share of the fee, paid to a fresh wallet address. The value and
+    /// script inputs are ignored.
+    Change,
+    /// An output taken verbatim from the value and script inputs.
+    Explicit,
+}
+
+impl TxOutputRole {
+    /// All variants. Keep in sync with the enum definition.
+    pub const ALL: &[Self] = &[Self::Funding, Self::Change, Self::Explicit];
+}
+
+impl fmt::Display for TxOutputRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+/// Fields that can be extracted from an `AcceptChannel2` compound variable.
+///
+/// Mirrors [`AcceptChannelField`] with the v2 differences: `funding_satoshis`
+/// is the acceptor's contribution to the funding transaction,
+/// `channel_reserve_satoshis` is gone (v2 fixes the reserve at 1% of the total),
+/// and `second_per_commitment_point` is sent up front.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AcceptChannel2Field {
+    TemporaryChannelId,
+    FundingSatoshis,
+    DustLimitSatoshis,
+    MaxHtlcValueInFlightMsat,
+    HtlcMinimumMsat,
+    MinimumDepth,
+    ToSelfDelay,
+    MaxAcceptedHtlcs,
+    FundingPubkey,
+    RevocationBasepoint,
+    PaymentBasepoint,
+    DelayedPaymentBasepoint,
+    HtlcBasepoint,
+    FirstPerCommitmentPoint,
+    SecondPerCommitmentPoint,
+    UpfrontShutdownScript,
+    ChannelType,
+}
+
+impl fmt::Display for AcceptChannel2Field {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl AcceptChannel2Field {
+    /// All variants. Keep in sync with the enum definition.
+    pub const ALL: &[Self] = &[
+        Self::TemporaryChannelId,
+        Self::FundingSatoshis,
+        Self::DustLimitSatoshis,
+        Self::MaxHtlcValueInFlightMsat,
+        Self::HtlcMinimumMsat,
+        Self::MinimumDepth,
+        Self::ToSelfDelay,
+        Self::MaxAcceptedHtlcs,
+        Self::FundingPubkey,
+        Self::RevocationBasepoint,
+        Self::PaymentBasepoint,
+        Self::DelayedPaymentBasepoint,
+        Self::HtlcBasepoint,
+        Self::FirstPerCommitmentPoint,
+        Self::SecondPerCommitmentPoint,
+        Self::UpfrontShutdownScript,
+        Self::ChannelType,
+    ];
+
+    /// Returns the variable type produced by extracting this field.
+    #[must_use]
+    pub fn output_type(self) -> VariableType {
+        match self {
+            Self::TemporaryChannelId => VariableType::ChannelId,
+            Self::FundingSatoshis
+            | Self::DustLimitSatoshis
+            | Self::MaxHtlcValueInFlightMsat
+            | Self::HtlcMinimumMsat => VariableType::Amount,
+            Self::MinimumDepth => VariableType::BlockHeight,
+            Self::ToSelfDelay | Self::MaxAcceptedHtlcs => VariableType::U16,
+            Self::FundingPubkey
+            | Self::RevocationBasepoint
+            | Self::PaymentBasepoint
+            | Self::DelayedPaymentBasepoint
+            | Self::HtlcBasepoint
+            | Self::FirstPerCommitmentPoint
+            | Self::SecondPerCommitmentPoint => VariableType::Point,
+            Self::UpfrontShutdownScript => VariableType::Bytes,
+            Self::ChannelType => VariableType::Features,
+        }
+    }
 }
 
 /// A BOLT 2 compliant `upfront_shutdown_script` template.
@@ -559,6 +826,42 @@ impl fmt::Display for Operation {
             Self::MineBlocks(v) => write!(f, "MineBlocks({v})"),
             Self::BroadcastTransaction => write!(f, "BroadcastTransaction"),
             Self::LookupShortChannelId => write!(f, "LookupShortChannelId"),
+            Self::DeriveTemporaryChannelIdV2 => write!(f, "DeriveTemporaryChannelIdV2"),
+            Self::DeriveChannelIdV2 => write!(f, "DeriveChannelIdV2"),
+            Self::ExtractAcceptChannel2(field) => write!(f, "ExtractAcceptChannel2{field}"),
+            Self::BuildOpenChannel2 {
+                require_confirmed_inputs,
+            } => write!(
+                f,
+                "BuildOpenChannel2{{require_confirmed_inputs={require_confirmed_inputs}}}"
+            ),
+            Self::SendOpenChannel2 => write!(f, "SendOpenChannel2"),
+            Self::RecvAcceptChannel2 => write!(f, "RecvAcceptChannel2"),
+            Self::SendTxAddInput {
+                serial_id,
+                utxo_index,
+                sequence,
+            } => write!(
+                f,
+                "SendTxAddInput{{serial_id={serial_id}, utxo_index={utxo_index}, \
+                 sequence={sequence}}}"
+            ),
+            Self::SendTxAddOutput { serial_id, role } => {
+                write!(f, "SendTxAddOutput{{serial_id={serial_id}, role={role}}}")
+            }
+            Self::SendTxRemoveInput { serial_id } => {
+                write!(f, "SendTxRemoveInput{{serial_id={serial_id}}}")
+            }
+            Self::SendTxRemoveOutput { serial_id } => {
+                write!(f, "SendTxRemoveOutput{{serial_id={serial_id}}}")
+            }
+            Self::SendTxComplete => write!(f, "SendTxComplete"),
+            Self::RecvInteractiveTx => write!(f, "RecvInteractiveTx"),
+            Self::BuildFundingTransactionV2 => write!(f, "BuildFundingTransactionV2"),
+            Self::SendCommitmentSigned => write!(f, "SendCommitmentSigned"),
+            Self::RecvCommitmentSigned => write!(f, "RecvCommitmentSigned"),
+            Self::RecvTxSignatures => write!(f, "RecvTxSignatures"),
+            Self::SendTxSignatures => write!(f, "SendTxSignatures"),
         }
     }
 }
@@ -582,11 +885,17 @@ impl Operation {
             Self::LoadBytes(_) | Self::LoadShutdownScript(_) => Some(VariableType::Bytes),
             Self::LoadFeatures(_) | Self::LoadChannelType(_) => Some(VariableType::Features),
             Self::LoadPrivateKey(_) => Some(VariableType::PrivateKey),
-            Self::LoadChannelId(_) | Self::RecvFundingSigned => Some(VariableType::ChannelId),
+            Self::LoadChannelId(_)
+            | Self::RecvFundingSigned
+            | Self::RecvCommitmentSigned
+            | Self::DeriveTemporaryChannelIdV2
+            | Self::DeriveChannelIdV2 => Some(VariableType::ChannelId),
             Self::LoadTargetPubkeyFromContext | Self::DerivePoint => Some(VariableType::Point),
             Self::LoadChainHashFromContext => Some(VariableType::ChainHash),
             Self::ExtractAcceptChannel(field) => Some(field.output_type()),
-            Self::CreateFundingTransaction => Some(VariableType::FundingTransaction),
+            Self::CreateFundingTransaction | Self::BuildFundingTransactionV2 => {
+                Some(VariableType::FundingTransaction)
+            }
             Self::BuildOpenChannel => Some(VariableType::OpenChannelMessage),
             Self::BuildChannelAnnouncement
             | Self::BuildNodeAnnouncement { .. }
@@ -596,8 +905,21 @@ impl Operation {
             | Self::SendChannelReady { .. }
             | Self::RecvChannelReady
             | Self::MineBlocks(_)
-            | Self::BroadcastTransaction => None,
+            | Self::BroadcastTransaction
+            | Self::RecvInteractiveTx
+            | Self::RecvTxSignatures
+            | Self::SendTxSignatures => None,
             Self::SendOpenChannel => Some(VariableType::SentOpenChannel),
+            Self::ExtractAcceptChannel2(field) => Some(field.output_type()),
+            Self::BuildOpenChannel2 { .. } => Some(VariableType::OpenChannel2Message),
+            Self::SendOpenChannel2 => Some(VariableType::SentOpenChannel2),
+            Self::RecvAcceptChannel2 => Some(VariableType::AcceptChannel2),
+            Self::SendTxAddInput { .. }
+            | Self::SendTxAddOutput { .. }
+            | Self::SendTxRemoveInput { .. }
+            | Self::SendTxRemoveOutput { .. }
+            | Self::SendTxComplete => Some(VariableType::SentInteractiveTx),
+            Self::SendCommitmentSigned => Some(VariableType::SentCommitmentSigned),
             Self::SendFundingCreated => Some(VariableType::SentFundingCreated),
             Self::SendShutdown => Some(VariableType::SentShutdown),
             Self::RecvAcceptChannel => Some(VariableType::AcceptChannel),
@@ -607,6 +929,9 @@ impl Operation {
     /// Returns the expected variable types for each input position.
     #[must_use]
     #[allow(clippy::too_many_lines)]
+    // Arms that happen to share a type list are kept apart: the per-position
+    // comments name different protocol fields, which merging would lose.
+    #[allow(clippy::match_same_arms)]
     pub fn input_types(&self) -> Vec<VariableType> {
         match self {
             Self::LoadAmount(_)
@@ -721,6 +1046,61 @@ impl Operation {
             Self::BroadcastTransaction | Self::LookupShortChannelId => {
                 vec![VariableType::FundingTransaction]
             }
+            Self::DeriveTemporaryChannelIdV2 => vec![VariableType::Point], // revocation_basepoint
+            Self::DeriveChannelIdV2 => vec![
+                VariableType::Point, // our revocation_basepoint
+                VariableType::Point, // the peer's revocation_basepoint
+            ],
+            Self::ExtractAcceptChannel2(_) => vec![VariableType::AcceptChannel2],
+            Self::SendTxAddInput { .. }
+            | Self::SendTxRemoveInput { .. }
+            | Self::SendTxRemoveOutput { .. }
+            | Self::SendTxComplete => vec![VariableType::ChannelId],
+            Self::SendTxAddOutput { .. } => vec![
+                VariableType::ChannelId, // channel_id
+                VariableType::Amount,    // sats
+                VariableType::Bytes,     // script
+            ],
+            Self::RecvInteractiveTx => vec![VariableType::SentInteractiveTx],
+            Self::BuildFundingTransactionV2 | Self::RecvTxSignatures => {
+                vec![VariableType::ChannelId]
+            }
+            Self::SendCommitmentSigned => vec![
+                VariableType::FundingTransaction, // funding_transaction
+                VariableType::PrivateKey,         // opener_funding_privkey
+                VariableType::ChannelId,          // channel_id
+            ],
+            Self::RecvCommitmentSigned => vec![VariableType::SentCommitmentSigned],
+            Self::SendTxSignatures => vec![
+                VariableType::ChannelId,          // channel_id
+                VariableType::FundingTransaction, // funding_transaction
+            ],
+            Self::SendOpenChannel2 => vec![VariableType::OpenChannel2Message],
+            Self::RecvAcceptChannel2 => vec![VariableType::SentOpenChannel2],
+
+            Self::BuildOpenChannel2 { .. } => vec![
+                VariableType::ChainHash,    // chain_hash
+                VariableType::ChannelId,    // temporary_channel_id
+                VariableType::FeeratePerKw, // funding_feerate_perkw
+                VariableType::FeeratePerKw, // commitment_feerate_perkw
+                VariableType::Amount,       // funding_satoshis
+                VariableType::Amount,       // dust_limit_satoshis
+                VariableType::Amount,       // max_htlc_value_in_flight_msat
+                VariableType::Amount,       // htlc_minimum_msat
+                VariableType::U16,          // to_self_delay
+                VariableType::U16,          // max_accepted_htlcs
+                VariableType::BlockHeight,  // locktime
+                VariableType::Point,        // funding_pubkey
+                VariableType::Point,        // revocation_basepoint
+                VariableType::Point,        // payment_basepoint
+                VariableType::Point,        // delayed_payment_basepoint
+                VariableType::Point,        // htlc_basepoint
+                VariableType::Point,        // first_per_commitment_point
+                VariableType::Point,        // second_per_commitment_point
+                VariableType::U8,           // channel_flags
+                VariableType::Bytes,        // upfront_shutdown_script
+                VariableType::Features,     // channel_type
+            ],
         }
     }
 
@@ -765,11 +1145,32 @@ impl Operation {
             | Self::RecvChannelReady
             | Self::MineBlocks(_)
             | Self::BroadcastTransaction
-            | Self::LookupShortChannelId => vec![],
+            | Self::LookupShortChannelId
+            | Self::DeriveTemporaryChannelIdV2
+            | Self::DeriveChannelIdV2
+            | Self::ExtractAcceptChannel2(_)
+            | Self::BuildOpenChannel2 { .. }
+            | Self::SendOpenChannel2
+            | Self::SendTxAddInput { .. }
+            | Self::SendTxAddOutput { .. }
+            | Self::SendTxRemoveInput { .. }
+            | Self::SendTxRemoveOutput { .. }
+            | Self::SendTxComplete
+            | Self::RecvInteractiveTx
+            | Self::BuildFundingTransactionV2
+            | Self::SendCommitmentSigned
+            | Self::RecvCommitmentSigned
+            | Self::RecvTxSignatures
+            | Self::SendTxSignatures => vec![],
 
             Self::RecvAcceptChannel => AcceptChannelField::ALL
                 .iter()
                 .map(|&f| (Self::ExtractAcceptChannel(f), f.output_type()))
+                .collect(),
+
+            Self::RecvAcceptChannel2 => AcceptChannel2Field::ALL
+                .iter()
+                .map(|&f| (Self::ExtractAcceptChannel2(f), f.output_type()))
                 .collect(),
         }
     }
@@ -802,7 +1203,11 @@ impl Operation {
             | Self::BuildNodeAnnouncement { .. }
             | Self::BuildChannelUpdate
             | Self::BuildAnnouncementSignatures
-            | Self::LookupShortChannelId => false,
+            | Self::LookupShortChannelId
+            | Self::DeriveTemporaryChannelIdV2
+            | Self::DeriveChannelIdV2
+            | Self::ExtractAcceptChannel2(_)
+            | Self::BuildOpenChannel2 { .. } => false,
             Self::CreateFundingTransaction
             | Self::SendMessage
             | Self::SendOpenChannel
@@ -813,7 +1218,20 @@ impl Operation {
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
             | Self::MineBlocks(_)
-            | Self::BroadcastTransaction => true,
+            | Self::BroadcastTransaction
+            | Self::SendOpenChannel2
+            | Self::RecvAcceptChannel2
+            | Self::SendTxAddInput { .. }
+            | Self::SendTxAddOutput { .. }
+            | Self::SendTxRemoveInput { .. }
+            | Self::SendTxRemoveOutput { .. }
+            | Self::SendTxComplete
+            | Self::RecvInteractiveTx
+            | Self::BuildFundingTransactionV2
+            | Self::SendCommitmentSigned
+            | Self::RecvCommitmentSigned
+            | Self::RecvTxSignatures
+            | Self::SendTxSignatures => true,
         }
     }
 
@@ -850,20 +1268,39 @@ impl Operation {
             | Self::BuildNodeAnnouncement { .. }
             | Self::BuildChannelUpdate
             | Self::BuildAnnouncementSignatures
+            | Self::DeriveTemporaryChannelIdV2
+            | Self::DeriveChannelIdV2
+            | Self::ExtractAcceptChannel2(_)
+            | Self::BuildOpenChannel2 { .. }
             | Self::SendMessage
             | Self::SendOpenChannel
+            | Self::SendOpenChannel2
             | Self::SendChannelReady { .. }
-            | Self::SendShutdown => true,
+            | Self::SendShutdown
+            | Self::SendTxRemoveInput { .. }
+            | Self::SendTxRemoveOutput { .. }
+            | Self::SendTxComplete => true,
             // `CreateFundingTransaction` selects coins from the wallet, whose
             // contents change as transactions are created and broadcast.
             // `SendFundingCreated` builds its message from the recorded
             // negotiation and channel state. The `Recv` operations read
             // whatever the target sends us. `MineBlocks` also mines whatever
             // the private mempool holds, `BroadcastTransaction` dedups against
-            // it, and `LookupShortChannelId` reads chain state.
+            // it, and `LookupShortChannelId` reads chain state. The
+            // `tx_add_*` operations pick a wallet UTXO and a fresh change
+            // address, so they read the wallet too.
             Self::CreateFundingTransaction
             | Self::SendFundingCreated
+            | Self::SendTxAddInput { .. }
+            | Self::SendTxAddOutput { .. }
+            | Self::BuildFundingTransactionV2
+            | Self::SendCommitmentSigned
+            | Self::SendTxSignatures
             | Self::RecvAcceptChannel
+            | Self::RecvAcceptChannel2
+            | Self::RecvInteractiveTx
+            | Self::RecvCommitmentSigned
+            | Self::RecvTxSignatures
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
             | Self::MineBlocks(_)
@@ -902,7 +1339,13 @@ impl Operation {
             | Self::ExtractAcceptChannel(_)
             | Self::BuildNodeAnnouncement { .. }
             | Self::SendChannelReady { .. }
-            | Self::MineBlocks(_) => true,
+            | Self::MineBlocks(_)
+            | Self::ExtractAcceptChannel2(_)
+            | Self::BuildOpenChannel2 { .. }
+            | Self::SendTxAddInput { .. }
+            | Self::SendTxAddOutput { .. }
+            | Self::SendTxRemoveInput { .. }
+            | Self::SendTxRemoveOutput { .. } => true,
 
             Self::LoadTargetPubkeyFromContext
             | Self::LoadChainHashFromContext
@@ -920,7 +1363,18 @@ impl Operation {
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
             | Self::BroadcastTransaction
-            | Self::LookupShortChannelId => false,
+            | Self::LookupShortChannelId
+            | Self::DeriveTemporaryChannelIdV2
+            | Self::DeriveChannelIdV2
+            | Self::SendOpenChannel2
+            | Self::RecvAcceptChannel2
+            | Self::SendTxComplete
+            | Self::RecvInteractiveTx
+            | Self::BuildFundingTransactionV2
+            | Self::SendCommitmentSigned
+            | Self::RecvCommitmentSigned
+            | Self::RecvTxSignatures
+            | Self::SendTxSignatures => false,
         }
     }
 }

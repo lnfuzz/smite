@@ -4,7 +4,9 @@
 //! The serialized program stores data only in [`Operation`] literals.
 
 use bitcoin::secp256k1::PublicKey;
-use smite::bolt::{AcceptChannel, ChannelId, OpenChannel, ShortChannelId};
+use smite::bolt::{
+    AcceptChannel, AcceptChannel2, ChannelId, OpenChannel, OpenChannel2, ShortChannelId,
+};
 use smite::channel_tx::FundingTransaction;
 
 const CHAIN_HASH_SIZE: usize = 32;
@@ -50,12 +52,27 @@ pub enum Variable {
     OpenChannelMessage(OpenChannel),
     /// Parsed `accept_channel` response.
     AcceptChannel(AcceptChannel),
+    /// BOLT `open_channel2` message, ready to send.
+    OpenChannel2Message(OpenChannel2),
+    /// Parsed `accept_channel2` response.
+    AcceptChannel2(AcceptChannel2),
     /// Constructed funding transaction with funding output index.
     FundingTransaction(FundingTransaction),
 
     // Affine (single-use) variables
     /// `open_channel` has been sent, so `accept_channel` may now be received.
     SentOpenChannel,
+    /// `open_channel2` has been sent, so `accept_channel2` may now be received.
+    SentOpenChannel2,
+    /// An interactive transaction construction message has been sent, so the
+    /// peer's reply may now be received. The protocol is turn-based, so each
+    /// send earns exactly one receive.
+    ///
+    /// Carries the `channel_id` it was sent on, so the receive can tell whether
+    /// that negotiation is still expecting a reply.
+    SentInteractiveTx(ChannelId),
+    /// `commitment_signed` has been sent, so the peer's may now be received.
+    SentCommitmentSigned,
     /// `funding_created` has been sent, so `funding_signed` may now be received.
     SentFundingCreated,
     /// `shutdown` has been sent, so the counterparty's `shutdown` may now be
@@ -85,8 +102,13 @@ impl Variable {
             Self::Message(_) => VariableType::Message,
             Self::OpenChannelMessage(_) => VariableType::OpenChannelMessage,
             Self::AcceptChannel(_) => VariableType::AcceptChannel,
+            Self::OpenChannel2Message(_) => VariableType::OpenChannel2Message,
+            Self::AcceptChannel2(_) => VariableType::AcceptChannel2,
             Self::FundingTransaction(_) => VariableType::FundingTransaction,
             Self::SentOpenChannel => VariableType::SentOpenChannel,
+            Self::SentOpenChannel2 => VariableType::SentOpenChannel2,
+            Self::SentInteractiveTx(_) => VariableType::SentInteractiveTx,
+            Self::SentCommitmentSigned => VariableType::SentCommitmentSigned,
             Self::SentFundingCreated => VariableType::SentFundingCreated,
             Self::SentShutdown => VariableType::SentShutdown,
         }
@@ -114,8 +136,13 @@ pub enum VariableType {
     Message,
     OpenChannelMessage,
     AcceptChannel,
+    OpenChannel2Message,
+    AcceptChannel2,
     FundingTransaction,
     SentOpenChannel,
+    SentOpenChannel2,
+    SentInteractiveTx,
+    SentCommitmentSigned,
     SentFundingCreated,
     SentShutdown,
 }
@@ -124,7 +151,12 @@ impl VariableType {
     #[must_use]
     pub fn is_affine(&self) -> bool {
         match self {
-            Self::SentOpenChannel | Self::SentFundingCreated | Self::SentShutdown => true,
+            Self::SentOpenChannel
+            | Self::SentOpenChannel2
+            | Self::SentInteractiveTx
+            | Self::SentCommitmentSigned
+            | Self::SentFundingCreated
+            | Self::SentShutdown => true,
 
             Self::Bytes
             | Self::ChainHash
@@ -142,6 +174,8 @@ impl VariableType {
             | Self::Message
             | Self::OpenChannelMessage
             | Self::AcceptChannel
+            | Self::OpenChannel2Message
+            | Self::AcceptChannel2
             | Self::ShortChannelId
             | Self::FundingTransaction => false,
         }

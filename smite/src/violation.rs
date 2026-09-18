@@ -46,8 +46,26 @@ pub enum Violation {
     #[error("invalid funding_signed for channel_id {0}: {1}")]
     InvalidFundingSigned(ChannelId, String),
 
-    /// The target sent a `channel_ready` for a `channel_id` we never opened,
-    /// i.e. one for which no state was ever established.
+    /// The target sent a `channel_ready` or `commitment_signed` for a
+    /// `channel_id` we never opened, i.e. one for which no state was ever
+    /// established.
     #[error("unknown channel: no tracked state for channel_id {0}")]
     UnknownChannel(ChannelId),
+
+    /// The target's `commitment_signed` signature failed to verify against the
+    /// holder's initial commitment transaction.
+    #[error("invalid counterparty signature for channel_id {0}")]
+    InvalidCounterpartySignature(ChannelId),
+
+    /// The target's `commitment_signed` for a channel establishment v2 open
+    /// carried HTLC signatures. BOLT 2 requires the first commitment of a v2
+    /// open to have no HTLCs, so there is nothing for them to sign.
+    #[error("unexpected htlc signatures in commitment_signed for channel_id {0}")]
+    UnexpectedHtlcSignatures(ChannelId),
+
+    /// The target's `tx_signatures` carried a witness BOLT 2 requires the
+    /// receiver to fail the negotiation over: one that is empty, or one whose
+    /// `witness_data` is not the bitcoin wire encoding the spec prescribes.
+    #[error("invalid tx_signatures for channel_id {0}: {1}")]
+    InvalidTxSignatures(ChannelId, String),
 }

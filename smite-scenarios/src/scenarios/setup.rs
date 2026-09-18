@@ -30,28 +30,23 @@ pub trait SnapshotSetup<T: Target> {
     fn setup(target: &T) -> Result<(NoiseConnection, ProgramContext), ScenarioError>;
 }
 
-/// Features stripped from our echoed `init` so the target stays on the single
-/// funded flow and doesn't emit unrelated noise:
-/// - `gossip_queries` (6/7), `gossip_queries_ex` (10/11): Stripped so the
-///   target doesn't send `gossip_timestamp_filter` or other gossip noise during
-///   execution.
-/// - `option_dual_fund` (28/29): Eclair in particular will not allow
-///   single-funded flows if either of these feature bits is set.
-/// - `option_provide_storage` (42/43): When enabled, peers may send
-///   `peer_storage` and `peer_storage_retrieval` messages at arbitrary times.
-const STRIPPED_FEATURES: &[FeatureBit] = &[
+/// Features stripped from every echoed `init` so the target doesn't emit noise
+/// unrelated to channel establishment:
+/// - `gossip_queries`, `gossip_queries_ex`: Stripped so the target doesn't send
+///   `gossip_timestamp_filter` or other gossip noise during execution.
+/// - `option_provide_storage`: When enabled, peers may send `peer_storage` and
+///   `peer_storage_retrieval` messages at arbitrary times.
+const NOISY_FEATURES: &[FeatureBit] = &[
     Features::GOSSIP_QUERIES,
     Features::GOSSIP_QUERIES_EX,
-    Features::OPTION_DUAL_FUND,
     Features::OPTION_PROVIDE_STORAGE,
 ];
 
-/// Creates an `init` that echoes the received features with bits stripped that
-/// would steer the target away from the single-funded `open_channel` flow.
-fn init_for_single_funded(received: &Init) -> Init {
+/// Creates an `init` that echoes the received features with `stripped` cleared.
+fn init_echoing_without(received: &Init, stripped: &[FeatureBit]) -> Init {
     let mut globalfeatures = Features::from(received.globalfeatures.clone());
     let mut features = Features::from(received.features.clone());
-    for &bit in STRIPPED_FEATURES {
+    for &bit in stripped {
         globalfeatures.clear_feature(bit);
         features.clear_feature(bit);
     }
@@ -62,36 +57,95 @@ fn init_for_single_funded(received: &Init) -> Init {
     }
 }
 
+/// Creates an `init` that echoes the received features with bits stripped that
+/// would steer the target away from the single-funded `open_channel` flow.
+///
+/// Eclair in particular will not allow single-funded flows if `option_dual_fund`
+/// is set, so it is stripped on top of the always-noisy features.
+fn init_for_single_funded(received: &Init) -> Init {
+    let stripped: Vec<FeatureBit> = NOISY_FEATURES
+        .iter()
+        .copied()
+        .chain([Features::OPTION_DUAL_FUND])
+        .collect();
+    init_echoing_without(received, &stripped)
+}
+
+/// Creates an `init` that keeps `option_dual_fund` so the target takes the
+/// channel establishment v2 path, while still stripping the gossip and peer
+/// storage noise.
+fn init_for_dual_funded(received: &Init) -> Init {
+    init_echoing_without(received, NOISY_FEATURES)
+}
+
+/// Performs the handshake, echoes an `init` built by `make_init`, and captures
+/// the [`ProgramContext`] an IR program reads at execution time.
+fn setup_with_init<T: Target>(
+    target: &T,
+    make_init: fn(&Init) -> Init,
+) -> Result<(NoiseConnection, ProgramContext), ScenarioError> {
+    let (mut conn, target_init) = handshake_with_target(target, TIMEOUT)?;
+
+    let our_init = make_init(&target_init);
+    conn.send_message(&Message::Init(our_init.clone()).encode())?;
+
+    // Drain any remaining post-init noise so the snapshot starts with a
+    // clean connection.
+    ping_pong(&mut conn)?;
+
+    let context = ProgramContext {
+        target_pubkey: *target.pubkey(),
+        local_pubkey: super::local_node_id(),
+        chain_hash: REGTEST_CHAIN_HASH,
+        // All targets gate startup on `INITIAL_BLOCKS` being mined, so
+        // this is the floor. Dynamic per-target queries can replace it
+        // later.
+        block_height: u32::try_from(INITIAL_BLOCKS).expect("fits in u32"),
+        // We echo the target's features minus the stripped bits, so the
+        // negotiated features are just the features we sent in our init.
+        negotiated_features: Features::from(our_init.features),
+    };
+
+    Ok((conn, context))
+}
+
 /// Setup that snapshots just after the Noise handshake and init exchange are
-/// complete.
+/// complete, with `option_dual_fund` stripped so the target takes the
+/// single-funded `open_channel` path.
 pub struct PostInitSetup;
 
 impl<T: Target> SnapshotSetup<T> for PostInitSetup {
     fn setup(target: &T) -> Result<(NoiseConnection, ProgramContext), ScenarioError> {
-        let (mut conn, target_init) = handshake_with_target(target, TIMEOUT)?;
+        setup_with_init(target, init_for_single_funded)
+    }
+}
 
-        // Echo features but strip the bits that would take us off the
-        // single-funded `open_channel` path this setup is built for.
-        let our_init = init_for_single_funded(&target_init);
-        conn.send_message(&Message::Init(our_init.clone()).encode())?;
+/// Setup that snapshots just after the Noise handshake and init exchange are
+/// complete, with `option_dual_fund` negotiated so the target takes the
+/// channel establishment v2 path.
+///
+/// BOLT 2 makes the two flows mutually exclusive on one connection: once
+/// `option_dual_fund` is negotiated the opener MUST NOT send `open_channel`,
+/// and the receiver of one MUST fail the channel. So a v2 scenario needs its
+/// own snapshot rather than sharing [`PostInitSetup`]'s.
+pub struct PostInitDualFundSetup;
 
-        // Drain any remaining post-init noise so the snapshot starts with a
-        // clean connection.
-        ping_pong(&mut conn)?;
+impl<T: Target> SnapshotSetup<T> for PostInitDualFundSetup {
+    fn setup(target: &T) -> Result<(NoiseConnection, ProgramContext), ScenarioError> {
+        let (conn, context) = setup_with_init(target, init_for_dual_funded)?;
 
-        let context = ProgramContext {
-            target_pubkey: *target.pubkey(),
-            chain_hash: REGTEST_CHAIN_HASH,
-            // All targets gate startup on `INITIAL_BLOCKS` being mined, so
-            // this is the floor. Dynamic per-target queries can replace it
-            // later.
-            block_height: u32::try_from(INITIAL_BLOCKS).expect("fits in u32"),
-            // Since we echo the same features the target sent, but strip both
-            // required and optional bits to exercise only the single funded
-            // flow and avoid unrelated noise, negotiated features are just the
-            // features we sent in our init.
-            negotiated_features: Features::from(our_init.features),
-        };
+        // Without this feature the target stays on the v1 flow and every
+        // `open_channel2` is rejected, which is otherwise hard to tell apart
+        // from a bug in the v2 flow itself.
+        if !context
+            .negotiated_features
+            .supports_feature(Features::OPTION_DUAL_FUND)
+        {
+            log::warn!(
+                "target does not advertise option_dual_fund; channel establishment v2 will not be \
+                 reachable",
+            );
+        }
 
         Ok((conn, context))
     }
