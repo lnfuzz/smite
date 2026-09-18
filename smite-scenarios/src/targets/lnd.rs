@@ -57,25 +57,22 @@ impl LndConfig {
     }
 }
 
-/// Pipes for LND coverage synchronization.
+/// Pipes for the LND liveness handshake.
 ///
-/// Go can't write directly to AFL's shared memory, so we use pipes:
-/// 1. Scenario writes trigger byte
-/// 2. LND copies coverage to AFL shared memory
-/// 3. LND writes ack byte
-/// 4. If scenario's ack read fails (EOF), LND crashed
-struct CoveragePipes {
+/// The scenario writes a trigger byte and LND echoes it back as an ack. EOF
+/// instead of the ack means LND died. `try_wait` can't replace this: a dying
+/// process closes its sockets before it becomes reapable, so right after a
+/// crash it still looks alive.
+struct LivenessPipes {
     trigger_write: PipeWriter,
     ack_read: PipeReader,
 }
 
-impl CoveragePipes {
-    /// Triggers LND to copy coverage counters to AFL shared memory.
-    fn sync(&mut self) -> std::io::Result<()> {
+impl LivenessPipes {
+    /// Blocks until LND acks the trigger byte. Fails if LND died.
+    fn check(&mut self) -> std::io::Result<()> {
         let mut buf = [0u8; 1];
-        // Write 1 byte to trigger coverage copy
         self.trigger_write.write_all(&buf)?;
-        // Wait for coverage copy to finish (EOF = crash)
         self.ack_read.read_exact(&mut buf)?;
         Ok(())
     }
@@ -99,7 +96,7 @@ pub struct LndTarget {
     lnd: ManagedProcess,
     #[allow(dead_code)] // bitcoind shuts down on drop
     bitcoind: ManagedProcess,
-    coverage_pipes: Option<CoveragePipes>,
+    liveness_pipes: Option<LivenessPipes>,
     pubkey: secp256k1::PublicKey,
     addr: SocketAddr,
     bitcoin_cli: BitcoinCli,
@@ -108,12 +105,12 @@ pub struct LndTarget {
 }
 
 impl LndTarget {
-    /// Starts LND and waits for it to be ready. Returns the process, coverage
+    /// Starts LND and waits for it to be ready. Returns the process, liveness
     /// pipes (if in fuzzing mode), and LND's identity pubkey.
     fn start_lnd(
         config: &LndConfig,
         data_dir: &Path,
-    ) -> Result<(ManagedProcess, Option<CoveragePipes>, secp256k1::PublicKey), TargetError> {
+    ) -> Result<(ManagedProcess, Option<LivenessPipes>, secp256k1::PublicKey), TargetError> {
         log::info!("Starting lnd...");
 
         let lnd_dir = data_dir.join("lnd");
@@ -147,7 +144,7 @@ impl LndTarget {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 
-        // Set up coverage pipes if in fuzzing mode. We keep all four pipe ends alive
+        // Set up liveness pipes if in fuzzing mode. We keep all four pipe ends alive
         // until after spawn so the FDs are valid when the child forks.
         let pipe_ends = if std::env::var("__AFL_SHM_ID").is_ok() {
             let (trigger_read, trigger_write) = std::io::pipe()?;
@@ -206,10 +203,10 @@ impl LndTarget {
             None
         };
 
-        let lnd = ManagedProcess::spawn(&mut cmd, "lnd")?;
+        let mut lnd = ManagedProcess::spawn(&mut cmd, "lnd")?;
 
         // Extract parent-side pipe ends; child-side ends are dropped (closed) here
-        let coverage_pipes = pipe_ends.map(|(_, trigger_write, ack_read, _)| CoveragePipes {
+        let liveness_pipes = pipe_ends.map(|(_, trigger_write, ack_read, _)| LivenessPipes {
             trigger_write,
             ack_read,
         });
@@ -218,10 +215,13 @@ impl LndTarget {
         // block_height matches the initial blocks we generated.
         log::info!("Waiting for lnd to be ready and synced...");
         for _ in 0..120 {
+            if !lnd.is_running() {
+                return Err(TargetError::StartFailed("lnd exited during startup".into()));
+            }
             if let Ok((pubkey, blockheight, synced_to_chain)) = Self::query_info(config, &lnd_dir) {
                 if blockheight >= bitcoind::INITIAL_BLOCKS && synced_to_chain {
                     log::info!("lnd synced (blockheight={blockheight})");
-                    return Ok((lnd, coverage_pipes, pubkey));
+                    return Ok((lnd, liveness_pipes, pubkey));
                 }
                 log::debug!(
                     "lnd not yet synced (blockheight={blockheight}, synced_to_chain={synced_to_chain})"
@@ -287,7 +287,7 @@ impl Target for LndTarget {
         let (data_path, temp_dir) = bitcoind::resolve_data_dir()?;
 
         let (bitcoind, bitcoin_cli) = bitcoind::start(&config.bitcoind_config(), &data_path)?;
-        let (lnd, coverage_pipes, pubkey) = Self::start_lnd(&config, &data_path)?;
+        let (lnd, liveness_pipes, pubkey) = Self::start_lnd(&config, &data_path)?;
         let addr = SocketAddr::from(([127, 0, 0, 1], config.lnd_p2p_port));
 
         log::info!("Both daemons are running, ready to fuzz");
@@ -295,7 +295,7 @@ impl Target for LndTarget {
         Ok(Self {
             lnd,
             bitcoind,
-            coverage_pipes,
+            liveness_pipes,
             pubkey,
             addr,
             bitcoin_cli,
@@ -320,9 +320,8 @@ impl Target for LndTarget {
     }
 
     fn check_alive(&mut self) -> Result<(), TargetError> {
-        // If we have coverage pipes, sync triggers coverage copy AND detects crashes
-        if let Some(pipes) = &mut self.coverage_pipes {
-            pipes.sync().map_err(|_| TargetError::Crashed)?;
+        if let Some(pipes) = &mut self.liveness_pipes {
+            pipes.check().map_err(|_| TargetError::Crashed)?;
         } else {
             // No pipes (local mode) - just check process is running
             if !self.lnd.is_running() {

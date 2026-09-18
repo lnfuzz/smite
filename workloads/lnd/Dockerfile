@@ -57,9 +57,12 @@ RUN wget https://bitcoincore.org/bin/bitcoin-core-${BITCOIN_VERSION}/bitcoin-${B
 WORKDIR /lnd
 RUN cd cmd/lncli && go build
 
-# Copy sancov.go and build LND with coverage instrumentation
+# Copy sancov.go and build LND with coverage instrumentation. align.ld
+# page-aligns the coverage counters so sancov.go can map them onto AFL's map.
 COPY ./workloads/lnd/sancov.go /lnd/sancov.go
-RUN cd cmd/lnd && CGO_ENABLED=1 go build -v -tags=libfuzzer -gcflags=all=-d=libfuzzer
+COPY ./workloads/lnd/align.ld /lnd/align.ld
+RUN cd cmd/lnd && CGO_ENABLED=1 go build -v -tags=libfuzzer -gcflags=all=-d=libfuzzer \
+    -ldflags="-extldflags=-Wl,-T,/lnd/align.ld"
 
 # Copy smite workspace files and build all scenario binaries
 WORKDIR /smite
