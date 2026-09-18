@@ -16,9 +16,11 @@ export SMITE_CRASH_HANDLER=/nyx-jvm-crash-handler.so
 # JVM tuning for Nyx fuzzing performance. JAVA_OPTS is picked up by
 # eclair-node.sh and passed to the JVM.
 #
-# -XX:TieredStopAtLevel=1: Use only the C1 JIT compiler, skipping C2 compilation
-#   entirely. C2 runs expensive optimizations in background threads which get
-#   repeated every time we restore the VM snapshot, reducing fuzzing speed.
+# -XX:TieredStopAtLevel=1: Use only the C1 JIT compiler, skipping C2. C2 measured
+#   ~28% fewer execs/sec here: its speculative optimizations are tuned to the
+#   fixed warmup path, so varied fuzzing inputs trip uncommon traps and deopt to
+#   the interpreter each restore. C1 doesn't speculate, staying robust across
+#   inputs with a more compact code cache.
 #
 # -javaagent: Coverage agent that instruments bytecode and writes edge counters
 #   to AFL shared memory via JNI.
