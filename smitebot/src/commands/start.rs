@@ -2,9 +2,13 @@
 //!
 //! Builds the Docker image, prepares the Nyx sharedir, spawns parallel
 //! `afl-fuzz` processes inside a tmux session, and persists campaign state so
-//! that `stop` and `status` can manage the running campaign later.
+//! that `stop` and `status` can manage the running campaign later. A runner
+//! whose `output_dir/<id>` holds a prior run resumes it in place.
 
+use std::collections::BTreeMap;
 use std::fs;
+use std::io;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -83,15 +87,9 @@ impl StartCommand {
             return false;
         }
 
-        if let Some(stats) = existing_campaign_runner(&config.output_dir, config.runners) {
-            log::error!(
-                "output_dir already holds a campaign ({}); smitebot start only \
-                 begins fresh campaigns and does not resume — remove the directory \
-                 or set a different output_dir",
-                stats.display()
-            );
+        let Some(prior_runs) = prepare_output_dir(&config) else {
             return false;
-        }
+        };
 
         let image = config.image_tag();
 
@@ -148,7 +146,7 @@ impl StartCommand {
             return false;
         }
 
-        if !launch_runners(&config, &seed_dir, &mut state, &state_path) {
+        if !launch_runners(&config, &seed_dir, &prior_runs, &mut state, &state_path) {
             return false;
         }
         if let Err(e) = state.save(&state_path) {
@@ -170,9 +168,13 @@ impl StartCommand {
 
 /// Spawns all runners inside a tmux session, verifies they produce
 /// `fuzzer_stats`, and updates campaign state with PIDs.
+///
+/// Runners listed in `prior_runs` resume their own queue instead of reading
+/// `seed_dir`.
 fn launch_runners(
     config: &CampaignConfig,
     seed_dir: &Path,
+    prior_runs: &BTreeMap<u16, Option<u32>>,
     state: &mut CampaignState,
     state_path: &Path,
 ) -> bool {
@@ -186,7 +188,8 @@ fn launch_runners(
     let mut runners = Vec::new();
 
     for id in 0..config.runners {
-        let cmd = build_runner_shell_cmd(config, id, seed_dir, testcache_mb);
+        let resume = prior_runs.contains_key(&id);
+        let cmd = build_runner_shell_cmd(config, id, seed_dir, testcache_mb, resume);
         let window_name = tmux::runner_window_name(id);
 
         let result = if id == 0 {
@@ -216,6 +219,7 @@ fn launch_runners(
         session,
         &config.output_dir,
         &mut state.runners,
+        prior_runs,
         VERIFY_TIMEOUT,
     ) {
         // verify_startup has already logged the specific reason per runner
@@ -250,7 +254,7 @@ fn fail_campaign(state: &mut CampaignState, state_path: &Path) {
 ///
 /// When the user omits `seed_dir` from the config, AFL++ still requires `-i`
 /// pointing to a non-empty directory.
-fn ensure_seed_dir(config: &CampaignConfig) -> std::io::Result<PathBuf> {
+fn ensure_seed_dir(config: &CampaignConfig) -> io::Result<PathBuf> {
     if let Some(dir) = &config.seed_dir {
         return Ok(dir.clone());
     }
@@ -262,18 +266,90 @@ fn ensure_seed_dir(config: &CampaignConfig) -> std::io::Result<PathBuf> {
     Ok(seed_dir)
 }
 
-/// Returns the path of the first runner `fuzzer_stats` already present under
-/// `output_dir`, indicating a prior campaign's output.
+/// Readies `output_dir` for launch: reports which runners resume, refuses a
+/// directory a live afl-fuzz still holds, and removes a stale Nyx workdir.
 ///
-/// `start` begins fresh campaigns only. A leftover `fuzzer_stats` would make
-/// `verify_startup` read a stale PID and wrongly report a runner as started, so
-/// its presence is rejected up front. Resuming an existing output dir is not yet
-/// supported. AFL++ writes each runner's output to `output_dir/<id>` (see
-/// `RunnerState::name`).
-fn existing_campaign_runner(output_dir: &Path, runners: u16) -> Option<PathBuf> {
+/// Returns the prior runs to resume (see `prior_runs`), or `None` when the
+/// directory is unusable.
+fn prepare_output_dir(config: &CampaignConfig) -> Option<BTreeMap<u16, Option<u32>>> {
+    let prior_runs = prior_runs(&config.output_dir, config.runners);
+    if !prior_runs.is_empty() {
+        log::info!(
+            "output_dir holds a prior campaign; resuming {} of {} runners \
+             from their queues (seed_dir is not re-imported)",
+            prior_runs.len(),
+            config.runners
+        );
+    }
+
+    // Runners start or resume into output_dir and its Nyx workdir is recreated,
+    // so refuse while a prior campaign's afl-fuzz still holds it.
+    if let Some(dir) = live_runner_dir(&config.output_dir) {
+        log::error!(
+            "output_dir is in use: an afl-fuzz still holds {}; \
+             stop that campaign first",
+            dir.display()
+        );
+        return None;
+    }
+    if let Err(e) = remove_stale_nyx_workdir(&config.output_dir) {
+        log::error!("failed to remove stale Nyx workdir: {e}");
+        return None;
+    }
+    Some(prior_runs)
+}
+
+/// Returns a runner directory under `output_dir` that a live afl-fuzz holds.
+///
+/// afl-fuzz keeps an exclusive `flock` on its output directory for its lifetime
+/// (`handle_existing_out_dir`), so failing to take one means a prior campaign
+/// is still running here. The probe's lock is released on return.
+fn live_runner_dir(output_dir: &Path) -> Option<PathBuf> {
+    fs::read_dir(output_dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .find(|path| is_flocked(path))
+}
+
+/// Returns `true` if another process holds a `flock` on `path`.
+fn is_flocked(path: &Path) -> bool {
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    // SAFETY: flock only takes a valid open fd; the lock dies with `file`.
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    rc != 0 && io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock
+}
+
+/// Removes the Nyx `workdir` a prior run left under `output_dir`.
+///
+/// The primary wipes and recreates it anyway, but a secondary takes an existing
+/// snapshot as the primary being ready (libnyx `wait_for_workdir` only checks
+/// the files exist) and boots QEMU into the directory being wiped. Removing it
+/// up front makes secondaries wait for the new primary as on a fresh start.
+fn remove_stale_nyx_workdir(output_dir: &Path) -> io::Result<()> {
+    match fs::remove_dir_all(output_dir.join("workdir")) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
+/// Returns the runners under `output_dir` with a prior run to resume, mapped to
+/// the `fuzzer_pid` their leftover `fuzzer_stats` records.
+///
+/// AFL++ writes `fuzzer_stats` to `output_dir/<id>` (see `RunnerState::name`)
+/// only once calibration finished and the queue is populated, and keeps it
+/// across an in-place resume, so its presence is the resume signal. The recorded
+/// PID lets `verify_startup` tell that stale copy from the one this launch writes.
+fn prior_runs(output_dir: &Path, runners: u16) -> BTreeMap<u16, Option<u32>> {
     (0..runners)
-        .map(|id| output_dir.join(id.to_string()).join("fuzzer_stats"))
-        .find(|p| p.exists())
+        .filter_map(|id| {
+            let stats = output_dir.join(id.to_string()).join("fuzzer_stats");
+            stats.exists().then(|| (id, read_fuzzer_pid(&stats)))
+        })
+        .collect()
 }
 
 /// Polls for `fuzzer_stats` files to confirm all runners have started,
@@ -283,13 +359,16 @@ fn existing_campaign_runner(output_dir: &Path, runners: u16) -> Option<PathBuf> 
 /// which under Nyx can take minutes for a large corpus. A runner whose window
 /// dies before producing `fuzzer_stats` is reported as a failure immediately.
 /// If `timeout` fires while windows are still alive, the campaign is marked
-/// running anyway as the runners are calibrating a large corpus. `execute`
-/// rejects a pre-populated `output_dir` up front (see `existing_campaign_runner`),
-/// so a `fuzzer_stats` appearing here always belongs to this run.
+/// running anyway as the runners are calibrating a large corpus. A runner in
+/// `prior_runs` keeps the previous run's `fuzzer_stats` until AFL++ rewrites it
+/// after calibration, so its file counts only once the PID differs from the
+/// recorded one. Should the OS hand the new afl-fuzz that same PID, the runner
+/// merely takes the alive-on-deadline path above.
 fn verify_startup(
     session: &str,
     output_dir: &Path,
     runners: &mut [RunnerState],
+    prior_runs: &BTreeMap<u16, Option<u32>>,
     timeout: Duration,
 ) -> bool {
     let deadline = Instant::now() + timeout;
@@ -301,10 +380,10 @@ fn verify_startup(
                 continue;
             }
             let stats_path = output_dir.join(runner.name()).join("fuzzer_stats");
-            if let Some(pid) = read_fuzzer_pid(&stats_path) {
-                runner.pid = Some(pid);
-            } else {
-                all_ready = false;
+            let stale_pid = prior_runs.get(&runner.id).copied().flatten();
+            match read_fuzzer_pid(&stats_path) {
+                Some(pid) if Some(pid) != stale_pid => runner.pid = Some(pid),
+                _ => all_ready = false,
             }
         }
 
@@ -497,11 +576,15 @@ fn testcache_size_mb() -> Option<u64> {
 }
 
 /// Builds the full shell command string for a single runner to be run by tmux.
+///
+/// With `resume`, the runner gets `-i -` (AFL++ in-place resume): it reloads
+/// its own `output_dir/<id>/queue` and `seed_dir` is not re-imported.
 fn build_runner_shell_cmd(
     config: &CampaignConfig,
     id: u16,
     seed_dir: &Path,
     testcache_mb: Option<u64>,
+    resume: bool,
 ) -> String {
     let afl_fuzz = config.aflpp_path.join("afl-fuzz");
     // -L (MOpt) is incompatible with custom mutators; runner_strategy skips it
@@ -525,12 +608,18 @@ fn build_runner_shell_cmd(
         .map(|(k, v)| format!("{}={}", k, shell_quote(v)))
         .collect();
 
+    let input_dir = if resume {
+        "-".to_string()
+    } else {
+        shell_quote(&seed_dir.display().to_string())
+    };
+
     parts.push("exec".to_string());
     parts.push(shell_quote(&afl_fuzz.display().to_string()));
     parts.extend([
         "-Y".to_string(),
         "-i".to_string(),
-        shell_quote(&seed_dir.display().to_string()),
+        input_dir,
         "-o".to_string(),
         shell_quote(&config.output_dir.display().to_string()),
         if id == 0 { "-M" } else { "-S" }.to_string(),
@@ -647,10 +736,44 @@ mod tests {
             "no-such-session",
             dir.path(),
             &mut runners,
+            &BTreeMap::new(),
             Duration::from_secs(5),
         ));
         assert_eq!(runners[0].pid, Some(42));
         assert_eq!(runners[1].pid, Some(42));
+    }
+
+    #[test]
+    fn verify_startup_ignores_stale_fuzzer_stats_until_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner_dir = dir.path().join("0");
+        fs::create_dir_all(&runner_dir).unwrap();
+        let stats = runner_dir.join("fuzzer_stats");
+        fs::write(&stats, "fuzzer_pid : 42\n").unwrap();
+        let prior_runs = BTreeMap::from([(0, Some(42))]);
+        let mut runners = vec![RunnerState { id: 0, pid: None }];
+
+        // The prior run's PID is still there, so the runner is not started
+        // (and with no live session the deadline path reports failure).
+        assert!(!verify_startup(
+            "no-such-session",
+            dir.path(),
+            &mut runners,
+            &prior_runs,
+            Duration::from_millis(1),
+        ));
+        assert!(runners[0].pid.is_none());
+
+        // AFL++ rewrote fuzzer_stats with its own PID.
+        fs::write(&stats, "fuzzer_pid : 43\n").unwrap();
+        assert!(verify_startup(
+            "no-such-session",
+            dir.path(),
+            &mut runners,
+            &prior_runs,
+            Duration::from_millis(1),
+        ));
+        assert_eq!(runners[0].pid, Some(43));
     }
 
     #[test]
@@ -664,30 +787,81 @@ mod tests {
             "no-such-session",
             dir.path(),
             &mut runners,
+            &BTreeMap::new(),
             Duration::from_millis(1),
         ));
         assert!(runners[0].pid.is_none());
     }
 
     #[test]
-    fn existing_campaign_runner_detects_leftover_fuzzer_stats() {
+    fn live_runner_dir_detects_flocked_runner_dir() {
         let dir = tempfile::tempdir().unwrap();
-        // A prior run of the secondary left fuzzer_stats behind.
-        let runner_dir = dir.path().join("1");
-        fs::create_dir_all(&runner_dir).unwrap();
-        fs::write(runner_dir.join("fuzzer_stats"), "fuzzer_pid : 7\n").unwrap();
+        let runner_dir = dir.path().join("0");
+        fs::create_dir(&runner_dir).unwrap();
+        assert_eq!(live_runner_dir(dir.path()), None);
 
-        assert_eq!(
-            existing_campaign_runner(dir.path(), 2),
-            Some(runner_dir.join("fuzzer_stats"))
-        );
+        // Hold the lock the way afl-fuzz does for its lifetime.
+        let held = fs::File::open(&runner_dir).unwrap();
+        // SAFETY: flock on a valid open fd.
+        let rc = unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(rc, 0);
+        assert_eq!(live_runner_dir(dir.path()), Some(runner_dir.clone()));
+
+        drop(held);
+        assert_eq!(live_runner_dir(dir.path()), None);
     }
 
     #[test]
-    fn existing_campaign_runner_none_for_fresh_output_dir() {
+    fn live_runner_dir_none_for_missing_output_dir() {
+        assert_eq!(live_runner_dir(Path::new("/no/such/output_dir")), None);
+    }
+
+    #[test]
+    fn remove_stale_nyx_workdir_removes_prior_workdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path().join("workdir");
+        fs::create_dir_all(workdir.join("snapshot")).unwrap();
+        // libnyx leaves symlinks into /dev/shm that no longer resolve.
+        std::os::unix::fs::symlink("/dev/shm/nyx_gone/input", workdir.join("payload_0")).unwrap();
+
+        remove_stale_nyx_workdir(dir.path()).unwrap();
+        assert!(!workdir.exists());
+    }
+
+    #[test]
+    fn remove_stale_nyx_workdir_is_noop_without_workdir() {
+        let dir = tempfile::tempdir().unwrap();
+        remove_stale_nyx_workdir(dir.path()).unwrap();
+        remove_stale_nyx_workdir(&dir.path().join("missing")).unwrap();
+    }
+
+    #[test]
+    fn prior_runs_maps_leftover_fuzzer_stats_to_their_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        // The secondary left fuzzer_stats behind; the primary never got that far.
+        let runner_dir = dir.path().join("1");
+        fs::create_dir_all(&runner_dir).unwrap();
+        fs::write(runner_dir.join("fuzzer_stats"), "fuzzer_pid : 7\n").unwrap();
+        fs::create_dir_all(dir.path().join("0")).unwrap();
+
+        assert_eq!(prior_runs(dir.path(), 2), BTreeMap::from([(1, Some(7))]));
+    }
+
+    #[test]
+    fn prior_runs_resumes_fuzzer_stats_without_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner_dir = dir.path().join("0");
+        fs::create_dir_all(&runner_dir).unwrap();
+        fs::write(runner_dir.join("fuzzer_stats"), "start_time : 1\n").unwrap();
+
+        assert_eq!(prior_runs(dir.path(), 1), BTreeMap::from([(0, None)]));
+    }
+
+    #[test]
+    fn prior_runs_empty_for_fresh_output_dir() {
         let dir = tempfile::tempdir().unwrap();
         // Empty output dir (and one with only the synthesized .seeds) is fresh.
-        assert_eq!(existing_campaign_runner(dir.path(), 4), None);
+        assert!(prior_runs(dir.path(), 4).is_empty());
     }
 
     #[test]
@@ -869,11 +1043,12 @@ mod tests {
         let config = sample_config(dir.path());
         let seed_dir = dir.path().join("seeds");
 
-        let cmd = build_runner_shell_cmd(&config, 0, &seed_dir, Some(500));
+        let cmd = build_runner_shell_cmd(&config, 0, &seed_dir, Some(500), false);
 
         assert!(cmd.contains("exec"));
         assert!(cmd.contains("afl-fuzz"));
         assert!(cmd.contains("-Y"));
+        assert!(cmd.contains(&format!("-i '{}'", seed_dir.display())));
         assert!(cmd.contains("-M"));
         assert!(cmd.contains("AFL_FINAL_SYNC='1'"));
         assert!(cmd.contains("AFL_TESTCACHE_SIZE='500'"));
@@ -887,11 +1062,23 @@ mod tests {
         let config = sample_config(dir.path());
         let seed_dir = dir.path().join("seeds");
 
-        let cmd = build_runner_shell_cmd(&config, 1, &seed_dir, None);
+        let cmd = build_runner_shell_cmd(&config, 1, &seed_dir, None, false);
 
         assert!(cmd.contains("-S"));
         assert!(!cmd.contains("-M"));
         assert!(!cmd.contains("AFL_FINAL_SYNC"));
+    }
+
+    #[test]
+    fn build_runner_shell_cmd_resume_reloads_own_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = sample_config(dir.path());
+        let seed_dir = dir.path().join("seeds");
+
+        let cmd = build_runner_shell_cmd(&config, 0, &seed_dir, None, true);
+
+        assert!(cmd.contains("-i - -o"));
+        assert!(!cmd.contains(&seed_dir.display().to_string()));
     }
 
     #[test]
@@ -923,7 +1110,7 @@ AFL_IMPORT_FIRST = "0"
         let config = CampaignConfig::load(&config_path).unwrap();
         let seed_dir = dir.path().join("seeds");
 
-        let cmd = build_runner_shell_cmd(&config, 1, &seed_dir, None);
+        let cmd = build_runner_shell_cmd(&config, 1, &seed_dir, None, false);
 
         // Strategy sets AFL_IMPORT_FIRST='1' (runners < 16) first, user override
         // AFL_IMPORT_FIRST='0' last. Both appear; shell uses the last assignment.
