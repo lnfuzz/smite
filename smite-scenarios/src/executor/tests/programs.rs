@@ -255,16 +255,16 @@ pub struct SentFundingCreated {
 }
 
 /// Creates a funding transaction, broadcasts it, and sends `funding_created`
-/// signed with the opener's funding key.
+/// signed with the opener's funding key, with no malformation.
 pub fn send_funding_created(b: &mut ProgramBuilder) -> SentFundingCreated {
     let tx = create_funding_tx(b);
     b.append(Operation::BroadcastTransaction, &[tx.tx]);
 
-    send_funding_created_with(b, tx, tx.opener_privkey)
+    send_funding_created_with(b, tx, tx.opener_privkey, None)
 }
 
 /// Sends `funding_created` for `tx`, signed with the `PrivateKey` variable
-/// `signing_privkey`.
+/// `signing_privkey`, applying `malformation` to its computed fields.
 ///
 /// The `temporary_channel_id` is the one `announced_open_channel` and
 /// `sample_funding_negotiation` use, so that the executor finds the negotiation
@@ -273,10 +273,11 @@ pub fn send_funding_created_with(
     b: &mut ProgramBuilder,
     tx: FundingTxVars,
     signing_privkey: usize,
+    malformation: Option<Malformation>,
 ) -> SentFundingCreated {
     let temporary_channel_id = b.append(Operation::LoadChannelId([0xbb; 32]), &[]);
     let sent = b.append(
-        Operation::SendFundingCreated,
+        Operation::SendFundingCreated { malformation },
         &[tx.tx, signing_privkey, temporary_channel_id],
     );
 
@@ -291,6 +292,16 @@ pub fn send_funding_created_with(
 pub fn send_funding_created_program() -> Program {
     let mut b = ProgramBuilder::new();
     send_funding_created(&mut b);
+
+    b.build()
+}
+
+/// A program that sends `funding_created` with `malformation` applied, without
+/// awaiting `funding_signed`.
+pub fn malformed_send_funding_created_program(malformation: Malformation) -> Program {
+    let mut b = ProgramBuilder::new();
+    let tx = create_funding_tx(&mut b);
+    send_funding_created_with(&mut b, tx, tx.opener_privkey, Some(malformation));
 
     b.build()
 }

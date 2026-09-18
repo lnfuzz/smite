@@ -138,6 +138,25 @@ pub enum BoltError {
     },
 }
 
+/// A message field whose encoded bytes can be overwritten before the message
+/// is sent.
+///
+/// These identify fields for which the IR can only construct valid values, so
+/// invalid values can only be put on the wire by overwriting their encoded
+/// bytes. All other fields are reachable through the IR's parameters.
+///
+/// Offsets include the 2-byte message type prefix and therefore index directly
+/// into the encoded message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MalformableField {
+    /// Field name to overwrite.
+    pub name: &'static str,
+    /// Byte offset in the encoded message, including the message type prefix.
+    pub offset: u16,
+    /// Field length in bytes.
+    pub len: u16,
+}
+
 /// A BOLT message type number that displays as `name(type)`, e.g.
 /// `open_channel(32)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -262,6 +281,22 @@ impl MessageType {
             Self::ANNOUNCEMENT_SIGNATURES => "announcement_signatures",
             Self::GOSSIP_TIMESTAMP_FILTER => "gossip_timestamp_filter",
             _ => "unknown",
+        }
+    }
+
+    /// Returns the fields of this message type whose encoded bytes may be
+    /// overwritten before the message is sent.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this message type has no malformable field table. This indicates
+    /// that a malformation was attached to a message type that is not supported
+    /// here.
+    #[must_use]
+    pub fn malformable_fields(self) -> &'static [MalformableField] {
+        match self {
+            Self::FUNDING_CREATED => FundingCreated::MALFORMABLE_FIELDS,
+            _ => unreachable!("no malformable field table for message type {self}"),
         }
     }
 }
