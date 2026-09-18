@@ -10,6 +10,7 @@
 //! - [`bolt`] - BOLT message encoding and decoding.
 //! - [`channel_tx`] - BOLT 3 channel transaction construction (funding and commitment).
 //! - [`noise`] - BOLT 8 `Noise_XK` encrypted transport.
+//! - [`onion`] - BOLT 4 onion routing (Sphinx) packets.
 //! - [`oracles`] - Protocol invariant checks.
 //! - [`pending_channel`] - BOLT 2 channel negotiation state.
 //! - [`process`] - Managed subprocess utilities.
@@ -23,6 +24,7 @@ pub mod channel_tx;
 pub mod noise;
 #[cfg(feature = "nyx")]
 pub mod nyx_log;
+pub mod onion;
 pub mod oracles;
 pub mod pending_channel;
 pub mod process;
