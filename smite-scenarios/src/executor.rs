@@ -11,7 +11,7 @@ use smite::bolt::{
     AcceptChannel, AnnouncementSignatures, ChannelAnnouncement, ChannelId, ChannelReady,
     ChannelReadyTlvs, ChannelUpdate, Features, FromMessage, FundingCreated, FundingSigned, Message,
     MessageType, NodeAnnouncement, OpenChannel, OpenChannelTlvs, Pong, ShortChannelId, Shutdown,
-    TemporaryChannelId,
+    TemporaryChannelId, Warning,
 };
 use smite::channel_tx::{
     ChannelConfig, ChannelPartyConfig, ChannelState, FundingTransaction, HolderIdentity, Side,
@@ -27,7 +27,7 @@ use smite::violation::Violation;
 use super::targets::TargetRpc;
 use smite_ir::operation::AcceptChannelField;
 use smite_ir::{Operation, Program, Variable, VariableType};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 /// The timeout used when receiving messages from the target. We will wait this
@@ -234,6 +234,34 @@ pub enum ExecuteError {
     Violation(#[from] Violation),
 }
 
+/// Negotiations we failed with `error` before receiving their
+/// `accept_channel`, oldest first per `temporary_channel_id`. The target
+/// handles our `open_channel` before the `error`, so the replies may still
+/// arrive and are checked against the negotiation they answer.
+#[derive(Default)]
+struct OrphanedAccepts(HashMap<TemporaryChannelId, VecDeque<PendingChannel>>);
+
+impl OrphanedAccepts {
+    /// Expects a reply to the failed negotiation `pending`.
+    fn record(&mut self, pending: PendingChannel) {
+        self.0
+            .entry(pending.open_channel.temporary_channel_id)
+            .or_default()
+            .push_back(pending);
+    }
+
+    /// Takes the oldest failed negotiation still expecting a reply for
+    /// `temporary_channel_id`, if any.
+    fn take(&mut self, temporary_channel_id: TemporaryChannelId) -> Option<PendingChannel> {
+        let failed = self.0.get_mut(&temporary_channel_id)?;
+        let pending = failed.pop_front();
+        if failed.is_empty() {
+            self.0.remove(&temporary_channel_id);
+        }
+        pending
+    }
+}
+
 /// Executes IR programs against a target over an established connection.
 pub struct Executor<C, B, R> {
     /// Connection used to send and receive Lightning messages.
@@ -253,6 +281,8 @@ pub struct Executor<C, B, R> {
     /// `temporary_channel_id`, so the funding flow can build commitments from
     /// the parameters actually sent on the wire.
     negotiations: HashMap<TemporaryChannelId, PendingChannel>,
+    /// Negotiations failed by a sent `error` whose reply may still arrive.
+    orphaned_accepts: OrphanedAccepts,
     /// Transactions stored outside Bitcoin Core's mempool, typically because they
     /// were rejected by mempool policy, to be included in the next `MineBlocks`
     /// operation. Each is stored as `(txid, raw_hex)`: re-signing the same
@@ -279,6 +309,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
             context,
             channel_states: HashMap::new(),
             negotiations: HashMap::new(),
+            orphaned_accepts: OrphanedAccepts::default(),
             private_mempool: Vec::new(),
             unmined_txids: HashSet::new(),
             mined_txids: HashSet::new(),
@@ -494,6 +525,31 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     Some(Variable::SentShutdown)
                 }
 
+                Operation::SendError => {
+                    let err = build_error(&variables, &instr.inputs);
+                    record_send_error(
+                        &mut self.negotiations,
+                        &mut self.orphaned_accepts,
+                        err.channel_id,
+                    );
+                    let encoded = Message::Error(err).encode();
+                    log::debug!("[{:?}] SendError: {} bytes", start.elapsed(), encoded.len());
+                    self.conn.send_message(&encoded)?;
+                    None
+                }
+
+                Operation::SendWarning => {
+                    let warning = build_warning(&variables, &instr.inputs);
+                    let encoded = Message::Warning(warning).encode();
+                    log::debug!(
+                        "[{:?}] SendWarning: {} bytes",
+                        start.elapsed(),
+                        encoded.len()
+                    );
+                    self.conn.send_message(&encoded)?;
+                    None
+                }
+
                 Operation::RecvAcceptChannel => {
                     consume_affine(
                         &mut variables,
@@ -503,12 +559,19 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     log::debug!("[{:?}] RecvAcceptChannel: waiting", start.elapsed());
                     let ac: AcceptChannel = recv_bolt(&mut self.conn, RECV_IDLE_TIMEOUT)?;
                     log::debug!("[{:?}] RecvAcceptChannel: received", start.elapsed());
+                    // A reply to a negotiation we failed with `error` is checked
+                    // against it but not recorded: the target has forgotten it.
+                    let orphan = self.orphaned_accepts.take(ac.temporary_channel_id);
                     AcceptChannelOracle.evaluate(&AcceptChannelContext {
                         accept_channel: &ac,
-                        negotiation: self.negotiations.get(&ac.temporary_channel_id),
+                        negotiation: orphan
+                            .as_ref()
+                            .or_else(|| self.negotiations.get(&ac.temporary_channel_id)),
                         negotiated_features: &self.context.negotiated_features,
                     })?;
-                    record_recv_accept_channel(&mut self.negotiations, &ac);
+                    if orphan.is_none() {
+                        record_recv_accept_channel(&mut self.negotiations, &ac);
+                    }
                     Some(Variable::AcceptChannel(ac))
                 }
 
@@ -953,6 +1016,22 @@ fn build_shutdown(variables: &[Option<Variable>], inputs: &[usize]) -> Shutdown 
     Shutdown::for_channel(channel_id, scriptpubkey)
 }
 
+/// Builds an `Error` message from 2 input variables (wire order).
+fn build_error(variables: &[Option<Variable>], inputs: &[usize]) -> smite::bolt::Error {
+    smite::bolt::Error {
+        channel_id: resolve_channel_id(variables, inputs[0]),
+        data: resolve_bytes(variables, inputs[1]).to_vec(),
+    }
+}
+
+/// Builds a `Warning` message from 2 input variables (wire order).
+fn build_warning(variables: &[Option<Variable>], inputs: &[usize]) -> Warning {
+    Warning {
+        channel_id: resolve_channel_id(variables, inputs[0]),
+        data: resolve_bytes(variables, inputs[1]).to_vec(),
+    }
+}
+
 /// Builds a signed `ChannelAnnouncement` from 7 input variables.
 fn build_channel_announcement(
     variables: &[Option<Variable>],
@@ -1306,6 +1385,31 @@ fn record_recv_funding_signed(
         .get_mut(&funding_signed.channel_id)
         .expect("FundingSignedOracle guaranteed this channel_id exists")
         .funding_signed_received = true;
+}
+
+/// Forgets the negotiations failed by a sent `error`, as the target does, so
+/// negotiating their `temporary_channel_id` again is not reported as reuse.
+/// `ChannelId::ALL` fails every negotiation.
+///
+/// The target answers messages in order, so a reply not yet received is still
+/// in flight. Its negotiation moves to `orphaned_accepts` so that the reply is
+/// neither reported as unknown nor paired with a later `open_channel` reusing
+/// the id.
+fn record_send_error(
+    negotiations: &mut HashMap<TemporaryChannelId, PendingChannel>,
+    orphaned_accepts: &mut OrphanedAccepts,
+    channel_id: ChannelId,
+) {
+    let failed: Vec<PendingChannel> = if channel_id == ChannelId::ALL {
+        negotiations.drain().map(|(_, pending)| pending).collect()
+    } else {
+        negotiations.remove(&channel_id).into_iter().collect()
+    };
+    for pending in failed {
+        if pending.accept_channel.is_none() {
+            orphaned_accepts.record(pending);
+        }
+    }
 }
 
 /// Extracts a field from a parsed `accept_channel` message.

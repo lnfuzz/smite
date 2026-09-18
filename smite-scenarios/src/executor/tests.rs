@@ -498,6 +498,130 @@ fn execute_recv_accept_channel_rejects_reuse_before_funding() {
     ));
 }
 
+// The target forgets a negotiation we fail with `error`, so negotiating its
+// `temporary_channel_id` again is not reuse.
+#[test]
+fn execute_send_error_allows_temporary_channel_id_reuse() {
+    let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
+
+    for error_channel_id in [temporary_channel_id, ChannelId::ALL] {
+        let mut b = ProgramBuilder::new();
+        let negotiated = negotiate_channel(&mut b, &announced_open_channel());
+        send_error(&mut b, error_channel_id);
+        let resent = b.append(
+            Operation::SendOpenChannel,
+            &[negotiated.open_channel.vars.built],
+        );
+        b.append(Operation::RecvAcceptChannel, &[resent]);
+
+        let mut fx = Fixture::new()
+            .queue(&Message::AcceptChannel(sample_accept_channel()))
+            .queue(&Message::AcceptChannel(sample_accept_channel()));
+        fx.run(&b.build());
+
+        let pending = fx.negotiation(&temporary_channel_id);
+        assert!(pending.accept_channel.is_some());
+    }
+}
+
+#[test]
+fn execute_send_error_for_other_channel_keeps_reuse_violation() {
+    let mut b = ProgramBuilder::new();
+    let negotiated = negotiate_channel(&mut b, &announced_open_channel());
+    send_error(&mut b, ChannelId::new([0xcc; 32]));
+    let resent = b.append(
+        Operation::SendOpenChannel,
+        &[negotiated.open_channel.vars.built],
+    );
+    b.append(Operation::RecvAcceptChannel, &[resent]);
+
+    let err = Fixture::new()
+        .queue(&Message::AcceptChannel(sample_accept_channel()))
+        .queue(&Message::AcceptChannel(sample_accept_channel()))
+        .run_err(&b.build());
+
+    let ExecuteError::Violation(Violation::InvalidAcceptChannel(_, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert!(reason.contains("temporary_channel_id reuse"));
+}
+
+// An `accept_channel` still in flight when we fail its negotiation must not be
+// reported as unknown, nor paired with a later `open_channel` reusing the id.
+#[test]
+fn execute_recv_accept_channel_in_flight_when_error_sent() {
+    let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
+
+    // First open_channel: funding_satoshis = 100_000, failed before its reply.
+    // Second open_channel: same temporary_channel_id, funding_satoshis = 200_000.
+    let mut b = ProgramBuilder::new();
+    let first = send_open_channel(&mut b, &announced_open_channel());
+    send_error(&mut b, temporary_channel_id);
+    let mut second = first.vars;
+    second.funding_satoshis = b.append(Operation::LoadAmount(200_000), &[]);
+    second.built = b.append(Operation::BuildOpenChannel, &second.build_inputs());
+    let resent = b.append(Operation::SendOpenChannel, &[second.built]);
+    b.append(Operation::RecvAcceptChannel, &[first.sent]);
+    b.append(Operation::RecvAcceptChannel, &[resent]);
+
+    let mut fx = Fixture::new()
+        .queue(&Message::AcceptChannel(sample_accept_channel()))
+        .queue(&Message::AcceptChannel(sample_accept_channel()));
+    fx.run(&b.build());
+
+    let pending = fx.negotiation(&temporary_channel_id);
+    assert_eq!(pending.open_channel.funding_satoshis, 200_000);
+    assert!(pending.accept_channel.is_some());
+}
+
+// A reply to a negotiation we failed is still checked against its
+// `open_channel`: the target had to reject this one per BOLT 2.
+#[test]
+fn execute_orphaned_accept_channel_is_still_validated() {
+    let mut oc = announced_open_channel();
+    oc.message.push_msat = 99_900_000;
+
+    let mut b = ProgramBuilder::new();
+    let first = send_open_channel(&mut b, &oc);
+    send_error(&mut b, oc.message.temporary_channel_id);
+    b.append(Operation::RecvAcceptChannel, &[first.sent]);
+
+    let err = Fixture::new()
+        .queue(&Message::AcceptChannel(sample_accept_channel()))
+        .run_err(&b.build());
+
+    let ExecuteError::Violation(Violation::InvalidAcceptChannel(_, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert!(reason.contains("invalid open_channel: opener balance"));
+}
+
+// Only one in-flight reply is excused per failed negotiation. A further
+// `accept_channel` for the forgotten id is still reported as unknown.
+#[test]
+fn execute_orphaned_accept_channel_is_consumed_once() {
+    let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
+    let mut other = announced_open_channel();
+    other.message.temporary_channel_id = TemporaryChannelId::new([0xcc; 32]);
+
+    let mut b = ProgramBuilder::new();
+    let first = send_open_channel(&mut b, &announced_open_channel());
+    send_error(&mut b, temporary_channel_id);
+    b.append(Operation::RecvAcceptChannel, &[first.sent]);
+    negotiate_channel(&mut b, &other);
+
+    let err = Fixture::new()
+        .queue(&Message::AcceptChannel(sample_accept_channel()))
+        .queue(&Message::AcceptChannel(sample_accept_channel()))
+        .run_err(&b.build());
+
+    let ExecuteError::Violation(Violation::InvalidAcceptChannel(id, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*id, temporary_channel_id);
+    assert!(reason.contains("unknown temporary_channel_id"));
+}
+
 #[test]
 fn execute_records_only_first_open_channel_for_duplicate_id_before_funding() {
     let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
@@ -1117,6 +1241,46 @@ fn execute_send_shutdown_empty_scriptpubkey() {
     let sd: Shutdown = fx.sent(0);
     assert_eq!(sd.channel_id, channel_id);
     assert!(sd.scriptpubkey.is_empty());
+}
+
+#[test]
+fn execute_send_error() {
+    let channel_id = ChannelId::new([0x7a; 32]);
+    // Non-printable bytes are allowed so the fuzzer can probe the target's
+    // handling of data that violates BOLT 1's printable-ASCII requirement.
+    let data = vec![0x00, b'b', b'a', b'd', 0xff];
+
+    let mut b = ProgramBuilder::new();
+    let channel_id_var = b.append(Operation::LoadChannelId(channel_id.0), &[]);
+    let data_var = b.append(Operation::LoadBytes(data.clone()), &[]);
+    b.append(Operation::SendError, &[channel_id_var, data_var]);
+
+    let mut fx = Fixture::new();
+    fx.run(&b.build());
+
+    assert_eq!(fx.sent_len(), 1);
+    let err: smite::bolt::Error = fx.sent(0);
+    assert_eq!(err.channel_id, channel_id);
+    assert_eq!(err.data, data);
+}
+
+#[test]
+fn execute_send_warning() {
+    let channel_id = ChannelId::ALL;
+    let data = b"not channel-specific".to_vec();
+
+    let mut b = ProgramBuilder::new();
+    let channel_id_var = b.append(Operation::LoadChannelId(channel_id.0), &[]);
+    let data_var = b.append(Operation::LoadBytes(data.clone()), &[]);
+    b.append(Operation::SendWarning, &[channel_id_var, data_var]);
+
+    let mut fx = Fixture::new();
+    fx.run(&b.build());
+
+    assert_eq!(fx.sent_len(), 1);
+    let warning: Warning = fx.sent(0);
+    assert_eq!(warning.channel_id, channel_id);
+    assert_eq!(warning.data, data);
 }
 
 #[test]
