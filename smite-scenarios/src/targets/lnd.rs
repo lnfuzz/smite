@@ -347,6 +347,10 @@ impl Target for LndTarget {
     ///   a wrapping `uint64` and then tested as an `int64`, so any push above
     ///   roughly 2^63 wraps back into the non-negative range.
     ///   See: <https://github.com/lightningnetwork/lnd/pull/10765>
+    ///
+    /// - LND accepts `open_channel` with `feerate_per_kw` of 0 without
+    ///   `zero_fee_commitments`, as it enforces no lower bound on the feerate.
+    ///   See: <https://github.com/lightningnetwork/lnd/issues/11201>
     fn known_violations() -> &'static [&'static [&'static str]] {
         &[
             &["accepted invalid open_channel: open_channel does not include a channel_type"],
@@ -355,6 +359,9 @@ impl Target for LndTarget {
             &[
                 "accepted invalid open_channel: push_msat",
                 "exceeds funding amount",
+            ],
+            &[
+                "accepted invalid open_channel: feerate_per_kw must be non-zero without zero_fee_commitments",
             ],
         ]
     }

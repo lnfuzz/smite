@@ -259,6 +259,11 @@ impl Target for EclairTarget {
     ///   fee or fund the anchor outputs. This situation should be rejected
     ///   early, as required by BOLT 2.
     ///   See: <https://github.com/ACINQ/eclair/issues/3383>
+    ///
+    /// - Eclair accepts `open_channel` with `option_scid_alias` in
+    ///   `channel_type` on a channel that is to be announced, which BOLT 2
+    ///   forbids the opener from sending.
+    ///   See: <https://github.com/ACINQ/eclair/issues/3374>
     fn known_violations() -> &'static [&'static [&'static str]] {
         &[
             &[
@@ -268,6 +273,9 @@ impl Target for EclairTarget {
             &[
                 "accepted invalid open_channel: opener balance",
                 "sat cannot cover anchor cost of",
+            ],
+            &[
+                "accepted invalid open_channel: option_scid_alias requires the channel to be private",
             ],
         ]
     }

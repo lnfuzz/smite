@@ -2,19 +2,13 @@
 
 use std::time::Duration;
 
-use smite::bolt::{FeatureBit, Features, Init, InitTlvs, Message};
+use smite::bolt::{FeatureBit, Features, Init, InitTlvs, Message, REGTEST_CHAIN_HASH};
 use smite::noise::NoiseConnection;
 use smite::scenarios::ScenarioError;
 
 use super::{handshake_with_target, ping_pong};
 use crate::executor::ProgramContext;
 use crate::targets::{INITIAL_BLOCKS, Target};
-
-/// Bitcoin regtest genesis hash (in BOLT 2 network byte order).
-pub const REGTEST_CHAIN_HASH: [u8; 32] = [
-    0x06, 0x22, 0x6e, 0x46, 0x11, 0x1a, 0x0b, 0x59, 0xca, 0xaf, 0x12, 0x60, 0x43, 0xeb, 0x5b, 0xbf,
-    0x28, 0xc3, 0x4f, 0x3a, 0x5e, 0x33, 0x2a, 0x1f, 0xc7, 0xb2, 0xb7, 0x3c, 0xf1, 0x88, 0x91, 0x0f,
-];
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
