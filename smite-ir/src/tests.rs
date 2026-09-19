@@ -921,6 +921,38 @@ fn any_generator_all_is_complete() {
     assert_eq!(AnyGenerator::ALL.len(), variant_count(AnyGenerator::ALL[0]));
 }
 
+// Weighted selection must cover every generator with non-zero weight and
+// skew towards heavier ones in proportion to their weight.
+#[test]
+fn any_generator_choose_respects_weights() {
+    let mut rng = SmallRng::seed_from_u64(7);
+    let mut counts = vec![0u32; AnyGenerator::ALL.len()];
+    let rounds = 20_000;
+    for _ in 0..rounds {
+        let picked = AnyGenerator::choose(&mut rng);
+        let idx = AnyGenerator::ALL
+            .iter()
+            .position(|g| std::mem::discriminant(g) == std::mem::discriminant(&picked))
+            .expect("chosen generator is in ALL");
+        counts[idx] += 1;
+    }
+
+    let total: u32 = AnyGenerator::ALL.iter().map(Generator::weight).sum();
+    for (generator, &count) in AnyGenerator::ALL.iter().zip(&counts) {
+        let weight = generator.weight();
+        if weight == 0 {
+            assert_eq!(count, 0, "zero-weight generator must never be picked");
+            continue;
+        }
+        let expected = f64::from(rounds) * f64::from(weight) / f64::from(total);
+        let ratio = f64::from(count) / expected;
+        assert!(
+            (0.85..=1.15).contains(&ratio),
+            "generator picked {count} times, expected ~{expected:.0} (ratio {ratio:.2})"
+        );
+    }
+}
+
 // -- ShutdownScriptVariant tests --
 
 // Ensure ShutdownScriptVariant and ShutdownScriptVariant::VARIANT_COUNT stay in

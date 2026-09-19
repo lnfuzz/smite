@@ -37,7 +37,7 @@ use std::os::raw::{c_char, c_uint, c_void};
 use std::slice;
 
 use rand::rngs::SmallRng;
-use rand::{RngExt, SeedableRng, seq::IteratorRandom};
+use rand::{RngExt, SeedableRng};
 
 use smite_ir::generators::AnyGenerator;
 use smite_ir::minimizers::{CommonSubexpressionEliminator, DeadCodeEliminator, Minimizer};
@@ -72,15 +72,11 @@ impl MutatorState {
         }
     }
 
-    /// Generates a fresh program from scratch by randomly delegating to one of
-    /// the registered generators.
+    /// Generates a fresh program from scratch by delegating to one of the
+    /// registered generators, picked by weight.
     fn generate_fresh(&mut self) -> Program {
         let mut builder = ProgramBuilder::new();
-        AnyGenerator::ALL
-            .iter()
-            .choose(&mut self.rng)
-            .expect("AnyGenerator::ALL is non-empty")
-            .generate(&mut builder, &mut self.rng);
+        AnyGenerator::choose(&mut self.rng).generate(&mut builder, &mut self.rng);
         self.last_sequence.clear();
         self.last_sequence.push("fresh");
         builder.build()
@@ -114,11 +110,8 @@ impl MutatorState {
                     "instr-reorder"
                 }
                 4 => {
-                    let generator = *AnyGenerator::ALL
-                        .iter()
-                        .choose(&mut self.rng)
-                        .expect("AnyGenerator::ALL is non-empty");
-                    let mutator = GeneratorInsertionMutator::new(generator);
+                    let mutator =
+                        GeneratorInsertionMutator::new(AnyGenerator::choose(&mut self.rng));
                     mutator.mutate(program, &mut self.rng);
                     "gen-insert"
                 }

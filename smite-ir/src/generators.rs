@@ -22,13 +22,23 @@ pub use node_announcement::NodeAnnouncementGenerator;
 pub use open_channel::OpenChannelGenerator;
 
 use rand::Rng;
+use rand::seq::IndexedRandom;
 
 use super::builder::ProgramBuilder;
+
+/// Weight of a generator that does not override [`Generator::weight`].
+pub const DEFAULT_WEIGHT: u32 = 10;
 
 /// A generator that emits instructions into a `ProgramBuilder`.
 pub trait Generator {
     /// Emits instructions for this generator's protocol interaction.
     fn generate(&self, builder: &mut ProgramBuilder, rng: &mut impl Rng);
+
+    /// Relative pick weight for [`AnyGenerator::choose`]; 0 disables.
+    /// Lower it for generators that should be picked less often.
+    fn weight(&self) -> u32 {
+        DEFAULT_WEIGHT
+    }
 }
 
 /// A list of all the available generators. Any generators included
@@ -55,6 +65,18 @@ impl AnyGenerator {
         Self::ChannelReady(ChannelReadyGenerator),
         Self::FundingFlow(FundingFlowGenerator),
     ];
+
+    /// Picks a generator from `ALL` with probability proportional to its
+    /// [`Generator::weight`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if every generator reports a weight of zero.
+    pub fn choose(rng: &mut impl Rng) -> Self {
+        *Self::ALL
+            .choose_weighted(rng, Generator::weight)
+            .expect("at least one generator must have non-zero weight")
+    }
 }
 
 impl Generator for AnyGenerator {
@@ -67,6 +89,18 @@ impl Generator for AnyGenerator {
             Self::FundingCreated(generator) => generator.generate(builder, rng),
             Self::ChannelReady(generator) => generator.generate(builder, rng),
             Self::FundingFlow(generator) => generator.generate(builder, rng),
+        }
+    }
+
+    fn weight(&self) -> u32 {
+        match self {
+            Self::ChannelAnnouncement(generator) => generator.weight(),
+            Self::ChannelUpdate(generator) => generator.weight(),
+            Self::NodeAnnouncement(generator) => generator.weight(),
+            Self::OpenChannel(generator) => generator.weight(),
+            Self::FundingCreated(generator) => generator.weight(),
+            Self::ChannelReady(generator) => generator.weight(),
+            Self::FundingFlow(generator) => generator.weight(),
         }
     }
 }
