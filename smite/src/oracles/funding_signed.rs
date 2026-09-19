@@ -133,7 +133,7 @@ mod tests {
             funding_privkey: secret_key(1),
         };
 
-        ChannelState::new(config, holder, commitment, true, false, false)
+        ChannelState::new(config, holder, commitment, true, false, false, None, None)
     }
 
     /// Valid `funding_signed` message for testing.

@@ -169,6 +169,23 @@ pub struct ChannelState {
     /// Whether a `funding_signed` has already been accepted for this channel.
     /// Any later one means the target re-signed a channel it already funded.
     pub funding_signed_received: bool,
+    /// Whether the peer has already responded to our `shutdown`. A target may
+    /// ignore any `shutdown` after the first, so a later `RecvShutdown` for
+    /// this channel is a no-op.
+    pub counterparty_shutdown_received: bool,
+    /// The `upfront_shutdown_script` we committed to in our `open_channel`, if
+    /// any.
+    pub holder_upfront_shutdown_script: Option<Vec<u8>>,
+    /// The `upfront_shutdown_script` the peer committed to in its
+    /// `accept_channel`, if any. When set, the peer's `shutdown` must carry this
+    /// exact `scriptpubkey`.
+    pub counterparty_upfront_shutdown_script: Option<Vec<u8>>,
+}
+
+/// Returns `true` if a `shutdown` carrying `scriptpubkey` keeps the commitment
+/// to `upfront`. A missing or empty `upfront` commits to nothing.
+fn verify_upfront_shutdown_script(upfront: Option<&[u8]>, scriptpubkey: &[u8]) -> bool {
+    upfront.is_none_or(|upfront| upfront.is_empty() || upfront == scriptpubkey)
 }
 
 impl Side {
@@ -192,6 +209,7 @@ impl HolderIdentity {
 impl ChannelState {
     /// Constructs a channel state with both next per-commitment points unknown.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: ChannelConfig,
         holder: HolderIdentity,
@@ -199,6 +217,8 @@ impl ChannelState {
         is_funding_outpoint_valid: bool,
         was_funding_mined_prematurely: bool,
         sent_invalid_signature: bool,
+        holder_upfront_shutdown_script: Option<Vec<u8>>,
+        counterparty_upfront_shutdown_script: Option<Vec<u8>>,
     ) -> Self {
         Self {
             config,
@@ -210,7 +230,36 @@ impl ChannelState {
             was_funding_mined_prematurely,
             sent_invalid_signature,
             funding_signed_received: false,
+            counterparty_shutdown_received: false,
+            holder_upfront_shutdown_script,
+            counterparty_upfront_shutdown_script,
         }
+    }
+
+    /// Returns `true` if our `shutdown` carrying `scriptpubkey` keeps the
+    /// `upfront_shutdown_script` we committed to, which only binds us if
+    /// `option_upfront_shutdown_script` was negotiated.
+    #[must_use]
+    pub fn verify_holder_upfront_shutdown_script(
+        &self,
+        scriptpubkey: &[u8],
+        negotiated_features: &Features,
+    ) -> bool {
+        !negotiated_features.supports_feature(Features::OPTION_UPFRONT_SHUTDOWN_SCRIPT)
+            || verify_upfront_shutdown_script(
+                self.holder_upfront_shutdown_script.as_deref(),
+                scriptpubkey,
+            )
+    }
+
+    /// Returns `true` if the counterparty's `shutdown` carrying `scriptpubkey`
+    /// keeps the `upfront_shutdown_script` it committed to.
+    #[must_use]
+    pub fn verify_counterparty_upfront_shutdown_script(&self, scriptpubkey: &[u8]) -> bool {
+        verify_upfront_shutdown_script(
+            self.counterparty_upfront_shutdown_script.as_deref(),
+            scriptpubkey,
+        )
     }
 
     /// Returns the holder's next per-commitment point.
