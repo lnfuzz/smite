@@ -206,6 +206,21 @@ JSON output example:
 }
 ```
 
+### smitebot gen-ir
+
+Runs one of `smite-ir`'s generators and writes the resulting program in the postcard form the scenario binaries read from `SMITE_INPUT`. The inverse of `print-ir`, and the way to build a seed corpus or a single input that exercises a specific protocol flow.
+
+```bash
+smitebot gen-ir --generator <name> [--seed <n>] -o <path>
+smitebot gen-ir --generator funding-flow --seed 1 -o funding.bin
+```
+
+- `--generator <name>`: generator to run; see `smitebot gen-ir --help` for the list
+- `--seed <n>`: RNG seed, default `0`. The same seed always produces the same program, so an input can be rebuilt instead of stored.
+- `-o, --output <path>`: file to write (required)
+
+Generators pick values at random, so inspect the result with `print-ir` before relying on it.
+
 ### smitebot print-ir
 
 Decodes a serialized IR program and prints it to standard output. IR programs are opaque postcard-encoded `Program`s, the same form the fuzzing loop serializes them in; point it at one to see what it actually does.

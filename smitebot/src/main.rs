@@ -14,9 +14,9 @@ use clap::{Parser, Subcommand};
 
 use commands::{
     BenchExecArgs, BenchExecCommand, BuildArgs, BuildCommand, ConfigArgs, ConfigCommand,
-    CorpusArgs, CorpusCommand, DoctorArgs, DoctorCommand, PrintIrArgs, PrintIrCommand,
-    ReproduceArgs, ReproduceCommand, StartArgs, StartCommand, StatusArgs, StatusCommand, StopArgs,
-    StopCommand,
+    CorpusArgs, CorpusCommand, DoctorArgs, DoctorCommand, GenIrArgs, GenIrCommand, PrintIrArgs,
+    PrintIrCommand, ReproduceArgs, ReproduceCommand, StartArgs, StartCommand, StatusArgs,
+    StatusCommand, StopArgs, StopCommand,
 };
 
 #[derive(Debug, Parser)]
@@ -38,6 +38,8 @@ enum Commands {
     Corpus(CorpusArgs),
     /// Validate host prerequisites for running Smite campaigns.
     Doctor(DoctorArgs),
+    /// Generate an IR program and write it as a fuzzer input.
+    GenIr(GenIrArgs),
     /// Decode a fuzzer input and print it as readable IR.
     PrintIr(PrintIrArgs),
     /// Replay a single input against a campaign's target in Docker.
@@ -60,6 +62,7 @@ fn main() -> ExitCode {
         Commands::Config(args) => ConfigCommand::execute(&args),
         Commands::Corpus(args) => CorpusCommand::execute(&args),
         Commands::Doctor(args) => DoctorCommand::execute(&args),
+        Commands::GenIr(args) => GenIrCommand::execute(&args),
         Commands::PrintIr(args) => PrintIrCommand::execute(&args),
         Commands::Reproduce(args) => ReproduceCommand::execute(&args),
         Commands::Start(args) => StartCommand::execute(&args),
