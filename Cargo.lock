@@ -726,6 +726,7 @@ dependencies = [
  "libc",
  "log",
  "postcard",
+ "rand",
  "serde",
  "serde_json",
  "simple_logger",

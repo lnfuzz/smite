@@ -12,6 +12,7 @@ clap = { version = "4.6", features = ["derive"] }
 libc.workspace = true
 log.workspace = true
 postcard.workspace = true
+rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 simple_logger.workspace = true
