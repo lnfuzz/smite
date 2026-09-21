@@ -26,6 +26,7 @@ mod ping;
 mod pong;
 mod revoke_and_ack;
 mod shutdown;
+mod stfu;
 mod tlv;
 mod tx_abort;
 mod tx_ack_rbf;
@@ -65,6 +66,7 @@ pub use ping::Ping;
 pub use pong::Pong;
 pub use revoke_and_ack::RevokeAndAck;
 pub use shutdown::{Shutdown, is_acceptable_shutdown_script, is_standard_shutdown_script};
+pub use stfu::Stfu;
 pub use tlv::{TlvRecord, TlvStream};
 pub use tx_abort::TxAbort;
 pub use tx_ack_rbf::{TxAckRbf, TxAckRbfTlvs};
@@ -146,6 +148,8 @@ pub struct MessageType(u16);
 impl MessageType {
     /// Warning message (BOLT 1).
     pub const WARNING: MessageType = MessageType(1);
+    /// `stfu` message (BOLT 2).
+    pub const STFU: MessageType = MessageType(2);
     /// Init message (BOLT 1).
     pub const INIT: MessageType = MessageType(16);
     /// Error message (BOLT 1).
@@ -229,6 +233,7 @@ impl MessageType {
     pub fn name(self) -> &'static str {
         match self {
             Self::WARNING => "warning",
+            Self::STFU => "stfu",
             Self::INIT => "init",
             Self::ERROR => "error",
             Self::PING => "ping",
@@ -278,6 +283,8 @@ impl std::fmt::Display for MessageType {
 pub enum Message {
     /// Warning message (type 1).
     Warning(Warning),
+    /// `stfu` message (type 2).
+    Stfu(Stfu),
     /// Init message (type 16).
     Init(Init),
     /// Error message (type 17).
@@ -366,6 +373,7 @@ impl Message {
     pub fn msg_type(&self) -> MessageType {
         match self {
             Self::Warning(_) => MessageType::WARNING,
+            Self::Stfu(_) => MessageType::STFU,
             Self::Init(_) => MessageType::INIT,
             Self::Error(_) => MessageType::ERROR,
             Self::Ping(_) => MessageType::PING,
@@ -409,6 +417,7 @@ impl Message {
         self.msg_type().as_u16().write(&mut out);
         match self {
             Self::Warning(m) => out.extend(m.encode()),
+            Self::Stfu(m) => out.extend(m.encode()),
             Self::Init(m) => out.extend(m.encode()),
             Self::Error(m) => out.extend(m.encode()),
             Self::Ping(m) => out.extend(m.encode()),
@@ -459,6 +468,7 @@ impl Message {
 
         match MessageType::from_u16(msg_type) {
             MessageType::WARNING => Ok(Self::Warning(Warning::decode(cursor)?)),
+            MessageType::STFU => Ok(Self::Stfu(Stfu::decode(cursor)?)),
             MessageType::INIT => Ok(Self::Init(Init::decode(cursor)?)),
             MessageType::ERROR => Ok(Self::Error(Error::decode(cursor)?)),
             MessageType::PING => Ok(Self::Ping(Ping::decode(cursor)?)),
@@ -561,6 +571,7 @@ macro_rules! impl_from_message {
 
 impl_from_message! {
     Warning => WARNING,
+    Stfu => STFU,
     Init => INIT,
     Error => ERROR,
     Ping => PING,
@@ -616,7 +627,7 @@ mod tests {
     use bitcoin::secp256k1::{self, PublicKey, Secp256k1, SecretKey};
     use types::CHAIN_HASH_SIZE;
 
-    // Tests ordered by message type number: Warning(1), Init(16), Error(17), Ping(18), Pong(19)
+    // Tests ordered by message type number: Warning(1), Stfu(2), Init(16), Error(17), Ping(18), Pong(19)
 
     #[test]
     fn message_warning_roundtrip() {
@@ -625,6 +636,18 @@ mod tests {
         let encoded = msg.encode();
         let decoded = Message::decode(&encoded).unwrap();
         assert_eq!(decoded, Message::Warning(warning));
+    }
+
+    #[test]
+    fn message_stfu_roundtrip() {
+        let stfu = Stfu {
+            channel_id: ChannelId::new([0xab; CHANNEL_ID_SIZE]),
+            initiator: 1,
+        };
+        let msg = Message::Stfu(stfu.clone());
+        let encoded = msg.encode();
+        let decoded = Message::decode(&encoded).unwrap();
+        assert_eq!(decoded, Message::Stfu(stfu));
     }
 
     #[test]
@@ -1290,6 +1313,14 @@ mod tests {
                 Message::Warning(Warning::all_channels("")),
                 "warning",
                 MessageType::WARNING,
+            ),
+            (
+                Message::Stfu(Stfu {
+                    channel_id: ChannelId::new([0; CHANNEL_ID_SIZE]),
+                    initiator: 0,
+                }),
+                "stfu",
+                MessageType::STFU,
             ),
             (Message::Init(Init::empty()), "init", MessageType::INIT),
             (
