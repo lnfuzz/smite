@@ -25,6 +25,7 @@ mod open_channel2;
 mod ping;
 mod pong;
 mod query_short_channel_ids;
+mod reply_short_channel_ids_end;
 mod revoke_and_ack;
 mod shutdown;
 mod tlv;
@@ -65,6 +66,7 @@ pub use open_channel2::{OpenChannel2, OpenChannel2Tlvs};
 pub use ping::Ping;
 pub use pong::Pong;
 pub use query_short_channel_ids::{QueryShortChannelIds, QueryShortChannelIdsTlvs};
+pub use reply_short_channel_ids_end::ReplyShortChannelIdsEnd;
 pub use revoke_and_ack::RevokeAndAck;
 pub use shutdown::{Shutdown, is_acceptable_shutdown_script, is_standard_shutdown_script};
 pub use tlv::{TlvRecord, TlvStream};
@@ -212,6 +214,8 @@ impl MessageType {
     pub const ANNOUNCEMENT_SIGNATURES: MessageType = MessageType(259);
     /// `query_short_channel_ids` message (BOLT 7).
     pub const QUERY_SHORT_CHANNEL_IDS: MessageType = MessageType(261);
+    /// `reply_short_channel_ids_end` message (BOLT 7).
+    pub const REPLY_SHORT_CHANNEL_IDS_END: MessageType = MessageType(262);
     /// Gossip timestamp filter message (BOLT 7).
     pub const GOSSIP_TIMESTAMP_FILTER: MessageType = MessageType(265);
 
@@ -265,6 +269,7 @@ impl MessageType {
             Self::CHANNEL_UPDATE => "channel_update",
             Self::ANNOUNCEMENT_SIGNATURES => "announcement_signatures",
             Self::QUERY_SHORT_CHANNEL_IDS => "query_short_channel_ids",
+            Self::REPLY_SHORT_CHANNEL_IDS_END => "reply_short_channel_ids_end",
             Self::GOSSIP_TIMESTAMP_FILTER => "gossip_timestamp_filter",
             _ => "unknown",
         }
@@ -347,6 +352,8 @@ pub enum Message {
     AnnouncementSignatures(AnnouncementSignatures),
     /// `query_short_channel_ids` message (type 261).
     QueryShortChannelIds(QueryShortChannelIds),
+    /// `reply_short_channel_ids_end` message (type 262).
+    ReplyShortChannelIdsEnd(ReplyShortChannelIdsEnd),
     /// Gossip timestamp filter message (type 265).
     GossipTimestampFilter(GossipTimestampFilter),
     /// Unknown message type.
@@ -405,6 +412,7 @@ impl Message {
             Self::ChannelUpdate(_) => MessageType::CHANNEL_UPDATE,
             Self::AnnouncementSignatures(_) => MessageType::ANNOUNCEMENT_SIGNATURES,
             Self::QueryShortChannelIds(_) => MessageType::QUERY_SHORT_CHANNEL_IDS,
+            Self::ReplyShortChannelIdsEnd(_) => MessageType::REPLY_SHORT_CHANNEL_IDS_END,
             Self::GossipTimestampFilter(_) => MessageType::GOSSIP_TIMESTAMP_FILTER,
             Self::Unknown { msg_type, .. } => *msg_type,
         }
@@ -449,6 +457,7 @@ impl Message {
             Self::ChannelUpdate(m) => out.extend(m.encode()),
             Self::AnnouncementSignatures(m) => out.extend(m.encode()),
             Self::QueryShortChannelIds(m) => out.extend(m.encode()),
+            Self::ReplyShortChannelIdsEnd(m) => out.extend(m.encode()),
             Self::GossipTimestampFilter(m) => out.extend(m.encode()),
             Self::Unknown { payload, .. } => out.extend(payload),
         }
@@ -523,6 +532,9 @@ impl Message {
             )),
             MessageType::QUERY_SHORT_CHANNEL_IDS => Ok(Self::QueryShortChannelIds(
                 QueryShortChannelIds::decode(cursor)?,
+            )),
+            MessageType::REPLY_SHORT_CHANNEL_IDS_END => Ok(Self::ReplyShortChannelIdsEnd(
+                ReplyShortChannelIdsEnd::decode(cursor)?,
             )),
             MessageType::GOSSIP_TIMESTAMP_FILTER => Ok(Self::GossipTimestampFilter(
                 GossipTimestampFilter::decode(cursor)?,
@@ -605,6 +617,7 @@ impl_from_message! {
     ChannelUpdate => CHANNEL_UPDATE,
     AnnouncementSignatures => ANNOUNCEMENT_SIGNATURES,
     QueryShortChannelIds => QUERY_SHORT_CHANNEL_IDS,
+    ReplyShortChannelIdsEnd => REPLY_SHORT_CHANNEL_IDS_END,
     GossipTimestampFilter => GOSSIP_TIMESTAMP_FILTER,
 }
 
@@ -1297,6 +1310,17 @@ mod tests {
     }
 
     #[test]
+    fn message_reply_short_channel_ids_end_roundtrip() {
+        let reply = ReplyShortChannelIdsEnd {
+            chain_hash: [0xaa; 32],
+            full_information: 0x01,
+        };
+        let encoded = Message::ReplyShortChannelIdsEnd(reply.clone()).encode();
+        let decoded = Message::decode(&encoded).unwrap();
+        assert_eq!(decoded, Message::ReplyShortChannelIdsEnd(reply));
+    }
+
+    #[test]
     fn message_gossip_timestamp_filter_roundtrip() {
         let chain_hash = [0x6f; 32];
         let filter = GossipTimestampFilter::new(chain_hash, 1_000_000, 86400);
@@ -1504,6 +1528,14 @@ mod tests {
                 Message::QueryShortChannelIds(sample_query_short_channel_ids()),
                 "query_short_channel_ids",
                 MessageType::QUERY_SHORT_CHANNEL_IDS,
+            ),
+            (
+                Message::ReplyShortChannelIdsEnd(ReplyShortChannelIdsEnd {
+                    chain_hash: [0xaa; 32],
+                    full_information: 0x01,
+                }),
+                "reply_short_channel_ids_end",
+                MessageType::REPLY_SHORT_CHANNEL_IDS_END,
             ),
             (
                 Message::GossipTimestampFilter(GossipTimestampFilter::no_gossip([0u8; 32])),
