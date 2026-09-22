@@ -422,6 +422,13 @@ fn execute_records_negotiation_for_open_and_accept() {
     let accept_channel = pending.accept_channel.as_ref().unwrap();
     assert_eq!(accept_channel.clone(), sample_accept_channel());
     assert!(!pending.funding_built);
+    assert_eq!(
+        *fx.per_commitment_points(),
+        HashSet::from([
+            pending.open_channel.first_per_commitment_point,
+            accept_channel.first_per_commitment_point,
+        ])
+    );
 }
 
 #[test]
@@ -484,9 +491,18 @@ fn execute_recv_accept_channel_rejects_reuse_before_funding() {
     );
     b.append(Operation::RecvAcceptChannel, &[resent]);
 
+    // Use a fresh `first_per_commitment_point` so the resent `accept_channel`
+    // is otherwise valid, with only its `temporary_channel_id` reused before
+    // funding_created.
+    let accept_channel = sample_accept_channel();
+    let resent_accept_channel = AcceptChannel {
+        first_per_commitment_point: sample_pubkey(8),
+        ..sample_accept_channel()
+    };
+
     let err = Fixture::new()
-        .queue(&Message::AcceptChannel(sample_accept_channel()))
-        .queue(&Message::AcceptChannel(sample_accept_channel()))
+        .queue(&Message::AcceptChannel(accept_channel))
+        .queue(&Message::AcceptChannel(resent_accept_channel))
         .run_err(&b.build());
 
     let ExecuteError::Violation(Violation::InvalidAcceptChannel(id, reason)) = &err else {
@@ -499,17 +515,56 @@ fn execute_recv_accept_channel_rejects_reuse_before_funding() {
 }
 
 #[test]
+fn execute_recv_accept_channel_rejects_reused_per_commitment_point() {
+    let temporary_channel_id = TemporaryChannelId::new([0xcc; 32]);
+
+    // Negotiate a channel, then negotiate a second one on a different
+    // `temporary_channel_id`.
+    let mut b = ProgramBuilder::new();
+    negotiate_channel(&mut b, &announced_open_channel());
+    let mut second_open_channel = announced_open_channel();
+    second_open_channel.message.temporary_channel_id = temporary_channel_id;
+    negotiate_channel(&mut b, &second_open_channel);
+
+    // Use the first `accept_channel`'s `first_per_commitment_point` so the second
+    // `accept_channel` is otherwise valid, with only its
+    // `first_per_commitment_point` reused.
+    let earlier_point = sample_accept_channel().first_per_commitment_point;
+    let second_accept_channel = AcceptChannel {
+        temporary_channel_id,
+        ..sample_accept_channel()
+    };
+
+    let err = Fixture::new()
+        .queue(&Message::AcceptChannel(sample_accept_channel()))
+        .queue(&Message::AcceptChannel(second_accept_channel))
+        .run_err(&b.build());
+
+    let ExecuteError::Violation(Violation::InvalidAcceptChannel(id, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*id, temporary_channel_id);
+    assert!(reason.contains(&format!(
+        "first_per_commitment_point {earlier_point} was reused from an earlier negotiation"
+    )));
+}
+
+#[test]
 fn execute_records_only_first_open_channel_for_duplicate_id_before_funding() {
     let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
 
     // First open_channel: funding_satoshis = 100_000.
-    // Second open_channel: same temporary_channel_id, funding_satoshis = 200_000.
+    // Second open_channel: same temporary_channel_id, funding_satoshis = 200_000,
+    // and a fresh first_per_commitment_point.
     let mut b = ProgramBuilder::new();
     let first = send_open_channel(&mut b, &announced_open_channel());
 
-    // Override only funding_satoshis; reuse the first open_channel's other 19 inputs.
+    // Override only funding_satoshis and first_per_commitment_point; reuse the
+    // first open_channel's other 18 inputs.
     let mut second = first.vars;
     second.funding_satoshis = b.append(Operation::LoadAmount(200_000), &[]);
+    let sk = b.append(Operation::LoadPrivateKey([0x11; 32]), &[]);
+    second.first_per_commitment_point = b.append(Operation::DerivePoint, &[sk]);
     second.built = b.append(Operation::BuildOpenChannel, &second.build_inputs());
     b.append(Operation::SendOpenChannel, &[second.built]);
 
@@ -523,6 +578,18 @@ fn execute_records_only_first_open_channel_for_duplicate_id_before_funding() {
     assert_eq!(fx.sent::<OpenChannel>(1).funding_satoshis, 200_000);
     let pending = fx.negotiation(&temporary_channel_id);
     assert_eq!(pending.open_channel.funding_satoshis, 100_000);
+
+    // The two `open_channel`s went out with different
+    // `first_per_commitment_point`s, but only the recorded negotiation's point
+    // counts as revealed by us.
+    assert_ne!(
+        fx.sent::<OpenChannel>(0).first_per_commitment_point,
+        fx.sent::<OpenChannel>(1).first_per_commitment_point,
+    );
+    assert_eq!(
+        *fx.per_commitment_points(),
+        HashSet::from([fx.sent::<OpenChannel>(0).first_per_commitment_point])
+    );
 }
 
 #[test]
@@ -542,6 +609,12 @@ fn execute_records_open_channel_for_duplicate_id_after_funding() {
     assert_eq!(pending.open_channel.funding_satoshis, 100_000);
     assert!(pending.accept_channel.is_none());
     assert!(!pending.funding_built);
+    // The earlier negotiation was seeded rather than executed, so only the
+    // new `open_channel`'s point is recorded.
+    assert_eq!(
+        *fx.per_commitment_points(),
+        HashSet::from([pending.open_channel.first_per_commitment_point])
+    );
 }
 
 // -- Panic path tests --
@@ -1076,6 +1149,7 @@ fn execute_send_channel_ready() {
         *state.next_holder_per_commitment_point(),
         Some(expected_pcp1)
     );
+    assert_eq!(*fx.per_commitment_points(), HashSet::from([expected_pcp1]));
 }
 
 #[test]
@@ -1160,6 +1234,7 @@ fn execute_recv_channel_ready_invalid_funding_outpoint_is_noop() {
     assert!(!state.sent_invalid_signature);
     assert!(state.next_counterparty_per_commitment_point().is_none());
     assert_eq!(fx.queued_len(), 1);
+    assert!(fx.per_commitment_points().is_empty());
 }
 
 #[test]
@@ -1182,6 +1257,7 @@ fn execute_recv_channel_ready_below_minimum_depth_is_noop() {
     assert!(!state.sent_invalid_signature);
     assert!(state.next_counterparty_per_commitment_point().is_none());
     assert_eq!(fx.queued_len(), 1);
+    assert!(fx.per_commitment_points().is_empty());
 }
 
 #[test]
@@ -1203,6 +1279,7 @@ fn execute_recv_channel_ready_at_minimum_depth_records_point() {
         Some(target_pcp)
     );
     assert_eq!(fx.queued_len(), 0);
+    assert_eq!(*fx.per_commitment_points(), HashSet::from([target_pcp]));
 }
 
 #[test]
@@ -1232,6 +1309,7 @@ fn execute_recv_channel_ready_funding_mined_prematurely_is_noop() {
     assert!(!state.sent_invalid_signature);
     assert!(state.next_counterparty_per_commitment_point().is_none());
     assert_eq!(fx.queued_len(), 1);
+    assert!(fx.per_commitment_points().is_empty());
 }
 
 #[test]
@@ -1322,7 +1400,7 @@ fn extract_pubkeys() {
     let ac = sample_accept_channel();
     assert_eq!(
         extract_field(&ac, AcceptChannelField::FundingPubkey),
-        Variable::Point(sample_pubkey(1))
+        Variable::Point(sample_pubkey(7))
     );
     assert_eq!(
         extract_field(&ac, AcceptChannelField::RevocationBasepoint),

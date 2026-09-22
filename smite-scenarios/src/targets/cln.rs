@@ -389,6 +389,14 @@ impl Target for ClnTarget {
     ///   (hardcoded 546) exceeds its own `channel_reserve_satoshis`, which
     ///   BOLT 2 forbids.
     ///   See: <https://github.com/ElementsProject/lightning/issues/9515>
+    ///
+    /// - CLN accepts `open_channel` with `option_scid_alias` in `channel_type`
+    ///   on a channel that is to be announced, which BOLT 2 forbids the opener
+    ///   from sending.
+    ///   See: <https://github.com/ElementsProject/lightning/issues/9444>
+    ///
+    /// - CLN currently allows an unreasonably large `dust_limit_satoshis`
+    ///   during `open_channel` negotiation. A fix is in progress upstream.
     fn known_violations() -> &'static [&'static [&'static str]] {
         &[
             &[
@@ -410,6 +418,13 @@ impl Target for ClnTarget {
                 "sat cannot cover anchor cost of",
             ],
             &["invalid accept_channel: dust_limit_satoshis 546 exceeds channel_reserve_satoshis"],
+            &[
+                "accepted invalid open_channel: option_scid_alias requires the channel to be private",
+            ],
+            &[
+                "accepted invalid open_channel: dust_limit_satoshis",
+                "exceeds the maximum of 10000 sat",
+            ],
         ]
     }
 }

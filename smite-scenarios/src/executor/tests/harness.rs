@@ -2,7 +2,7 @@
 
 use crate::executor::*;
 use bitcoin::{Amount, Transaction};
-use smite::bolt::{AcceptChannelTlvs, ChannelTypeVariant, FromMessage};
+use smite::bolt::{AcceptChannelTlvs, ChannelTypeVariant, FromMessage, REGTEST_CHAIN_HASH};
 use std::collections::VecDeque;
 use std::str::FromStr;
 
@@ -215,6 +215,11 @@ impl Fixture {
         &self.executor.rpc
     }
 
+    /// Returns the per-commitment points revealed by either us or the target.
+    pub fn per_commitment_points(&self) -> &HashSet<PublicKey> {
+        &self.executor.per_commitment_points
+    }
+
     /// Returns the transactions held outside Bitcoin Core's mempool.
     pub fn private_mempool(&self) -> &[(Txid, String)] {
         &self.executor.private_mempool
@@ -254,7 +259,7 @@ pub fn sample_pubkey(byte: u8) -> PublicKey {
 pub fn sample_context() -> ProgramContext {
     ProgramContext {
         target_pubkey: sample_pubkey(1),
-        chain_hash: [0xcc; 32],
+        chain_hash: REGTEST_CHAIN_HASH,
         block_height: 800_000,
         negotiated_features: Features::from_bits(&[
             Features::OPTION_STATIC_REMOTEKEY,
@@ -296,7 +301,7 @@ pub fn sample_accept_channel() -> AcceptChannel {
         minimum_depth: 6,
         to_self_delay: 144,
         max_accepted_htlcs: 483,
-        funding_pubkey: sample_pubkey(1),
+        funding_pubkey: sample_pubkey(7),
         revocation_basepoint: sample_pubkey(2),
         payment_basepoint: sample_pubkey(3),
         delayed_payment_basepoint: sample_pubkey(4),
@@ -467,7 +472,7 @@ pub fn sample_funding_negotiation() -> PendingChannel {
 
     PendingChannel {
         open_channel: OpenChannel {
-            chain_hash: [0xcc; 32],
+            chain_hash: REGTEST_CHAIN_HASH,
             temporary_channel_id: TemporaryChannelId::new([0xbb; 32]),
             funding_satoshis: 10_000_000,
             push_msat: 3_000_000_000,

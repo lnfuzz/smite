@@ -67,6 +67,19 @@ pub struct OpenChannelTlvs {
 }
 
 impl OpenChannel {
+    /// Returns the channel initiator's pubkeys, in wire order.
+    #[must_use]
+    pub fn pubkeys(&self) -> [PublicKey; 6] {
+        [
+            self.funding_pubkey,
+            self.revocation_basepoint,
+            self.payment_basepoint,
+            self.delayed_payment_basepoint,
+            self.htlc_basepoint,
+            self.first_per_commitment_point,
+        ]
+    }
+
     /// Encodes to wire format (without message type prefix).
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
