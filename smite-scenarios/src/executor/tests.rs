@@ -8,7 +8,7 @@ use bitcoin::Amount;
 use bitcoin::secp256k1::{Secp256k1, SecretKey};
 use harness::*;
 use programs::*;
-use smite::bolt::{AcceptChannelTlvs, GossipTimestampFilter, Init, Ping};
+use smite::bolt::{AcceptChannelTlvs, GossipTimestampFilter, Init, Ping, Warning};
 use smite_ir::Instruction;
 use smite_ir::builder::ProgramBuilder;
 use smite_ir::operation::ShutdownScriptVariant;
@@ -1117,6 +1117,248 @@ fn execute_send_shutdown_empty_scriptpubkey() {
     let sd: Shutdown = fx.sent(0);
     assert_eq!(sd.channel_id, channel_id);
     assert!(sd.scriptpubkey.is_empty());
+}
+
+#[test]
+fn execute_recv_shutdown() {
+    let (fx, _) = recv_channel_ready_fixture();
+    let channel_id = funding_channel_id();
+    let script = ShutdownScriptVariant::P2wpkh([0xab; 20]);
+    let mut fx = fx.queue(&Message::Shutdown(Shutdown::for_channel(
+        channel_id,
+        script.encode(),
+    )));
+
+    fx.run(&recv_shutdown_program(channel_id, script));
+
+    // TODO: Once we add IR support for building closing transactions, verify
+    // the returned scriptpubkey through the closing transaction's output.
+
+    assert!(fx.channel_state(&channel_id).counterparty_shutdown_received);
+    assert_eq!(fx.queued_len(), 0);
+}
+
+#[test]
+fn execute_recv_shutdown_unknown_channel() {
+    let (fx, _) = recv_channel_ready_fixture();
+    let unknown = ChannelId::new([0x7a; 32]);
+    let script = ShutdownScriptVariant::P2wpkh([0xcd; 20]);
+    let mut fx = fx.queue(&Message::Shutdown(Shutdown::for_channel(
+        unknown,
+        script.encode(),
+    )));
+
+    let err = fx.run_err(&recv_shutdown_program(funding_channel_id(), script));
+
+    assert!(matches!(
+        err,
+        ExecuteError::UnexpectedMessage {
+            expected: MessageType::SHUTDOWN,
+            got: MessageType::SHUTDOWN,
+        }
+    ));
+}
+
+#[test]
+fn execute_recv_shutdown_other_tracked_channel() {
+    let channel_id = funding_channel_id();
+    let second_utxo = Utxo {
+        outpoint: OutPoint {
+            vout: 1,
+            ..sample_utxo().outpoint
+        },
+        ..sample_utxo()
+    };
+    let mut second_negotiation = sample_funding_negotiation();
+    second_negotiation.open_channel.temporary_channel_id = TemporaryChannelId::new([0xee; 32]);
+
+    // Establish our channel, then track a second one by sending its
+    // `funding_created`.
+    let mut b = ProgramBuilder::new();
+    establish_channel(&mut b, 6);
+    let second = create_funding_tx(&mut b);
+    let second_temporary_channel_id = b.append(Operation::LoadChannelId([0xee; 32]), &[]);
+    b.append(
+        Operation::SendFundingCreated,
+        &[
+            second.tx,
+            second.opener_privkey,
+            second_temporary_channel_id,
+        ],
+    );
+    let (fx, _) = recv_channel_ready_fixture();
+    let mut fx = fx
+        .with_utxos(vec![sample_utxo(), second_utxo])
+        .with_negotiation(second_negotiation);
+    fx.run(&b.build());
+    let other = *fx
+        .channel_states()
+        .keys()
+        .find(|id| **id != channel_id)
+        .expect("second channel tracked");
+
+    // The target may be answering a `shutdown` we sent on the other channel,
+    // which this `RecvShutdown` can't judge.
+    let script = ShutdownScriptVariant::P2wpkh([0xab; 20]);
+    let mut fx = fx.queue(&Message::Shutdown(Shutdown::for_channel(
+        other,
+        script.encode(),
+    )));
+    let mut b = ProgramBuilder::new();
+    let shutdown = send_shutdown(&mut b, channel_id, script);
+    b.append(Operation::RecvShutdown, &[shutdown.sent]);
+
+    let err = fx.run_err(&b.build());
+
+    assert!(matches!(
+        err,
+        ExecuteError::UnexpectedMessage {
+            expected: MessageType::SHUTDOWN,
+            got: MessageType::SHUTDOWN,
+        }
+    ));
+    assert!(!fx.channel_state(&channel_id).counterparty_shutdown_received);
+    assert!(!fx.channel_state(&other).counterparty_shutdown_received);
+}
+
+#[test]
+fn execute_recv_shutdown_after_response_is_noop() {
+    let (fx, _) = recv_channel_ready_fixture();
+    let channel_id = funding_channel_id();
+    let script = ShutdownScriptVariant::P2wpkh([0xab; 20]);
+    // Only one reply is queued: once the target has responded, the second
+    // RecvShutdown must be a no-op rather than block on an empty queue.
+    let mut fx = fx.queue(&Message::Shutdown(Shutdown::for_channel(
+        channel_id,
+        script.encode(),
+    )));
+
+    let mut b = ProgramBuilder::new();
+    establish_channel(&mut b, 6);
+    let first = send_shutdown(&mut b, channel_id, script);
+    b.append(Operation::RecvShutdown, &[first.sent]);
+    let second = b.append(
+        Operation::SendShutdown,
+        &[first.channel_id, first.scriptpubkey],
+    );
+    b.append(Operation::RecvShutdown, &[second]);
+
+    fx.run(&b.build());
+
+    assert_eq!(fx.queued_len(), 0);
+}
+
+#[test]
+fn execute_recv_shutdown_untracked_channel_is_noop() {
+    let (mut fx, _) = recv_channel_ready_fixture();
+    let untracked = ChannelId::new([0x99; 32]);
+
+    // No shutdown reply is queued: a RecvShutdown for a channel we never
+    // established must be a no-op rather than block on an empty queue.
+    fx.run(&recv_shutdown_program(
+        untracked,
+        ShutdownScriptVariant::P2wpkh([0xab; 20]),
+    ));
+
+    assert_eq!(fx.queued_len(), 0);
+}
+
+fn warning_reply(channel_id: ChannelId) -> Message {
+    Message::Warning(Warning {
+        channel_id,
+        data: b"non-standard scriptpubkey".to_vec(),
+    })
+}
+
+#[test]
+fn execute_recv_shutdown_warning_for_non_standard_script() {
+    let (fx, _) = recv_channel_ready_fixture();
+    let channel_id = funding_channel_id();
+    // The target SHOULD answer our non-standard `scriptpubkey` with a warning
+    // rather than a `shutdown`, which `RecvShutdown` must accept.
+    let mut fx = fx.queue(&warning_reply(channel_id));
+
+    fx.run(&recv_shutdown_program(
+        channel_id,
+        ShutdownScriptVariant::Empty,
+    ));
+
+    assert!(!fx.channel_state(&channel_id).counterparty_shutdown_received);
+    assert_eq!(fx.queued_len(), 0);
+}
+
+#[test]
+fn execute_recv_shutdown_warning_for_standard_script() {
+    let (fx, _) = recv_channel_ready_fixture();
+    let channel_id = funding_channel_id();
+    let mut fx = fx.queue(&warning_reply(channel_id));
+
+    let err = fx.run_err(&recv_shutdown_program(
+        channel_id,
+        ShutdownScriptVariant::P2wpkh([0xab; 20]),
+    ));
+
+    assert!(matches!(
+        err,
+        ExecuteError::UnexpectedMessage {
+            expected: MessageType::SHUTDOWN,
+            got: MessageType::WARNING,
+        }
+    ));
+}
+
+#[test]
+fn execute_recv_shutdown_reply_to_non_standard_script() {
+    let (fx, _) = recv_channel_ready_fixture();
+    let channel_id = funding_channel_id();
+    // The target SHOULD warn about our non-standard `scriptpubkey`, but may
+    // reply with a `shutdown` anyway, which must still be valid.
+    let mut fx = fx.queue(&Message::Shutdown(Shutdown::for_channel(
+        channel_id,
+        ShutdownScriptVariant::P2wpkh([0xcd; 20]).encode(),
+    )));
+
+    fx.run(&recv_shutdown_program(
+        channel_id,
+        ShutdownScriptVariant::Empty,
+    ));
+
+    assert!(fx.channel_state(&channel_id).counterparty_shutdown_received);
+    assert_eq!(fx.queued_len(), 0);
+}
+
+#[test]
+fn execute_recv_shutdown_warning_for_all_channels() {
+    let (fx, _) = recv_channel_ready_fixture();
+    let channel_id = funding_channel_id();
+    let mut fx = fx.queue(&warning_reply(ChannelId::ALL));
+
+    fx.run(&recv_shutdown_program(
+        channel_id,
+        ShutdownScriptVariant::Empty,
+    ));
+
+    assert!(!fx.channel_state(&channel_id).counterparty_shutdown_received);
+    assert_eq!(fx.queued_len(), 0);
+}
+
+#[test]
+fn execute_recv_shutdown_warning_for_other_channel() {
+    let (fx, _) = recv_channel_ready_fixture();
+    let mut fx = fx.queue(&warning_reply(ChannelId::new([0x99; 32])));
+
+    let err = fx.run_err(&recv_shutdown_program(
+        funding_channel_id(),
+        ShutdownScriptVariant::Empty,
+    ));
+
+    assert!(matches!(
+        err,
+        ExecuteError::UnexpectedMessage {
+            expected: MessageType::SHUTDOWN,
+            got: MessageType::WARNING,
+        }
+    ));
 }
 
 #[test]

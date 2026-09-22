@@ -4,7 +4,7 @@
 //! The serialized program stores data only in [`Operation`] literals.
 
 use bitcoin::secp256k1::PublicKey;
-use smite::bolt::{AcceptChannel, ChannelId, OpenChannel, ShortChannelId};
+use smite::bolt::{AcceptChannel, ChannelId, OpenChannel, ShortChannelId, Shutdown};
 use smite::channel_tx::FundingTransaction;
 
 const CHAIN_HASH_SIZE: usize = 32;
@@ -60,7 +60,7 @@ pub enum Variable {
     SentFundingCreated,
     /// `shutdown` has been sent, so the counterparty's `shutdown` may now be
     /// received.
-    SentShutdown,
+    SentShutdown(Shutdown),
 }
 
 impl Variable {
@@ -88,7 +88,7 @@ impl Variable {
             Self::FundingTransaction(_) => VariableType::FundingTransaction,
             Self::SentOpenChannel => VariableType::SentOpenChannel,
             Self::SentFundingCreated => VariableType::SentFundingCreated,
-            Self::SentShutdown => VariableType::SentShutdown,
+            Self::SentShutdown(_) => VariableType::SentShutdown,
         }
     }
 }
