@@ -4,10 +4,12 @@
 
 mod accept_channel;
 mod funding_signed;
+mod shutdown;
 
 use super::violation::Violation;
 pub use accept_channel::{AcceptChannelContext, AcceptChannelOracle};
 pub use funding_signed::{FundingSignedContext, FundingSignedOracle};
+pub use shutdown::{ShutdownContext, ShutdownOracle};
 
 /// `Oracle` evaluates a condition against some context
 pub trait Oracle<C> {
