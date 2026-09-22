@@ -2,7 +2,7 @@
 
 use crate::executor::*;
 use bitcoin::{Amount, Transaction};
-use smite::bolt::{AcceptChannelTlvs, ChannelTypeVariant, FromMessage};
+use smite::bolt::{AcceptChannelTlvs, ChannelTypeVariant, FeatureBit, FromMessage};
 use std::collections::VecDeque;
 use std::str::FromStr;
 
@@ -148,6 +148,12 @@ impl Fixture {
     /// Funds the wallet with `utxos` instead of the default [`sample_utxo`].
     pub fn with_utxos(mut self, utxos: Vec<Utxo>) -> Self {
         self.executor.bitcoin_cli.utxos = utxos;
+        self
+    }
+
+    /// Adds `bit` to the features negotiated with the target.
+    pub fn with_negotiated_feature(mut self, bit: FeatureBit) -> Self {
+        self.executor.context.negotiated_features.set_bit(bit);
         self
     }
 
