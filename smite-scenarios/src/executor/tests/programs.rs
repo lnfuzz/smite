@@ -343,6 +343,15 @@ pub fn send_channel_announcement(b: &mut ProgramBuilder, scid: usize) {
     b.append(Operation::SendMessage, &[announcement]);
 }
 
+// -- error --
+
+/// Emits a `SendError` for `channel_id` with empty data.
+pub fn send_error(b: &mut ProgramBuilder, channel_id: ChannelId) {
+    let channel_id = b.append(Operation::LoadChannelId(channel_id.0), &[]);
+    let data = b.append(Operation::LoadBytes(vec![]), &[]);
+    b.append(Operation::SendError, &[channel_id, data]);
+}
+
 // -- Malformed programs --
 
 /// Builds a program from `(operation, inputs)` pairs, skipping the

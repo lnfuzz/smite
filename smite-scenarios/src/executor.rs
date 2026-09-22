@@ -11,7 +11,7 @@ use smite::bolt::{
     AcceptChannel, AnnouncementSignatures, ChannelAnnouncement, ChannelId, ChannelReady,
     ChannelReadyTlvs, ChannelUpdate, Features, FromMessage, FundingCreated, FundingSigned, Message,
     MessageType, NodeAnnouncement, OpenChannel, OpenChannelTlvs, Pong, ShortChannelId, Shutdown,
-    TemporaryChannelId,
+    TemporaryChannelId, Warning,
 };
 use smite::channel_tx::{
     ChannelConfig, ChannelPartyConfig, ChannelState, FundingTransaction, HolderIdentity, Side,
@@ -27,7 +27,7 @@ use smite::violation::Violation;
 use super::targets::TargetRpc;
 use smite_ir::operation::AcceptChannelField;
 use smite_ir::{Operation, Program, Variable, VariableType};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 /// The timeout used when receiving messages from the target. We will wait this
@@ -234,6 +234,29 @@ pub enum ExecuteError {
     Violation(#[from] Violation),
 }
 
+/// The negotiations of one `temporary_channel_id`.
+#[derive(Default)]
+struct ChannelNegotiation {
+    /// Current negotiation, if any.
+    live: Option<PendingChannel>,
+    /// Negotiations we failed with `error` before receiving their
+    /// `accept_channel`, oldest first. The target handles our `open_channel`
+    /// before the `error`, so the replies may still arrive.
+    awaiting_orphan_reply: VecDeque<PendingChannel>,
+}
+
+impl ChannelNegotiation {
+    /// Fails the live negotiation, as the target does on a sent `error`. Its
+    /// reply is still expected if not yet received.
+    fn fail(&mut self) {
+        if let Some(pending) = self.live.take()
+            && pending.accept_channel.is_none()
+        {
+            self.awaiting_orphan_reply.push_back(pending);
+        }
+    }
+}
+
 /// Executes IR programs against a target over an established connection.
 pub struct Executor<C, B, R> {
     /// Connection used to send and receive Lightning messages.
@@ -252,7 +275,7 @@ pub struct Executor<C, B, R> {
     /// Negotiation state captured during program execution, keyed by
     /// `temporary_channel_id`, so the funding flow can build commitments from
     /// the parameters actually sent on the wire.
-    negotiations: HashMap<TemporaryChannelId, PendingChannel>,
+    negotiations: HashMap<TemporaryChannelId, ChannelNegotiation>,
     /// Transactions stored outside Bitcoin Core's mempool, typically because they
     /// were rejected by mempool policy, to be included in the next `MineBlocks`
     /// operation. Each is stored as `(txid, raw_hex)`: re-signing the same
@@ -494,6 +517,31 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     Some(Variable::SentShutdown)
                 }
 
+                Operation::SendError => {
+                    let err = build_error(&variables, &instr.inputs);
+                    record_send_error(
+                        &mut self.negotiations,
+                        &mut self.channel_states,
+                        err.channel_id,
+                    );
+                    let encoded = Message::Error(err).encode();
+                    log::debug!("[{:?}] SendError: {} bytes", start.elapsed(), encoded.len());
+                    self.conn.send_message(&encoded)?;
+                    None
+                }
+
+                Operation::SendWarning => {
+                    let warning = build_warning(&variables, &instr.inputs);
+                    let encoded = Message::Warning(warning).encode();
+                    log::debug!(
+                        "[{:?}] SendWarning: {} bytes",
+                        start.elapsed(),
+                        encoded.len()
+                    );
+                    self.conn.send_message(&encoded)?;
+                    None
+                }
+
                 Operation::RecvAcceptChannel => {
                     consume_affine(
                         &mut variables,
@@ -503,12 +551,11 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     log::debug!("[{:?}] RecvAcceptChannel: waiting", start.elapsed());
                     let ac: AcceptChannel = recv_bolt(&mut self.conn, RECV_IDLE_TIMEOUT)?;
                     log::debug!("[{:?}] RecvAcceptChannel: received", start.elapsed());
-                    AcceptChannelOracle.evaluate(&AcceptChannelContext {
-                        accept_channel: &ac,
-                        negotiation: self.negotiations.get(&ac.temporary_channel_id),
-                        negotiated_features: &self.context.negotiated_features,
-                    })?;
-                    record_recv_accept_channel(&mut self.negotiations, &ac);
+                    record_recv_accept_channel(
+                        &mut self.negotiations,
+                        &ac,
+                        &self.context.negotiated_features,
+                    )?;
                     Some(Variable::AcceptChannel(ac))
                 }
 
@@ -781,7 +828,7 @@ fn build_funding_created(
     variables: &[Option<Variable>],
     inputs: &[usize],
     channel_states: &mut HashMap<ChannelId, ChannelState>,
-    negotiations: &mut HashMap<TemporaryChannelId, PendingChannel>,
+    negotiations: &mut HashMap<TemporaryChannelId, ChannelNegotiation>,
     mined_txids: &HashSet<Txid>,
 ) -> Result<FundingCreated, ExecuteError> {
     let funding_tx = resolve_funding_transaction(variables, inputs[0]);
@@ -798,24 +845,21 @@ fn build_funding_created(
     // Without both the recorded `open_channel` and the peer's `accept_channel`
     // we cannot build the commitment to sign, so fall back to an unsigned
     // `funding_created` and leave `channel_states` untouched.
-    let Some(pending) = negotiations.get(&temporary_channel_id) else {
-        return Ok(FundingCreated {
-            temporary_channel_id,
-            funding_txid: funding_outpoint.txid,
-            funding_output_index,
-            signature: Signature::from_compact(&[0u8; 64])
-                .expect("zero bytes parse as a signature"),
-        });
+    let unsigned_funding_created = || FundingCreated {
+        temporary_channel_id,
+        funding_txid: funding_outpoint.txid,
+        funding_output_index,
+        signature: Signature::from_compact(&[0u8; 64]).expect("zero bytes parse as a signature"),
+    };
+    let live = negotiations
+        .get_mut(&temporary_channel_id)
+        .and_then(|negotiation| negotiation.live.as_mut());
+    let Some(pending) = live else {
+        return Ok(unsigned_funding_created());
     };
     let open_channel = &pending.open_channel;
     let Some(accept_channel) = pending.accept_channel.as_ref() else {
-        return Ok(FundingCreated {
-            temporary_channel_id,
-            funding_txid: funding_outpoint.txid,
-            funding_output_index,
-            signature: Signature::from_compact(&[0u8; 64])
-                .expect("zero bytes parse as a signature"),
-        });
+        return Ok(unsigned_funding_created());
     };
 
     let opener_funding_privkey =
@@ -901,9 +945,7 @@ fn build_funding_created(
     // so repeated `funding_created` messages can still be built, but a later
     // `open_channel` reusing this `temporary_channel_id` starts a fresh
     // negotiation.
-    if let Some(pending) = negotiations.get_mut(&temporary_channel_id) {
-        pending.funding_built = true;
-    }
+    pending.funding_built = true;
 
     Ok(FundingCreated {
         temporary_channel_id,
@@ -951,6 +993,22 @@ fn build_shutdown(variables: &[Option<Variable>], inputs: &[usize]) -> Shutdown 
     let channel_id = resolve_channel_id(variables, inputs[0]);
     let scriptpubkey = resolve_bytes(variables, inputs[1]).to_vec();
     Shutdown::for_channel(channel_id, scriptpubkey)
+}
+
+/// Builds an `Error` message from 2 input variables (wire order).
+fn build_error(variables: &[Option<Variable>], inputs: &[usize]) -> smite::bolt::Error {
+    smite::bolt::Error {
+        channel_id: resolve_channel_id(variables, inputs[0]),
+        data: resolve_bytes(variables, inputs[1]).to_vec(),
+    }
+}
+
+/// Builds a `Warning` message from 2 input variables (wire order).
+fn build_warning(variables: &[Option<Variable>], inputs: &[usize]) -> Warning {
+    Warning {
+        channel_id: resolve_channel_id(variables, inputs[0]),
+        data: resolve_bytes(variables, inputs[1]).to_vec(),
+    }
 }
 
 /// Builds a signed `ChannelAnnouncement` from 7 input variables.
@@ -1255,41 +1313,71 @@ fn is_channel_ready_expected(
 /// `funding_created` has been built, it is overwritten, allowing the
 /// `temporary_channel_id` to be reused for a new negotiation.
 fn record_send_open_channel(
-    negotiations: &mut HashMap<TemporaryChannelId, PendingChannel>,
+    negotiations: &mut HashMap<TemporaryChannelId, ChannelNegotiation>,
     open_channel: &OpenChannel,
 ) {
-    if negotiations
-        .get(&open_channel.temporary_channel_id)
+    let negotiation = negotiations
+        .entry(open_channel.temporary_channel_id)
+        .or_default();
+    if negotiation
+        .live
+        .as_ref()
         .is_some_and(|pending| !pending.funding_built)
     {
         return;
     }
 
-    negotiations.insert(
-        open_channel.temporary_channel_id,
-        PendingChannel {
-            open_channel: open_channel.clone(),
-            accept_channel: None,
-            funding_built: false,
-        },
-    );
+    negotiation.live = Some(PendingChannel {
+        open_channel: open_channel.clone(),
+        accept_channel: None,
+        funding_built: false,
+    });
 }
 
-/// Pairs a received `accept_channel` with the recorded `open_channel` of the
-/// same `temporary_channel_id`.
+/// Checks a received `accept_channel` against the negotiation it answers and
+/// records it, unless that negotiation was failed by a sent `error`: the
+/// target has forgotten it.
 ///
-/// # Panics
+/// The message only names a `temporary_channel_id`, so it answers the first
+/// negotiation it is valid for: those awaiting an orphan reply, oldest first,
+/// then the live one. The target answers in order but may never answer a
+/// negotiation we failed, so skipped ones are dropped.
 ///
-/// Panics if no matching `open_channel` exists. This should be unreachable, as
-/// `AcceptChannelOracle` reports such messages as a [`Violation`].
+/// # Errors
+///
+/// Returns the [`Violation`] of the oldest negotiation if it is valid for none.
 fn record_recv_accept_channel(
-    negotiations: &mut HashMap<TemporaryChannelId, PendingChannel>,
+    negotiations: &mut HashMap<TemporaryChannelId, ChannelNegotiation>,
     accept_channel: &AcceptChannel,
-) {
-    negotiations
-        .get_mut(&accept_channel.temporary_channel_id)
-        .expect("AcceptChannelOracle guaranteed this temporary_channel_id exists")
+    negotiated_features: &Features,
+) -> Result<(), Violation> {
+    let evaluate = |negotiation: Option<&PendingChannel>| {
+        AcceptChannelOracle.evaluate(&AcceptChannelContext {
+            accept_channel,
+            negotiation,
+            negotiated_features,
+        })
+    };
+    let Some(negotiation) = negotiations.get_mut(&accept_channel.temporary_channel_id) else {
+        return evaluate(None);
+    };
+
+    let mut oldest_violation = None;
+    while let Some(orphan) = negotiation.awaiting_orphan_reply.pop_front() {
+        match evaluate(Some(&orphan)) {
+            Ok(()) => return Ok(()),
+            Err(violation) => _ = oldest_violation.get_or_insert(violation),
+        }
+    }
+
+    evaluate(negotiation.live.as_ref())
+        .map_err(|violation| oldest_violation.unwrap_or(violation))?;
+    negotiation
+        .live
+        .as_mut()
+        .expect("AcceptChannelOracle guaranteed this negotiation exists")
         .accept_channel = Some(accept_channel.clone());
+    Ok(())
 }
 
 /// Records that a `funding_signed` has been accepted for its channel.
@@ -1306,6 +1394,35 @@ fn record_recv_funding_signed(
         .get_mut(&funding_signed.channel_id)
         .expect("FundingSignedOracle guaranteed this channel_id exists")
         .funding_signed_received = true;
+}
+
+/// Forgets the negotiations and funded channels failed by a sent `error`, as
+/// the target may, so negotiating their `temporary_channel_id` or funding
+/// outpoint again is not reported as reuse. `ChannelId::ALL` fails them all.
+///
+/// The target answers messages in order, so a reply not yet received is still
+/// in flight. Its negotiation keeps awaiting that reply so that it is neither
+/// reported as unknown nor paired with a later `open_channel` reusing the id.
+/// Likewise, a channel still awaiting `funding_signed` stays tracked.
+fn record_send_error(
+    negotiations: &mut HashMap<TemporaryChannelId, ChannelNegotiation>,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    channel_id: ChannelId,
+) {
+    if channel_id == ChannelId::ALL {
+        negotiations.values_mut().for_each(ChannelNegotiation::fail);
+        channel_states.retain(|_, state| !state.funding_signed_received);
+    } else {
+        if let Some(negotiation) = negotiations.get_mut(&channel_id) {
+            negotiation.fail();
+        }
+        if channel_states
+            .get(&channel_id)
+            .is_some_and(|state| state.funding_signed_received)
+        {
+            channel_states.remove(&channel_id);
+        }
+    }
 }
 
 /// Extracts a field from a parsed `accept_channel` message.
