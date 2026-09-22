@@ -142,6 +142,9 @@ pub struct ProgramContext {
     /// feature bits are treated equivalently, and the distinction carries no
     /// meaning here.
     pub negotiated_features: Features,
+    /// Our node's secret key: the Noise static key used for the handshake, and
+    /// so the identity the target knows us by.
+    pub local_node_secret: [u8; 32],
 }
 
 /// Abstraction over a Noise-encrypted connection, allowing mock implementations
@@ -362,6 +365,9 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                 }
                 Operation::LoadChainHashFromContext => {
                     Some(Variable::ChainHash(self.context.chain_hash))
+                }
+                Operation::LoadLocalNodeSecretFromContext => {
+                    Some(Variable::PrivateKey(self.context.local_node_secret))
                 }
 
                 // -- Compute operations --
