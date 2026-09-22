@@ -501,7 +501,11 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         instr.operation.input_types()[0],
                     );
                     log::debug!("[{:?}] RecvAcceptChannel: waiting", start.elapsed());
-                    let ac: AcceptChannel = recv_bolt(&mut self.conn, RECV_IDLE_TIMEOUT)?;
+                    let ac: AcceptChannel = recv_explicit_bolt(
+                        &mut self.conn,
+                        &mut self.channel_states,
+                        RECV_IDLE_TIMEOUT,
+                    )?;
                     log::debug!("[{:?}] RecvAcceptChannel: received", start.elapsed());
                     AcceptChannelOracle.evaluate(&AcceptChannelContext {
                         accept_channel: &ac,
@@ -519,7 +523,11 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         instr.operation.input_types()[0],
                     );
                     log::debug!("[{:?}] RecvFundingSigned: waiting", start.elapsed());
-                    let fs: FundingSigned = recv_bolt(&mut self.conn, RECV_IDLE_TIMEOUT)?;
+                    let fs: FundingSigned = recv_explicit_bolt(
+                        &mut self.conn,
+                        &mut self.channel_states,
+                        RECV_IDLE_TIMEOUT,
+                    )?;
                     log::debug!("[{:?}] RecvFundingSigned: received", start.elapsed());
                     FundingSignedOracle.evaluate(&FundingSignedContext {
                         funding_signed: &fs,
@@ -532,7 +540,11 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                 Operation::RecvChannelReady => {
                     if is_channel_ready_expected(&self.channel_states, &mut self.bitcoin_cli) {
                         log::debug!("[{:?}] RecvChannelReady: waiting", start.elapsed());
-                        recv_channel_ready(&mut self.conn, &mut self.channel_states)?;
+                        recv_implicit_bolt::<ChannelReady>(
+                            &mut self.conn,
+                            &mut self.channel_states,
+                            RECV_CHANNEL_READY_TIMEOUT,
+                        )?;
                         log::debug!("[{:?}] RecvChannelReady: received", start.elapsed());
                     }
                     None
@@ -1123,12 +1135,34 @@ fn build_channel_update(variables: &[Option<Variable>], inputs: &[usize]) -> Cha
     cu
 }
 
+/// Returns `true` if a message of type `msg_type` is handled implicitly by the
+/// executor, i.e. recorded into `channel_states` by [`recv_non_ping`] and
+/// skipped by explicit receives.
+///
+/// This currently includes:
+/// - `channel_ready`
+fn is_implicitly_handled(msg_type: MessageType) -> bool {
+    matches!(msg_type, MessageType::CHANNEL_READY)
+}
+
 /// Receives the next message of interest, auto-responding to pings and silently
 /// skipping unknown odd-type messages.
 ///
+/// Implicitly handled messages (see [`is_implicitly_handled`]) are recorded
+/// into `channel_states` before being returned.
+///
 /// The read is bounded by `timeout`.
+///
+/// # Errors
+///
+/// Returns [`ExecuteError::PeerError`] on a received `error`, or any error from
+/// receiving, decoding, or recording the message.
 #[allow(clippy::similar_names)] // ping and pong are canonical names
-fn recv_non_ping(conn: &mut impl Connection, timeout: Duration) -> Result<Message, ExecuteError> {
+fn recv_non_ping(
+    conn: &mut impl Connection,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    timeout: Duration,
+) -> Result<Message, ExecuteError> {
     let previous = conn.read_timeout()?;
     conn.set_read_timeout(Some(timeout))?;
 
@@ -1139,6 +1173,11 @@ fn recv_non_ping(conn: &mut impl Connection, timeout: Duration) -> Result<Messag
             Message::Ping(ping) => {
                 let pong = Message::Pong(Pong::respond_to(&ping)).encode();
                 conn.send_message(&pong)?;
+            }
+            Message::ChannelReady(ref cr) => {
+                log::debug!("received channel_ready on {}", cr.channel_id);
+                record_recv_channel_ready(channel_states, cr)?;
+                return Ok(msg);
             }
             Message::Unknown { .. } => {
                 log::debug!("skipping message {msg}");
@@ -1182,46 +1221,79 @@ fn recv_non_ping(conn: &mut impl Connection, timeout: Duration) -> Result<Messag
     result
 }
 
-/// Receives and decodes the next message, requiring it to be an `M`.
+/// Receives and decodes the next implicitly handled message of type `M`.
+///
+/// Implicitly handled messages are recorded into `channel_states`, and the
+/// receive continues past implicit messages that are not an `M`.
 ///
 /// # Errors
 ///
-/// Returns [`ExecuteError::UnexpectedMessage`] if the received message is not
-/// an `M`.
-fn recv_bolt<M: FromMessage>(
+/// Returns [`ExecuteError::UnexpectedMessage`] on a message that is not
+/// implicitly handled, or any error from [`recv_non_ping`].
+///
+/// # Panics
+///
+/// Panics if `M` is not implicitly handled, which would make every receive
+/// fail. Such a call is a bug; use [`recv_explicit_bolt`] instead.
+fn recv_implicit_bolt<M: FromMessage>(
     conn: &mut impl Connection,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
     timeout: Duration,
 ) -> Result<M, ExecuteError> {
-    let msg = recv_non_ping(conn, timeout)?;
+    assert!(
+        is_implicitly_handled(M::TYPE),
+        "recv_implicit_bolt called with explicitly handled type {}",
+        M::TYPE
+    );
+    loop {
+        let msg = recv_non_ping(conn, channel_states, timeout)?;
+        if !is_implicitly_handled(msg.msg_type()) {
+            return Err(ExecuteError::UnexpectedMessage {
+                expected: M::TYPE,
+                got: msg.msg_type(),
+            });
+        }
+        if let Some(m) = M::from_message(msg) {
+            return Ok(m);
+        }
+    }
+}
+
+/// Receives and decodes the next explicitly handled message, requiring it to be
+/// an `M`.
+///
+/// Implicitly handled messages are recorded into `channel_states` and skipped.
+///
+/// # Errors
+///
+/// Returns [`ExecuteError::UnexpectedMessage`] if the first explicitly handled
+/// message is not an `M`, or any error from [`recv_non_ping`].
+///
+/// # Panics
+///
+/// Panics if `M` is implicitly handled, which would skip every `M` until the
+/// read times out. Such a call is a bug; use [`recv_implicit_bolt`] instead.
+fn recv_explicit_bolt<M: FromMessage>(
+    conn: &mut impl Connection,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    timeout: Duration,
+) -> Result<M, ExecuteError> {
+    assert!(
+        !is_implicitly_handled(M::TYPE),
+        "recv_explicit_bolt called with implicitly handled type {}",
+        M::TYPE
+    );
+    let msg = loop {
+        let msg = recv_non_ping(conn, channel_states, timeout)?;
+        if !is_implicitly_handled(msg.msg_type()) {
+            break msg;
+        }
+    };
     let got = msg.msg_type();
     M::from_message(msg).ok_or(ExecuteError::UnexpectedMessage {
         expected: M::TYPE,
         got,
     })
-}
-
-/// Receives and decodes a `channel_ready` message.
-///
-/// The `second_per_commitment_point` is recorded as the counterparty's next
-/// per-commitment point on the channel it identifies.
-///
-/// # Errors
-///
-/// Returns [`ExecuteError::UnexpectedMessage`] if the received message is not a
-/// `channel_ready`, or [`Violation::UnknownChannel`] if no channel state exists
-/// for the message's `channel_id`.
-fn recv_channel_ready(
-    conn: &mut impl Connection,
-    channel_states: &mut HashMap<ChannelId, ChannelState>,
-) -> Result<(), ExecuteError> {
-    let cr: ChannelReady = recv_bolt(conn, RECV_CHANNEL_READY_TIMEOUT)?;
-
-    let state = channel_states
-        .get_mut(&cr.channel_id)
-        .ok_or(Violation::UnknownChannel(cr.channel_id))?;
-    *state.next_counterparty_per_commitment_point_mut() = Some(cr.second_per_commitment_point);
-
-    Ok(())
 }
 
 /// Returns `true` if the target owes us a `channel_ready` message.
@@ -1306,6 +1378,25 @@ fn record_recv_funding_signed(
         .get_mut(&funding_signed.channel_id)
         .expect("FundingSignedOracle guaranteed this channel_id exists")
         .funding_signed_received = true;
+}
+
+/// Records a received `channel_ready`'s `second_per_commitment_point` as the
+/// counterparty's next per-commitment point on the channel it identifies.
+///
+/// # Errors
+///
+/// Returns [`Violation::UnknownChannel`] if no channel state exists for the
+/// message's `channel_id`.
+fn record_recv_channel_ready(
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    channel_ready: &ChannelReady,
+) -> Result<(), Violation> {
+    let state = channel_states
+        .get_mut(&channel_ready.channel_id)
+        .ok_or(Violation::UnknownChannel(channel_ready.channel_id))?;
+    *state.next_counterparty_per_commitment_point_mut() =
+        Some(channel_ready.second_per_commitment_point);
+    Ok(())
 }
 
 /// Extracts a field from a parsed `accept_channel` message.
