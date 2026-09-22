@@ -527,13 +527,14 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
 
                 Operation::SendShutdown => {
                     let sd = build_shutdown(&variables, &instr.inputs);
-                    let encoded = Message::Shutdown(sd).encode();
+                    let encoded = Message::Shutdown(sd.clone()).encode();
                     log::debug!(
                         "[{:?}] SendShutdown: {} bytes",
                         start.elapsed(),
                         encoded.len()
                     );
                     self.conn.send_message(&encoded)?;
+                    record_send_shutdown(&mut self.channel_states, &sd);
                     None
                 }
 
@@ -586,6 +587,19 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         log::debug!("[{:?}] RecvChannelReady: received", start.elapsed());
                     }
                     None
+                }
+
+                Operation::RecvShutdown => {
+                    let mut scriptpubkey = Vec::new();
+                    if is_shutdown_expected(&self.channel_states) {
+                        log::debug!("[{:?}] RecvShutdown: waiting", start.elapsed());
+                        // `shutdown` is handled implicitly inside `recv_bolt`, so it is
+                        // already recorded into its channel's state.
+                        let sd = self.recv_bolt::<Shutdown>(RECV_IDLE_TIMEOUT)?;
+                        log::debug!("[{:?}] RecvShutdown: received", start.elapsed());
+                        scriptpubkey = sd.scriptpubkey;
+                    }
+                    Some(Variable::Bytes(scriptpubkey))
                 }
 
                 Operation::MineBlocks(v) => {
@@ -689,6 +703,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
     ///
     /// This currently includes:
     /// - `channel_ready`
+    /// - `shutdown`
     ///
     /// # Errors
     ///
@@ -724,6 +739,20 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     funding_scid,
                     cr,
                 );
+                Ok(true)
+            }
+            Message::Shutdown(sd) => {
+                log::debug!("received shutdown on {}", sd.channel_id);
+                // TODO: judge received `shutdown`s with an oracle here. It must reject one:
+                // * for an untracked channel
+                // * for a channel whose `funding_signed` we haven't received yet
+                // * for a channel we already received a `shutdown` on
+                // * with a `scriptpubkey` in a form the negotiated features disallow
+                // * with a `scriptpubkey` differing from a non-zero-length upfront shutdown
+                //   script the target sent in `accept_channel` if both advertised the feature
+                // * sent while updates are pending on our commitment transaction, once we can
+                //   send updates
+                record_recv_shutdown(&mut self.channel_states, sd);
                 Ok(true)
             }
             _ => Ok(false),
@@ -1342,6 +1371,21 @@ fn is_channel_ready_expected(
     })
 }
 
+/// Returns `true` if some tracked channel is awaiting a reply to our `shutdown`:
+/// we sent one there, the target has sent its `channel_ready`, and it has not
+/// replied yet.
+///
+/// A target that has not sent `channel_ready` may ignore our `shutdown`, so we
+/// do not wait for a reply before then.
+fn is_shutdown_expected(channel_states: &HashMap<ChannelId, ChannelState>) -> bool {
+    // TODO: we only expect `shutdown` when no updates are outstanding
+    channel_states.values().any(|state| {
+        state.our_shutdown_script.is_some()
+            && state.counterparty_shutdown_script.is_none()
+            && state.received_channel_ready_point.is_some()
+    })
+}
+
 /// Records a sent `open_channel`, keyed by `temporary_channel_id`, so the
 /// funding flow can build commitments from the values actually put on the wire.
 ///
@@ -1483,6 +1527,41 @@ fn record_recv_channel_ready(
             commitment_number: 1,
         },
     );
+}
+
+/// Records a sent `shutdown`'s `scriptpubkey` in its channel's state, which is
+/// what makes a reply expected there.
+///
+/// The first one is kept: a target may ignore any `shutdown` after the first,
+/// so our first one is what it is replying to. A `shutdown` for a channel we do
+/// not track is not recorded, leaving no reply expected for it.
+fn record_send_shutdown(
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    shutdown: &Shutdown,
+) {
+    if let Some(state) = channel_states.get_mut(&shutdown.channel_id) {
+        state
+            .our_shutdown_script
+            .get_or_insert_with(|| shutdown.scriptpubkey.clone());
+    }
+}
+
+/// Records a received `shutdown`'s `scriptpubkey` in its channel's state.
+///
+/// The first one is kept: a target may ignore any `shutdown` after the first,
+/// so its first one is its reply. A `shutdown` for a channel we do not track is
+/// not recorded.
+fn record_recv_shutdown(
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    shutdown: &Shutdown,
+) {
+    if let Some(state) = channel_states.get_mut(&shutdown.channel_id) {
+        // TODO: a second `shutdown` on the same channel violates BOLT 2 and is dropped
+        // here unjudged until we have a shutdown oracle
+        state
+            .counterparty_shutdown_script
+            .get_or_insert_with(|| shutdown.scriptpubkey.clone());
+    }
 }
 
 /// Extracts a field from a parsed `accept_channel` message.
