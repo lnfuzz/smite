@@ -10,7 +10,7 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::config::CampaignConfig;
-use crate::utils::{find_in_path, is_executable};
+use crate::utils::{afl_bin_dir, find_in_path, is_executable};
 
 /// AFL++ binaries required for campaign execution and corpus minimization.
 const AFL_TOOLS: &[&str] = &["afl-fuzz", "afl-cmin", "afl-tmin", "afl-whatsup"];
@@ -178,7 +178,7 @@ impl DoctorCommand {
             None => None,
         };
         let inputs = DoctorInputs::resolve(config.as_ref(), args);
-        let aflpp_root = &inputs.aflpp_root;
+        let afl_bin = afl_bin_dir(&inputs.aflpp_root);
         let smite_dir = &inputs.smite_dir;
 
         // Keep a predictable order for operator readability and stable JSON output.
@@ -190,14 +190,14 @@ impl DoctorCommand {
             ),
             DoctorCheck::new("/dev/kvm accessible", check_kvm_access()),
             DoctorCheck::new("Docker daemon reachable", check_docker_daemon()),
-            DoctorCheck::new("AFL++ built with Nyx support", check_libnyx(aflpp_root)),
+            DoctorCheck::new("AFL++ built with Nyx support", check_libnyx(&afl_bin)),
             DoctorCheck::new("VMware backdoor enabled", check_vmware_backdoor_enabled()),
         ];
 
         for &tool in AFL_TOOLS {
             checks.push(DoctorCheck::new(
                 tool,
-                require_executable(&aflpp_root.join(tool)),
+                require_executable(&afl_bin.join(tool)),
             ));
         }
 
@@ -315,9 +315,9 @@ fn check_docker_daemon() -> Result<(), CheckFailure> {
     }
 }
 
-/// Checks whether `libnyx.so` exists under the AFL++ root used for fuzzing.
-fn check_libnyx(aflpp_root: &Path) -> Result<(), CheckFailure> {
-    if aflpp_root.join("libnyx.so").exists() {
+/// Checks whether `libnyx.so` exists in AFL++'s binary directory.
+fn check_libnyx(afl_bin: &Path) -> Result<(), CheckFailure> {
+    if afl_bin.join("libnyx.so").exists() {
         Ok(())
     } else {
         Err(CheckFailure::LibnyxNotFound)

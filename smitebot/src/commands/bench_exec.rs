@@ -22,7 +22,7 @@ use crate::commands::build::{BuildInputs, run_build};
 use crate::config::CampaignConfig;
 use crate::latency_stats::{LatencyStats, avg_duration, mean_stddev};
 use crate::libnyx::{Libnyx, NyxReturn, PAYLOAD_HEADER_SIZE};
-use crate::utils::{pin_to_cpu, setup_nyx};
+use crate::utils::{afl_bin_dir, pin_to_cpu, setup_nyx};
 
 /// Default number of timed executions when `--iterations` is not given.
 const DEFAULT_ITERATIONS: u64 = 1000;
@@ -487,7 +487,7 @@ fn locate_libnyx(config: &CampaignConfig) -> Option<PathBuf> {
         return None;
     }
 
-    let libnyx_path = config.aflpp_path.join("libnyx.so");
+    let libnyx_path = afl_bin_dir(&config.aflpp_path).join("libnyx.so");
     if !libnyx_path.exists() {
         log::error!(
             "{} not found; build AFL++ with Nyx support (see nyx_mode/README.md)",
