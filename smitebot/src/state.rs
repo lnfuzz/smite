@@ -102,6 +102,8 @@ pub enum StateError {
         path: PathBuf,
         source: serde_json::Error,
     },
+    #[error("unable to determine home directory")]
+    HomeDir,
 }
 
 impl CampaignState {
@@ -141,7 +143,7 @@ impl CampaignState {
 
     /// Saves the campaign state as JSON, using an atomic write to prevent
     /// corruption if the process is interrupted.
-    pub fn save(&self, path: &Path) -> Result<(), StateError> {
+    fn save(&self, path: &Path) -> Result<(), StateError> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|source| StateError::CreateDir {
                 path: parent.to_path_buf(),
@@ -163,8 +165,14 @@ impl CampaignState {
         Ok(())
     }
 
+    /// Saves the campaign state to `~/.smitebot/runs/<id>/state.json`.
+    pub fn save_campaign(&self) -> Result<(), StateError> {
+        let runs_dir = Self::runs_dir().ok_or(StateError::HomeDir)?;
+        self.save(&runs_dir.join(&self.id).join("state.json"))
+    }
+
     /// Loads campaign state from a JSON file written by `save`.
-    pub fn load(path: &Path) -> Result<Self, StateError> {
+    fn load(path: &Path) -> Result<Self, StateError> {
         let contents = fs::read_to_string(path).map_err(|source| StateError::Read {
             path: path.to_path_buf(),
             source,
@@ -173,6 +181,12 @@ impl CampaignState {
             path: path.to_path_buf(),
             source,
         })
+    }
+
+    /// Loads state for campaign `id` from `~/.smitebot/runs/<id>/state.json`.
+    pub fn load_campaign(id: &str) -> Result<Self, StateError> {
+        let runs_dir = Self::runs_dir().ok_or(StateError::HomeDir)?;
+        Self::load(&runs_dir.join(id).join("state.json"))
     }
 }
 
@@ -323,6 +337,11 @@ sharedir = "/tmp/nyx"
         assert_eq!(loaded.id, state.id);
         assert_eq!(loaded.status, Status::Stopped);
         assert_eq!(loaded.stop_time, Some(1_749_469_200));
+    }
+
+    #[test]
+    fn load_campaign_returns_err_for_missing_campaign() {
+        assert!(CampaignState::load_campaign("nonexistent-campaign-xkcd-abc123").is_err());
     }
 
     #[test]

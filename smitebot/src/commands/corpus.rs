@@ -70,38 +70,20 @@ impl CorpusCommand {
     }
 }
 
-/// Loads the campaign state for `campaign_id`, logging a not-found hint on error.
-fn load_campaign(runs_dir: &Path, campaign_id: &str) -> Option<CampaignState> {
-    let state_path = runs_dir.join(campaign_id).join("state.json");
-    match CampaignState::load(&state_path) {
-        Ok(state) => Some(state),
-        Err(e) => {
-            log::error!("{e}");
-            log::error!(
-                "campaign '{campaign_id}' not found; list campaigns with: ls {}",
-                runs_dir.display()
-            );
-            None
-        }
-    }
-}
-
 /// Loads every campaign's state, then merges their runner queues into `output`.
 ///
 /// All states are loaded before any file is written, so a bad campaign ID fails
 /// before the output directory is touched rather than leaving a partial merge.
 fn execute_merge(args: &MergeArgs) -> bool {
-    let Some(runs_dir) = CampaignState::runs_dir() else {
-        log::error!("unable to determine home directory");
-        return false;
-    };
-
     let mut states = Vec::with_capacity(args.campaign_ids.len());
     for campaign_id in &args.campaign_ids {
-        let Some(state) = load_campaign(&runs_dir, campaign_id) else {
-            return false;
-        };
-        states.push(state);
+        match CampaignState::load_campaign(campaign_id) {
+            Ok(state) => states.push(state),
+            Err(e) => {
+                log::error!("{e}");
+                return false;
+            }
+        }
     }
 
     if output_dir_occupied(&args.output) {
@@ -222,8 +204,12 @@ fn execute_minimize(args: &MinimizeArgs) -> bool {
         return false;
     };
 
-    let Some(state) = load_campaign(&runs_dir, &args.campaign_id) else {
-        return false;
+    let state = match CampaignState::load_campaign(&args.campaign_id) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("{e}");
+            return false;
+        }
     };
 
     // The --aflpp-path flag overrides the path recorded at campaign start, for when
