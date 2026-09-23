@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use bitcoin::secp256k1;
 use serde::Deserialize;
-use smite::bitcoin::BitcoinCli;
+use smite::bitcoin::BitcoindClient;
 use smite::process::ManagedProcess;
 
 use super::bitcoind;
@@ -102,7 +102,7 @@ pub struct LndTarget {
     coverage_pipes: Option<CoveragePipes>,
     pubkey: secp256k1::PublicKey,
     addr: SocketAddr,
-    bitcoin_cli: BitcoinCli,
+    bitcoind_client: BitcoindClient,
     #[allow(dead_code)] // TempDir auto-cleans on drop
     temp_dir: Option<tempfile::TempDir>,
 }
@@ -286,7 +286,7 @@ impl Target for LndTarget {
     fn start(config: Self::Config) -> Result<Self, TargetError> {
         let (data_path, temp_dir) = bitcoind::resolve_data_dir()?;
 
-        let (bitcoind, bitcoin_cli) = bitcoind::start(&config.bitcoind_config(), &data_path)?;
+        let (bitcoind, bitcoind_client) = bitcoind::start(&config.bitcoind_config(), &data_path)?;
         let (lnd, coverage_pipes, pubkey) = Self::start_lnd(&config, &data_path)?;
         let addr = SocketAddr::from(([127, 0, 0, 1], config.lnd_p2p_port));
 
@@ -298,7 +298,7 @@ impl Target for LndTarget {
             coverage_pipes,
             pubkey,
             addr,
-            bitcoin_cli,
+            bitcoind_client,
             temp_dir,
         })
     }
@@ -315,8 +315,8 @@ impl Target for LndTarget {
         LndRpc
     }
 
-    fn bitcoin_cli(&self) -> &BitcoinCli {
-        &self.bitcoin_cli
+    fn bitcoind_client(&self) -> &BitcoindClient {
+        &self.bitcoind_client
     }
 
     fn check_alive(&mut self) -> Result<(), TargetError> {

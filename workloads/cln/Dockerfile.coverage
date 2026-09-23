@@ -131,7 +131,7 @@ COPY --from=builder /usr/local/bin/lightningd /usr/local/bin/lightningd
 COPY --from=builder /usr/local/bin/lightning-cli /usr/local/bin/lightning-cli
 COPY --from=builder /usr/local/libexec/c-lightning/ /usr/local/libexec/c-lightning/
 
-# Copy Bitcoin Core binaries
+# Copy Bitcoin Core binaries (CLN's bcli plugin shells out to bitcoin-cli)
 COPY --from=builder /usr/local/bin/bitcoind /usr/local/bin/bitcoind
 COPY --from=builder /usr/local/bin/bitcoin-cli /usr/local/bin/bitcoin-cli
 

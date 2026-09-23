@@ -230,7 +230,7 @@ pub enum Operation {
     RecvChannelReady,
     /// Mines the given number of blocks on the Bitcoin network.
     MineBlocks(u8),
-    /// Sign wallet inputs of the transaction and broadcast it via `bitcoin-cli`.
+    /// Sign wallet inputs of the transaction and broadcast it via `bitcoind`.
     /// Input: `FundingTransaction`.
     BroadcastTransaction,
     // -- Query: read state from outside the program --

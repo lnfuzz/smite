@@ -3,7 +3,7 @@
 
 use std::marker::PhantomData;
 
-use smite::bitcoin::BitcoinCli;
+use smite::bitcoin::BitcoindClient;
 use smite::noise::NoiseConnection;
 use smite::scenarios::{Scenario, ScenarioError, ScenarioResult};
 use smite::violation::Violation;
@@ -20,13 +20,13 @@ use crate::targets::Target;
 /// mutators or generators; the executor panics on invariant violations
 /// (out-of-bounds variable refs, type mismatches, `MineBlocks(0)`, etc.).
 pub struct IrScenario<T: Target, S: SnapshotSetup<T>> {
-    /// Executes IR programs and owns the connection, bitcoin-cli handle,
+    /// Executes IR programs and owns the connection, bitcoind client,
     /// program context, and the target's RPC handle. Created once before the
     /// snapshot and reused across fuzzing runs.
     ///
     /// Declared before `target` so the peer connection closes first and doesn't
     /// stall the target's shutdown.
-    executor: Executor<NoiseConnection, BitcoinCli, T::Rpc>,
+    executor: Executor<NoiseConnection, BitcoindClient, T::Rpc>,
     target: T,
     // S is only used for static dispatch on S::setup(), not stored.
     _phantom: PhantomData<S>,
@@ -36,8 +36,8 @@ impl<T: Target, S: SnapshotSetup<T>> Scenario for IrScenario<T, S> {
     fn new(_args: &[String]) -> Result<Self, ScenarioError> {
         let target = T::start(T::Config::default())?;
         let (conn, context) = S::setup(&target)?;
-        let bitcoin_cli = target.bitcoin_cli().clone();
-        let executor = Executor::new(conn, bitcoin_cli, target.rpc(), context);
+        let bitcoind_client = target.bitcoind_client().clone();
+        let executor = Executor::new(conn, bitcoind_client, target.rpc(), context);
         Ok(Self {
             executor,
             target,

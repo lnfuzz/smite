@@ -6,7 +6,7 @@
 use bitcoin::secp256k1::ecdsa::Signature;
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use bitcoin::{OutPoint, ScriptBuf, Txid};
-use smite::bitcoin::{BitcoinCli, TxBlockPosition, Utxo};
+use smite::bitcoin::{BitcoindClient, TxBlockPosition, Utxo};
 use smite::bolt::{
     AcceptChannel, AnnouncementSignatures, ChannelAnnouncement, ChannelId, ChannelReady,
     ChannelReadyTlvs, ChannelUpdate, Features, FromMessage, FundingCreated, FundingSigned, Message,
@@ -62,7 +62,7 @@ pub const RECV_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
 /// reconfiguring or patching CLN to poll more frequently.
 pub const RECV_CHANNEL_READY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Abstraction over bitcoin-cli operations, allowing mock implementations in tests.
+/// Abstraction over bitcoind operations, allowing mock implementations in tests.
 pub trait BitcoinRpc {
     /// Mines the given number of blocks, including any transactions in the
     /// `private_mempool` in the first block.
@@ -98,33 +98,33 @@ pub trait BitcoinRpc {
     fn get_transaction_block_position(&mut self, txid: Txid) -> Option<TxBlockPosition>;
 }
 
-impl BitcoinRpc for BitcoinCli {
+impl BitcoinRpc for BitcoindClient {
     fn mine_blocks(&mut self, num_blocks: u8, private_mempool: &[String]) {
-        BitcoinCli::mine_blocks(self, num_blocks, private_mempool);
+        BitcoindClient::mine_blocks(self, num_blocks, private_mempool);
     }
 
     fn get_utxos(&mut self) -> Vec<Utxo> {
-        BitcoinCli::get_utxos(self)
+        BitcoindClient::get_utxos(self)
     }
 
     fn get_new_address_script_pubkey(&mut self) -> ScriptBuf {
-        BitcoinCli::get_new_address_script_pubkey(self)
+        BitcoindClient::get_new_address_script_pubkey(self)
     }
 
     fn sign_and_broadcast_tx(&mut self, tx: &bitcoin::Transaction) -> Option<String> {
-        BitcoinCli::sign_and_broadcast_tx(self, tx)
+        BitcoindClient::sign_and_broadcast_tx(self, tx)
     }
 
     fn lock_utxos(&mut self, outpoints: &[OutPoint]) {
-        BitcoinCli::lock_utxos(self, outpoints);
+        BitcoindClient::lock_utxos(self, outpoints);
     }
 
     fn get_transaction_confirmations(&mut self, txid: Txid) -> u32 {
-        BitcoinCli::get_transaction_confirmations(self, txid)
+        BitcoindClient::get_transaction_confirmations(self, txid)
     }
 
     fn get_transaction_block_position(&mut self, txid: Txid) -> Option<TxBlockPosition> {
-        BitcoinCli::get_transaction_block_position(self, txid)
+        BitcoindClient::get_transaction_block_position(self, txid)
     }
 }
 
@@ -239,7 +239,7 @@ pub struct Executor<C, B, R> {
     /// Connection used to send and receive Lightning messages.
     conn: C,
     /// Interface to bitcoind for wallet and chain operations.
-    bitcoin_cli: B,
+    bitcoind_client: B,
     /// Interface for interacting with the target node through RPC.
     rpc: R,
     /// Immutable state captured during snapshot setup.
@@ -268,13 +268,13 @@ pub struct Executor<C, B, R> {
 }
 
 impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
-    /// Creates an executor with the given connection, bitcoin-cli handle,
+    /// Creates an executor with the given connection, bitcoind client,
     /// program context, and target RPC handle. Channel state and negotiations
     /// start empty.
-    pub fn new(conn: C, bitcoin_cli: B, rpc: R, context: ProgramContext) -> Self {
+    pub fn new(conn: C, bitcoind_client: B, rpc: R, context: ProgramContext) -> Self {
         Self {
             conn,
-            bitcoin_cli,
+            bitcoind_client,
             rpc,
             context,
             channel_states: HashMap::new(),
@@ -311,7 +311,6 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
     /// - input variable index out of bounds
     /// - input variable refers to a void instruction
     /// - input variable has the wrong type
-    /// - `MineBlocks(0)` (panics inside `BitcoinCli::mine_blocks`)
     /// - `LoadShutdownScript(AnySegwit { .. })` with an out-of-range version or
     ///   program length (panics inside the encoder)
     /// - `LoadBytes` / `LoadFeatures` payload exceeding `MAX_MESSAGE_SIZE` (panics
@@ -381,7 +380,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     let ft = create_funding_transaction(
                         &variables,
                         &instr.inputs,
-                        &mut self.bitcoin_cli,
+                        &mut self.bitcoind_client,
                     )?;
                     Some(Variable::FundingTransaction(ft))
                 }
@@ -530,7 +529,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                 }
 
                 Operation::RecvChannelReady => {
-                    if is_channel_ready_expected(&self.channel_states, &mut self.bitcoin_cli) {
+                    if is_channel_ready_expected(&self.channel_states, &mut self.bitcoind_client) {
                         log::debug!("[{:?}] RecvChannelReady: waiting", start.elapsed());
                         recv_channel_ready(&mut self.conn, &mut self.channel_states)?;
                         log::debug!("[{:?}] RecvChannelReady: received", start.elapsed());
@@ -545,7 +544,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         .into_iter()
                         .map(|(_, hex)| hex)
                         .collect();
-                    self.bitcoin_cli.mine_blocks(*v, &private_mempool);
+                    self.bitcoind_client.mine_blocks(*v, &private_mempool);
                     self.rpc.chain_sync();
                     self.mined_txids.extend(self.unmined_txids.drain());
                     log::debug!("[{:?}] MineBlocks: mined {} block(s)", start.elapsed(), v);
@@ -564,7 +563,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     // mempool so they can be mined later. Dedup on txid so the
                     // same transaction broadcast again before then is queued
                     // once, regardless of any change to its signed hex.
-                    if let Some(hex) = self.bitcoin_cli.sign_and_broadcast_tx(&ft.tx)
+                    if let Some(hex) = self.bitcoind_client.sign_and_broadcast_tx(&ft.tx)
                         && !self.private_mempool.iter().any(|(t, _)| *t == txid)
                     {
                         self.private_mempool.push((txid, hex));
@@ -582,7 +581,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     // message will simply fail on-chain validation, which is
                     // the intended fuzzing behaviour for a valid but
                     // unconfirmed program.
-                    let scid = match self.bitcoin_cli.get_transaction_block_position(txid) {
+                    let scid = match self.bitcoind_client.get_transaction_block_position(txid) {
                         Some(pos) => {
                             let funding_output_index =
                                 u16::try_from(ft.vout).expect("funding output index fits in u16");
@@ -1234,7 +1233,7 @@ fn recv_channel_ready(
 /// `minimum_depth` confirmations (as specified in the received `accept_channel`).
 fn is_channel_ready_expected(
     channel_states: &HashMap<ChannelId, ChannelState>,
-    bitcoin_cli: &mut impl BitcoinRpc,
+    bitcoind_client: &mut impl BitcoinRpc,
 ) -> bool {
     channel_states.values().any(|state| {
         state.commitment.commitment_number == 0
@@ -1242,7 +1241,7 @@ fn is_channel_ready_expected(
             && state.is_funding_outpoint_valid
             && !state.was_funding_mined_prematurely
             && !state.sent_invalid_signature
-            && bitcoin_cli.get_transaction_confirmations(state.config.funding_outpoint.txid)
+            && bitcoind_client.get_transaction_confirmations(state.config.funding_outpoint.txid)
                 >= state.config.minimum_depth
     })
 }

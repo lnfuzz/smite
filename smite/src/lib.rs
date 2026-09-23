@@ -6,7 +6,7 @@
 //! provides the building blocks that scenarios and targets are built on.
 //!
 //! # Modules
-//! - [`bitcoin`] - Utilities for interacting with `bitcoind` instances via `bitcoin-cli`.
+//! - [`bitcoin`] - JSON-RPC client for `bitcoind` instances.
 //! - [`bolt`] - BOLT message encoding and decoding.
 //! - [`channel_tx`] - BOLT 3 channel transaction construction (funding and commitment).
 //! - [`noise`] - BOLT 8 `Noise_XK` encrypted transport.

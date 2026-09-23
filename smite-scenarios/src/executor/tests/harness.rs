@@ -43,10 +43,10 @@ impl Connection for MockConnection {
     }
 }
 
-// Mocking BitcoinCli via MockBitcoinCli
+// Mocking BitcoindClient via MockBitcoindClient
 
 #[derive(Default)]
-pub struct MockBitcoinCli {
+pub struct MockBitcoindClient {
     pub mine_blocks_calls: Vec<u8>,
     pub mined_private_mempool: Vec<String>,
     pub broadcast_calls: Vec<Transaction>,
@@ -56,7 +56,7 @@ pub struct MockBitcoinCli {
     confirmations: u32,
 }
 
-impl BitcoinRpc for MockBitcoinCli {
+impl BitcoinRpc for MockBitcoindClient {
     fn mine_blocks(&mut self, num_blocks: u8, private_mempool: &[String]) {
         self.mine_blocks_calls.push(num_blocks);
         self.mined_private_mempool = private_mempool.to_vec();
@@ -124,13 +124,13 @@ impl TargetRpc for MockTargetRpc {
 
 /// An [`Executor`] wired to a mock peer and a mock bitcoind.
 pub struct Fixture {
-    executor: Executor<MockConnection, MockBitcoinCli, MockTargetRpc>,
+    executor: Executor<MockConnection, MockBitcoindClient, MockTargetRpc>,
 }
 
 impl Fixture {
     /// A fixture with a silent peer and a wallet holding [`sample_utxo`].
     pub fn new() -> Self {
-        let bitcoin_cli = MockBitcoinCli {
+        let bitcoind_client = MockBitcoindClient {
             utxos: vec![sample_utxo()],
             change_spk: sample_change_spk(),
             ..Default::default()
@@ -138,7 +138,7 @@ impl Fixture {
         Self {
             executor: Executor::new(
                 MockConnection::new(),
-                bitcoin_cli,
+                bitcoind_client,
                 MockTargetRpc::default(),
                 sample_context(),
             ),
@@ -147,7 +147,7 @@ impl Fixture {
 
     /// Funds the wallet with `utxos` instead of the default [`sample_utxo`].
     pub fn with_utxos(mut self, utxos: Vec<Utxo>) -> Self {
-        self.executor.bitcoin_cli.utxos = utxos;
+        self.executor.bitcoind_client.utxos = utxos;
         self
     }
 
@@ -206,8 +206,8 @@ impl Fixture {
     }
 
     /// Returns the mock bitcoind the executor drives.
-    pub fn bitcoin(&self) -> &MockBitcoinCli {
-        &self.executor.bitcoin_cli
+    pub fn bitcoin(&self) -> &MockBitcoindClient {
+        &self.executor.bitcoind_client
     }
 
     /// Returns the mock RPC interface to the target.

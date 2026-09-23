@@ -24,7 +24,6 @@ WORKDIR /tmp
 RUN wget https://bitcoincore.org/bin/bitcoin-core-${BITCOIN_VERSION}/bitcoin-${BITCOIN_VERSION}-x86_64-linux-gnu.tar.gz && \
     tar -xzf bitcoin-${BITCOIN_VERSION}-x86_64-linux-gnu.tar.gz && \
     mv bitcoin-${BITCOIN_VERSION}/bin/bitcoind /usr/local/bin/bitcoind && \
-    mv bitcoin-${BITCOIN_VERSION}/bin/bitcoin-cli /usr/local/bin/bitcoin-cli && \
     rm -rf bitcoin-${BITCOIN_VERSION}*
 
 # Clone and build Eclair.
@@ -102,9 +101,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy Eclair distribution (bin/eclair-node.sh + lib/*.jar)
 COPY --from=builder /opt/eclair /opt/eclair
 
-# Copy Bitcoin Core binaries
+# Copy bitcoind
 COPY --from=builder /usr/local/bin/bitcoind /usr/local/bin/bitcoind
-COPY --from=builder /usr/local/bin/bitcoin-cli /usr/local/bin/bitcoin-cli
 
 # Copy coverage agent and JNI shared library
 COPY --from=builder /eclair-sancov/target/eclair-sancov-0.0.0.jar /eclair-sancov.jar

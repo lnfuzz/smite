@@ -50,7 +50,6 @@ WORKDIR /tmp
 RUN wget https://bitcoincore.org/bin/bitcoin-core-${BITCOIN_VERSION}/bitcoin-${BITCOIN_VERSION}-x86_64-linux-gnu.tar.gz && \
     tar -xzf bitcoin-${BITCOIN_VERSION}-x86_64-linux-gnu.tar.gz && \
     mv bitcoin-${BITCOIN_VERSION}/bin/bitcoind /usr/local/bin/bitcoind && \
-    mv bitcoin-${BITCOIN_VERSION}/bin/bitcoin-cli /usr/local/bin/bitcoin-cli && \
     rm -rf bitcoin-${BITCOIN_VERSION}*
 
 # Build lncli without sancov.go
@@ -89,9 +88,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /lnd/cmd/lnd/lnd /usr/local/bin/lnd
 COPY --from=builder /lnd/cmd/lncli/lncli /usr/local/bin/lncli
 
-# Copy Bitcoin Core binaries
+# Copy bitcoind
 COPY --from=builder /usr/local/bin/bitcoind /usr/local/bin/bitcoind
-COPY --from=builder /usr/local/bin/bitcoin-cli /usr/local/bin/bitcoin-cli
 
 # Copy the lnd-scenario binary
 COPY --from=builder /smite/target/release/lnd_${SCENARIO} /lnd-scenario

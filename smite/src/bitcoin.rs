@@ -1,9 +1,8 @@
-//! This module implements utilities for interacting with regtest
-//! `bitcoind` instances via `bitcoin-cli`.
+//! JSON-RPC client for the regtest `bitcoind` instances started by targets.
 
 use std::cmp::Ordering;
-use std::path::PathBuf;
-use std::process::Command;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::str::FromStr;
 
 use bitcoin::consensus::encode::serialize_hex;
@@ -60,28 +59,210 @@ struct RawTransactionInfo {
     blockhash: Option<String>,
 }
 
-/// Connection info for invoking `bitcoin-cli` against the regtest `bitcoind`
-/// started by a target.
-#[derive(Debug, Clone)]
-pub struct BitcoinCli {
-    /// RPC port exposed by the regtest `bitcoind` instance.
-    pub rpc_port: u16,
-    /// Path passed to `bitcoin-cli -datadir`.
-    pub bitcoind_dir: PathBuf,
+/// `rpcuser:rpcpassword` credentials every target starts `bitcoind` with.
+const RPC_CREDENTIALS: &str = "rpcuser:rpcpass";
+
+/// `getrawtransaction` error code for a transaction unknown to the node.
+const RPC_INVALID_ADDRESS_OR_KEY: i64 = -5;
+
+/// A JSON-RPC error returned by `bitcoind`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RpcError {
+    pub code: i64,
+    pub message: String,
 }
 
-impl BitcoinCli {
-    /// Creates a `bitcoin-cli` command preconfigured with the connection
-    /// arguments for this regtest node.
+impl std::fmt::Display for RpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "error code: {}, message: {}", self.code, self.message)
+    }
+}
+
+/// Why a JSON-RPC request produced no result.
+enum RequestError {
+    /// `bitcoind` could not be reached or did not answer with JSON-RPC.
+    Transport(std::io::Error),
+    /// `bitcoind` answered with a JSON-RPC error.
+    Rpc(RpcError),
+}
+
+/// Client for the regtest `bitcoind` started by a target.
+///
+/// All calls go over a single HTTP/1.1 keep-alive connection to the JSON-RPC
+/// server, so no process is spawned in the fuzzing loop.
+#[derive(Debug)]
+pub struct BitcoindClient {
+    /// RPC port exposed by the regtest `bitcoind` instance.
+    pub rpc_port: u16,
+    /// Keep-alive connection to the JSON-RPC server, opened on first use and
+    /// reopened after `bitcoind` closes it (it drops idle connections after
+    /// `-rpcservertimeout`).
+    conn: Option<BufReader<TcpStream>>,
+}
+
+impl Clone for BitcoindClient {
+    /// Clones the connection info only; the clone opens its own connection.
+    fn clone(&self) -> Self {
+        Self::new(self.rpc_port)
+    }
+}
+
+impl BitcoindClient {
     #[must_use]
-    pub fn run(&self) -> Command {
-        let mut cmd = Command::new("bitcoin-cli");
-        cmd.arg("-regtest")
-            .arg(format!("-datadir={}", self.bitcoind_dir.display()))
-            .arg(format!("-rpcport={}", self.rpc_port))
-            .arg("-rpcuser=rpcuser")
-            .arg("-rpcpassword=rpcpass");
-        cmd
+    pub fn new(rpc_port: u16) -> Self {
+        Self {
+            rpc_port,
+            conn: None,
+        }
+    }
+
+    /// Returns `true` once `bitcoind` answers RPCs, i.e. it is up and past
+    /// its warmup (during which every RPC is rejected with `-28`).
+    pub fn is_ready(&mut self) -> bool {
+        self.request("getblockchaininfo", &serde_json::json!([]))
+            .is_ok()
+    }
+
+    /// Creates a wallet named `name`, which `bitcoind` then keeps loaded.
+    ///
+    /// # Errors
+    ///
+    /// Returns the JSON-RPC error, e.g. when a wallet of that name already
+    /// exists in the data directory.
+    pub fn create_wallet(&mut self, name: &str) -> Result<(), RpcError> {
+        self.call("createwallet", &serde_json::json!([name]))
+            .map(|_| ())
+    }
+
+    /// Sends one JSON-RPC request over the keep-alive connection, treating a
+    /// transport failure as a programmer or environment error.
+    ///
+    /// # Panics
+    ///
+    /// If `bitcoind` cannot be reached or answers with something that is not
+    /// a JSON-RPC response. Startup code that expects that uses
+    /// [`BitcoindClient::is_ready`] instead.
+    fn call(
+        &mut self,
+        method: &str,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, RpcError> {
+        match self.request(method, params) {
+            Ok(result) => Ok(result),
+            Err(RequestError::Rpc(e)) => Err(e),
+            Err(RequestError::Transport(e)) => panic!("bitcoind {method} request failed: {e}"),
+        }
+    }
+
+    /// Sends one JSON-RPC request over the keep-alive connection.
+    ///
+    /// Returns the `result` field, or the server's JSON-RPC error. A
+    /// connection that `bitcoind` has closed in the meantime is reopened and
+    /// the request retried once.
+    fn request(
+        &mut self,
+        method: &str,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, RequestError> {
+        #[derive(Deserialize)]
+        struct RpcResponse {
+            #[serde(default)]
+            result: serde_json::Value,
+            error: Option<RpcError>,
+        }
+
+        let request = serde_json::json!({
+            "jsonrpc": "1.0",
+            "id": "smite",
+            "method": method,
+            "params": params,
+        })
+        .to_string();
+
+        let body = match self.http_post(&request) {
+            Ok(body) => body,
+            Err(e) => {
+                // The server closes idle keep-alive connections; reconnect once.
+                log::debug!("bitcoind {method} failed ({e}), retrying on a fresh connection");
+                self.conn = None;
+                match self.http_post(&request) {
+                    Ok(body) => body,
+                    Err(e) => {
+                        self.conn = None;
+                        return Err(RequestError::Transport(e));
+                    }
+                }
+            }
+        };
+
+        let response: RpcResponse = serde_json::from_slice(&body).map_err(|e| {
+            self.conn = None;
+            RequestError::Transport(std::io::Error::other(format!(
+                "invalid JSON-RPC response: {e}"
+            )))
+        })?;
+        match response.error {
+            Some(error) => Err(RequestError::Rpc(error)),
+            None => Ok(response.result),
+        }
+    }
+
+    /// Posts `body` to the JSON-RPC endpoint and returns the response body,
+    /// whatever the HTTP status: `bitcoind` reports JSON-RPC errors as HTTP
+    /// 500 with the JSON-RPC error in the body.
+    fn http_post(&mut self, body: &str) -> std::io::Result<Vec<u8>> {
+        let conn = if let Some(conn) = self.conn.as_mut() {
+            conn
+        } else {
+            let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, self.rpc_port));
+            let stream = TcpStream::connect(addr)?;
+            stream.set_nodelay(true)?;
+            self.conn.insert(BufReader::new(stream))
+        };
+
+        let request = format!(
+            "POST / HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Authorization: Basic {}\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             \r\n{body}",
+            base64(RPC_CREDENTIALS.as_bytes()),
+            body.len(),
+        );
+        conn.get_mut().write_all(request.as_bytes())?;
+
+        // Status line, then headers up to the blank line. Only
+        // `Content-Length` matters: bitcoind never chunks its responses.
+        let mut line = String::new();
+        let mut content_length = None;
+        loop {
+            line.clear();
+            if conn.read_line(&mut line)? == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+            }
+            let trimmed = line.trim_end_matches("\r\n");
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some(value) = trimmed
+                .split_once(':')
+                .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .map(|(_, value)| value.trim())
+            {
+                content_length = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|e| std::io::Error::other(format!("bad Content-Length: {e}")))?,
+                );
+            }
+        }
+
+        let len = content_length
+            .ok_or_else(|| std::io::Error::other("bitcoind response without Content-Length"))?;
+        let mut body = vec![0u8; len];
+        conn.read_exact(&mut body)?;
+        Ok(body)
     }
 
     /// Mines the given number of blocks.
@@ -89,14 +270,19 @@ impl BitcoinCli {
     /// Any transactions stored in `private_mempool` are included in the first
     /// block. Any remaining blocks are then mined normally. If
     /// `private_mempool` is empty, the current mempool is mined as usual.
+    /// A non-empty `private_mempool` is mined even when `num_blocks` is 0.
     ///
     /// # Panics
     ///
-    /// If the `bitcoin-cli -generate` or `generateblock` command fails to
-    /// execute or exits non-zero.
-    pub fn mine_blocks(&self, num_blocks: u8, private_mempool: &[String]) {
+    /// If `generatetoaddress` or `generateblock` fails.
+    pub fn mine_blocks(&mut self, num_blocks: u8, private_mempool: &[String]) {
+        let mine = |this: &mut Self, n: u8| {
+            this.generate(u32::from(n))
+                .unwrap_or_else(|e| panic!("generatetoaddress {n} failed: {e}"));
+        };
+
         if private_mempool.is_empty() {
-            self.generate(num_blocks);
+            mine(self, num_blocks);
             return;
         }
 
@@ -104,25 +290,23 @@ impl BitcoinCli {
         // remaining blocks normally.
         self.mine_block_including(private_mempool);
         if num_blocks > 1 {
-            self.generate(num_blocks - 1);
+            mine(self, num_blocks - 1);
         }
     }
 
-    /// Mines `num_blocks` blocks from the node's mempool via
-    /// `bitcoin-cli -generate`.
-    fn generate(&self, num_blocks: u8) {
-        let mine_out = self
-            .run()
-            .arg("-generate")
-            .arg(num_blocks.to_string())
-            .output()
-            .expect("bitcoin-cli -generate should not fail");
-        assert!(
-            mine_out.status.success(),
-            "bitcoin-cli -generate {} failed: {}",
-            num_blocks,
-            String::from_utf8_lossy(&mine_out.stderr)
-        );
+    /// Mines `num_blocks` blocks from the node's mempool to a fresh wallet
+    /// address.
+    ///
+    /// # Errors
+    ///
+    /// Returns the JSON-RPC error.
+    pub fn generate(&mut self, num_blocks: u32) -> Result<(), RpcError> {
+        let address = self.get_new_address();
+        self.call(
+            "generatetoaddress",
+            &serde_json::json!([num_blocks, address.to_string()]),
+        )
+        .map(|_| ())
     }
 
     /// Mines a single block containing the current mempool together with the
@@ -134,62 +318,43 @@ impl BitcoinCli {
     ///
     /// # Panics
     ///
-    /// - If `bitcoin-cli getrawmempool`, `getnewaddress`, or `generateblock`
-    ///   fails to execute or exits non-zero.
-    /// - If `getrawmempool` does not return valid JSON.
+    /// - If `getrawmempool`, `getnewaddress`, or `generateblock` fails.
     /// - If `getnewaddress` does not return a valid regtest address.
     /// - If any transaction in `private_mempool` is consensus-invalid.
     /// - If the combined transaction list contains a duplicate rawtx/txid or is
     ///   not topologically ordered.
-    fn mine_block_including(&self, private_mempool: &[String]) {
+    fn mine_block_including(&mut self, private_mempool: &[String]) {
         let mut txs = self.get_raw_mempool();
         txs.extend_from_slice(private_mempool);
-        let txs_json = serde_json::to_string(&txs).expect("tx list serializes to valid JSON");
 
         let address = self.get_new_address();
-        let gen_out = self
-            .run()
-            .arg("generateblock")
-            .arg(address.to_string())
-            .arg(&txs_json)
-            .output()
-            .expect("bitcoin-cli generateblock should not fail");
-        assert!(
-            gen_out.status.success(),
-            "bitcoin-cli generateblock failed: {}",
-            String::from_utf8_lossy(&gen_out.stderr)
-        );
+        self.call(
+            "generateblock",
+            &serde_json::json!([address.to_string(), txs]),
+        )
+        .unwrap_or_else(|e| panic!("generateblock failed: {e}"));
     }
 
     /// Returns the txids currently in the node's mempool.
     ///
     /// # Panics
     ///
-    /// - If `bitcoin-cli getrawmempool` fails to execute or exits non-zero.
-    /// - If the output is not valid JSON.
-    fn get_raw_mempool(&self) -> Vec<String> {
-        let out = self
-            .run()
-            .arg("getrawmempool")
-            .output()
-            .expect("bitcoin-cli getrawmempool should not fail");
-        assert!(
-            out.status.success(),
-            "bitcoin-cli getrawmempool failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        serde_json::from_slice(&out.stdout).expect("getrawmempool should return valid JSON")
+    /// If `getrawmempool` fails or does not return a txid list.
+    fn get_raw_mempool(&mut self) -> Vec<String> {
+        let result = self
+            .call("getrawmempool", &serde_json::json!([]))
+            .unwrap_or_else(|e| panic!("getrawmempool failed: {e}"));
+        serde_json::from_value(result).expect("getrawmempool should return a txid list")
     }
 
     /// Returns the wallet's spendable UTXOs, sorted deterministically.
     ///
     /// # Panics
     ///
-    /// - If `bitcoin-cli listunspent` fails to execute or exits non-zero.
-    /// - If the output is not valid JSON, or any entry has an invalid amount,
-    ///   txid, or hex scriptPubKey.
+    /// - If `listunspent` fails.
+    /// - If any entry has an invalid amount, txid, or hex scriptPubKey.
     #[must_use]
-    pub fn get_utxos(&self) -> Vec<Utxo> {
+    pub fn get_utxos(&mut self) -> Vec<Utxo> {
         #[derive(Deserialize)]
         struct UnspentOutput {
             txid: String,
@@ -200,19 +365,11 @@ impl BitcoinCli {
             spendable: bool,
         }
 
-        let utxo_out = self
-            .run()
-            .arg("listunspent")
-            .output()
-            .expect("bitcoin-cli listunspent should not fail");
-        assert!(
-            utxo_out.status.success(),
-            "bitcoin-cli listunspent failed: {}",
-            String::from_utf8_lossy(&utxo_out.stderr)
-        );
-
+        let result = self
+            .call("listunspent", &serde_json::json!([]))
+            .unwrap_or_else(|e| panic!("listunspent failed: {e}"));
         let utxos: Vec<UnspentOutput> =
-            serde_json::from_slice(&utxo_out.stdout).expect("listunspent should return valid JSON");
+            serde_json::from_value(result).expect("listunspent should return a UTXO list");
 
         let mut spendable: Vec<Utxo> = utxos
             .into_iter()
@@ -240,10 +397,10 @@ impl BitcoinCli {
     ///
     /// # Panics
     ///
-    /// - If `bitcoin-cli getnewaddress` fails to execute or exits non-zero.
-    /// - If the output is not valid UTF-8 or not a valid regtest address.
+    /// - If `getnewaddress` fails.
+    /// - If the result is not a valid regtest address.
     #[must_use]
-    pub fn get_new_address_script_pubkey(&self) -> ScriptBuf {
+    pub fn get_new_address_script_pubkey(&mut self) -> ScriptBuf {
         self.get_new_address().script_pubkey()
     }
 
@@ -251,22 +408,16 @@ impl BitcoinCli {
     ///
     /// # Panics
     ///
-    /// - If `bitcoin-cli getnewaddress` fails to execute or exits non-zero.
-    /// - If the output is not valid UTF-8 or not a valid regtest address.
-    fn get_new_address(&self) -> Address {
-        let addr_out = self
-            .run()
-            .arg("getnewaddress")
-            .output()
-            .expect("bitcoin-cli getnewaddress should not fail");
-        assert!(
-            addr_out.status.success(),
-            "bitcoin-cli getnewaddress failed: {}",
-            String::from_utf8_lossy(&addr_out.stderr)
-        );
-
-        let addr_str = String::from_utf8(addr_out.stdout).expect("bitcoin address is valid UTF-8");
-        Address::from_str(addr_str.trim())
+    /// - If `getnewaddress` fails.
+    /// - If the result is not a valid regtest address.
+    fn get_new_address(&mut self) -> Address {
+        let result = self
+            .call("getnewaddress", &serde_json::json!([]))
+            .unwrap_or_else(|e| panic!("getnewaddress failed: {e}"));
+        let addr_str = result
+            .as_str()
+            .expect("getnewaddress should return a string");
+        Address::from_str(addr_str)
             .and_then(|a| a.require_network(Network::Regtest))
             .expect("getnewaddress should return a valid address")
     }
@@ -284,17 +435,12 @@ impl BitcoinCli {
     ///
     /// # Panics
     ///
-    /// - If `bitcoin-cli signrawtransactionwithwallet` fails to execute or
-    ///   exits non-zero.
-    /// - If the sign output is not valid JSON.
-    /// - If signing returns `complete=false`.
-    /// - If `bitcoin-cli sendrawtransaction` fails to execute.
+    /// - If `signrawtransactionwithwallet` fails or returns `complete=false`.
     /// - If the broadcast is rejected for any reason other than a below-dust
     ///   output or a below-minimum relay feerate.
-    /// - If a successful broadcast does not return a valid UTF-8 txid.
     /// - If the broadcasted txid does not match the given transaction's txid.
     #[must_use]
-    pub fn sign_and_broadcast_tx(&self, tx: &Transaction) -> Option<String> {
+    pub fn sign_and_broadcast_tx(&mut self, tx: &Transaction) -> Option<String> {
         #[derive(Deserialize)]
         struct SignRawTransactionResponse {
             hex: String,
@@ -311,53 +457,35 @@ impl BitcoinCli {
 
         let tx_hex = serialize_hex(tx);
 
-        let signed_out = self
-            .run()
-            .arg("signrawtransactionwithwallet")
-            .arg(&tx_hex)
-            .output()
-            .expect("bitcoin-cli signrawtransactionwithwallet should not fail");
-        assert!(
-            signed_out.status.success(),
-            "bitcoin-cli signrawtransactionwithwallet failed: {}",
-            String::from_utf8_lossy(&signed_out.stderr)
-        );
-
-        let signed_tx: SignRawTransactionResponse = serde_json::from_slice(&signed_out.stdout)
-            .expect("signrawtransactionwithwallet should return valid JSON");
+        let result = self
+            .call("signrawtransactionwithwallet", &serde_json::json!([tx_hex]))
+            .unwrap_or_else(|e| panic!("signrawtransactionwithwallet failed: {e}"));
+        let signed_tx: SignRawTransactionResponse = serde_json::from_value(result)
+            .expect("signrawtransactionwithwallet should return hex and complete");
         assert!(
             signed_tx.complete,
             "signrawtransactionwithwallet returned complete=false"
         );
 
-        let broadcast_out = self
-            .run()
-            .arg("sendrawtransaction")
-            .arg(&signed_tx.hex)
-            // Disable the high-feerate cap and accept any fee rate for broadcast.
-            .arg("0")
-            .output()
-            .expect("bitcoin-cli sendrawtransaction should not fail");
-
-        if !broadcast_out.status.success() {
-            let stderr = String::from_utf8_lossy(&broadcast_out.stderr);
+        // The `0` disables the high-feerate cap so any fee rate is broadcast.
+        let broadcast = self.call("sendrawtransaction", &serde_json::json!([signed_tx.hex, 0]));
+        let broadcast_txid = match broadcast {
+            Ok(result) => result,
             // If the feerate is below the default minimum relay feerate, or any
             // output is below its dust threshold, return the transactions so
             // they can be mined directly, bypassing mempool policy.
-            if stderr.contains("tx with dust output") || stderr.contains("min relay fee not met") {
+            Err(e) if e.message.contains("dust") || e.message.contains("min relay fee not met") => {
                 return Some(signed_tx.hex);
             }
-            panic!("bitcoin-cli sendrawtransaction failed: {stderr}");
-        }
+            Err(e) => panic!("sendrawtransaction failed: {e}"),
+        };
 
         // Safe because bitcoind descriptor wallets currently default to native
         // SegWit, so signing does not alter the txid computed from the unsigned
         // Transaction.
-        let broadcast_txid = String::from_utf8(broadcast_out.stdout)
-            .expect("sendrawtransaction should return a valid UTF-8 txid");
         assert_eq!(
-            broadcast_txid.trim(),
-            txid.to_string(),
+            broadcast_txid.as_str(),
+            Some(txid.to_string().as_str()),
             "sendrawtransaction returned unexpected txid"
         );
 
@@ -376,9 +504,8 @@ impl BitcoinCli {
     ///
     /// # Panics
     ///
-    /// If the `bitcoin-cli lockunspent` command fails to execute or exits
-    /// non-zero.
-    pub fn lock_utxos(&self, outpoints: &[OutPoint]) {
+    /// If `lockunspent` fails.
+    pub fn lock_utxos(&mut self, outpoints: &[OutPoint]) {
         #[derive(Serialize)]
         struct LockOutpoint {
             txid: String,
@@ -396,20 +523,8 @@ impl BitcoinCli {
                 vout: o.vout,
             })
             .collect();
-        let locks_json = serde_json::to_string(&locks).expect("outpoints serialize to valid JSON");
-
-        let lock_out = self
-            .run()
-            .arg("lockunspent")
-            .arg("false")
-            .arg(&locks_json)
-            .output()
-            .expect("bitcoin-cli lockunspent should not fail");
-        assert!(
-            lock_out.status.success(),
-            "bitcoin-cli lockunspent failed: {}",
-            String::from_utf8_lossy(&lock_out.stderr)
-        );
+        self.call("lockunspent", &serde_json::json!([false, locks]))
+            .unwrap_or_else(|e| panic!("lockunspent failed: {e}"));
     }
 
     /// Calls `getrawtransaction <txid> 1` and returns the parsed response, or
@@ -419,24 +534,16 @@ impl BitcoinCli {
     ///
     /// - If the command fails to execute.
     /// - If the command succeeds but its output is not valid JSON.
-    fn get_raw_transaction_info(&self, txid: Txid) -> Option<RawTransactionInfo> {
-        let tx_out = self
-            .run()
-            .arg("getrawtransaction")
-            .arg(txid.to_string())
-            .arg("1")
-            .output()
-            .expect("bitcoin-cli getrawtransaction should not fail");
-
-        // A non-zero exit means the transaction is unknown to the node.
-        if !tx_out.status.success() {
-            return None;
-        }
-
-        let tx_info: RawTransactionInfo = serde_json::from_slice(&tx_out.stdout)
-            .expect("getrawtransaction should return valid JSON");
-
-        Some(tx_info)
+    fn get_raw_transaction_info(&mut self, txid: Txid) -> Option<RawTransactionInfo> {
+        let result = match self.call(
+            "getrawtransaction",
+            &serde_json::json!([txid.to_string(), 1]),
+        ) {
+            Ok(result) => result,
+            Err(e) if e.code == RPC_INVALID_ADDRESS_OR_KEY => return None,
+            Err(e) => panic!("getrawtransaction failed: {e}"),
+        };
+        Some(serde_json::from_value(result).expect("getrawtransaction should return tx info"))
     }
 
     /// Returns the number of confirmations for the transaction with the given
@@ -445,10 +552,9 @@ impl BitcoinCli {
     ///
     /// # Panics
     ///
-    /// - If the `bitcoin-cli getrawtransaction` command fails to execute.
-    /// - If the command succeeds but its output is not valid JSON.
+    /// If `getrawtransaction` fails for any reason other than an unknown txid.
     #[must_use]
-    pub fn get_transaction_confirmations(&self, txid: Txid) -> u32 {
+    pub fn get_transaction_confirmations(&mut self, txid: Txid) -> u32 {
         self.get_raw_transaction_info(txid)
             .map_or(0, |info| info.confirmations)
     }
@@ -462,12 +568,11 @@ impl BitcoinCli {
     ///
     /// # Panics
     ///
-    /// - If `bitcoin-cli getrawtransaction` or `getblock` fails to execute.
-    /// - If either command succeeds but its output is not valid JSON.
+    /// - If `getrawtransaction` or `getblock` fails.
     /// - If `getblock` returns a block whose transaction list does not contain
     ///   the queried txid (would indicate an inconsistent bitcoind state).
     #[must_use]
-    pub fn get_transaction_block_position(&self, txid: Txid) -> Option<TxBlockPosition> {
+    pub fn get_transaction_block_position(&mut self, txid: Txid) -> Option<TxBlockPosition> {
         #[derive(Deserialize)]
         struct GetBlockResponse {
             height: u32,
@@ -480,22 +585,11 @@ impl BitcoinCli {
         // confirmed.
         let blockhash = self.get_raw_transaction_info(txid)?.blockhash?;
 
-        let block_out = self
-            .run()
-            .arg("getblock")
-            .arg(&blockhash)
-            .arg("1")
-            .output()
-            .expect("bitcoin-cli getblock should not fail");
-        assert!(
-            block_out.status.success(),
-            "bitcoin-cli getblock {} failed: {}",
-            blockhash,
-            String::from_utf8_lossy(&block_out.stderr)
-        );
-
+        let result = self
+            .call("getblock", &serde_json::json!([blockhash, 1]))
+            .unwrap_or_else(|e| panic!("getblock {blockhash} failed: {e}"));
         let block: GetBlockResponse =
-            serde_json::from_slice(&block_out.stdout).expect("getblock should return valid JSON");
+            serde_json::from_value(result).expect("getblock should return height and tx list");
 
         let txid_str = txid.to_string();
         let tx_index = block
@@ -509,5 +603,40 @@ impl BitcoinCli {
             block_height: block.height,
             tx_index,
         })
+    }
+}
+
+/// Standard base64 with padding, enough for the `Authorization: Basic` header.
+fn base64(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let mut buf = [0u8; 3];
+        buf[..chunk.len()].copy_from_slice(chunk);
+        let n = u32::from_be_bytes([0, buf[0], buf[1], buf[2]]);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                let idx = usize::try_from((n >> (18 - 6 * i)) & 0x3f).expect("6-bit index");
+                out.push(char::from(ALPHABET[idx]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::base64;
+
+    #[test]
+    fn base64_matches_rfc4648_vectors() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foob"), "Zm9vYg==");
+        assert_eq!(base64(b"rpcuser:rpcpass"), "cnBjdXNlcjpycGNwYXNz");
     }
 }
