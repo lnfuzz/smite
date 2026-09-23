@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # This script is called in the CI pipeline. It makes sure that the BOLT message
 # type constants in smite/src/bolt.rs are listed in increasing order.

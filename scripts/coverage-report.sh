@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Generate an HTML coverage report from a corpus of fuzz inputs.
 #

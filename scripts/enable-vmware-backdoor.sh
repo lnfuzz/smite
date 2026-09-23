@@ -1,4 +1,5 @@
-#!/bin/bash -eu
+#!/usr/bin/env bash
+set -eu
 
 if grep -q AuthenticAMD /proc/cpuinfo; then
     KVM_MOD="kvm-amd"

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Symbolize a crash report from the CLN fuzzer.
 #
