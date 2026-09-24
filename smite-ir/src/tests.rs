@@ -4,7 +4,7 @@ use bitcoin::secp256k1::SecretKey;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use rand::{Rng, RngExt};
-use smite::bolt::{MAX_MESSAGE_SIZE, ShortChannelId};
+use smite::bolt::{MAX_MESSAGE_SIZE, MessageType, ShortChannelId};
 
 use super::*;
 use generators::{
@@ -666,7 +666,12 @@ fn postcard_roundtrip() {
                 inputs: vec![],
             },
             Instruction {
-                operation: Operation::SendFundingCreated,
+                operation: Operation::SendFundingCreated {
+                    malformation: Some(Malformation {
+                        offset: 34,
+                        bytes: vec![0xff; 32],
+                    }),
+                },
                 inputs: vec![11, 0, 3],
             },
         ],
@@ -835,7 +840,7 @@ fn displays_send_funding_created_recv_funding_signed_program() {
         },
         // Build and send funding_created.
         Instruction {
-            operation: Operation::SendFundingCreated,
+            operation: Operation::SendFundingCreated { malformation: None },
             inputs: vec![4, 0, 5],
         },
         // receive funding_signed.
@@ -859,7 +864,7 @@ fn displays_send_funding_created_recv_funding_signed_program() {
         "v3 = LoadFeeratePerKw(15000)".into(),
         "v4 = CreateFundingTransaction(v1, v1, v2, v3)".into(),
         format!("v5 = LoadChannelId(0x{b32})"),
-        "v6 = SendFundingCreated(v4, v0, v5)".into(),
+        "v6 = SendFundingCreated{malformation=none}(v4, v0, v5)".into(),
         "v7 = RecvFundingSigned(v6)".into(),
     ];
 
@@ -1247,7 +1252,10 @@ fn generated_funding_created_program_structure() {
 
     // Must end with SendFundingCreated, RecvFundingSigned, BroadcastTransaction.
     assert!(
-        matches!(ops[ops.len() - 3], Operation::SendFundingCreated),
+        matches!(
+            ops[ops.len() - 3],
+            Operation::SendFundingCreated { malformation: None }
+        ),
         "third-to-last instruction should be SendFundingCreated",
     );
     assert!(
@@ -1364,7 +1372,7 @@ fn generated_funding_flow_program_structure() {
 
     // Key operations must appear in protocol order.
     let recv_accept_channel = find_operation!(program, Operation::RecvAcceptChannel);
-    let send_funding_created = find_operation!(program, Operation::SendFundingCreated);
+    let send_funding_created = find_operation!(program, Operation::SendFundingCreated { .. });
     let recv_funding_signed = find_operation!(program, Operation::RecvFundingSigned);
     let broadcast_transaction = find_operation!(program, Operation::BroadcastTransaction);
     let send_channel_ready = find_operation!(program, Operation::SendChannelReady { .. });
@@ -2064,6 +2072,55 @@ fn param_mutator_modifies_node_announcement_params() {
     };
     assert_ne!(*rgb_color, original_rgb, "rgb_color never mutated");
     assert_ne!(*alias, original_alias, "alias never mutated");
+}
+
+#[test]
+fn param_mutator_malforms_allowlisted_fields_only() {
+    let mut program = generate_funding_created_program(0);
+    let send_idx = find_operation!(program, Operation::SendFundingCreated { .. });
+
+    // Every allowlisted field must be reachable, nothing outside the allowlist
+    // must be malformed, and the malformation must clear again.
+    let fields = MessageType::FUNDING_CREATED.malformable_fields();
+    let mut unmalformed: Vec<&str> = fields.iter().map(|f| f.name).collect();
+    let mut cleared = false;
+    let mut was_malformed = false;
+
+    let mutator = OperationParamMutator;
+    let mut rng = SmallRng::seed_from_u64(0);
+
+    for _ in 0..1_000 {
+        mutator.mutate(&mut program, &mut rng);
+
+        let Operation::SendFundingCreated { malformation } =
+            &program.instructions[send_idx].operation
+        else {
+            panic!("operation type changed");
+        };
+        let Some(malformation) = malformation else {
+            cleared |= was_malformed;
+            continue;
+        };
+        was_malformed = true;
+
+        let field = fields
+            .iter()
+            .find(|f| f.offset == malformation.offset && f.len as usize == malformation.bytes.len())
+            .unwrap_or_else(|| {
+                panic!(
+                    "malformation of {} bytes at offset {} is not an allowlisted field",
+                    malformation.bytes.len(),
+                    malformation.offset,
+                )
+            });
+        unmalformed.retain(|name| *name != field.name);
+    }
+
+    assert!(
+        unmalformed.is_empty(),
+        "these allowlisted fields were never malformed: {unmalformed:?}",
+    );
+    assert!(cleared, "malformation was never cleared");
 }
 
 #[test]

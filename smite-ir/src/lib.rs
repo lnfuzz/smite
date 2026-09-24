@@ -7,6 +7,7 @@
 //!
 //! # Modules
 //! - [`instruction`] - Single IR instruction (operation + input references).
+//! - [`malform`] - Byte-level edits applied to encoded messages before sending.
 //! - [`minimizers`] - Shrink a program while preserving interesting behaviour.
 //! - [`operation`] - Operations that load, compute, build or act.
 //! - [`program`] - Ordered list of instructions.
@@ -15,6 +16,7 @@
 pub mod builder;
 pub mod generators;
 pub mod instruction;
+pub mod malform;
 pub mod minimizers;
 pub mod mutators;
 pub mod operation;
@@ -24,6 +26,7 @@ pub mod variable;
 pub use builder::ProgramBuilder;
 pub use generators::Generator;
 pub use instruction::Instruction;
+pub use malform::Malformation;
 pub use minimizers::Minimizer;
 pub use mutators::Mutator;
 pub use operation::Operation;

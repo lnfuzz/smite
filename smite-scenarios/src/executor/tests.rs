@@ -5,10 +5,11 @@ use std::str::FromStr;
 
 use super::*;
 use bitcoin::Amount;
+use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::{Secp256k1, SecretKey};
 use harness::*;
 use programs::*;
-use smite::bolt::{AcceptChannelTlvs, GossipTimestampFilter, Init, Ping};
+use smite::bolt::{AcceptChannelTlvs, BoltError, GossipTimestampFilter, Init, Ping};
 use smite_ir::Instruction;
 use smite_ir::builder::ProgramBuilder;
 use smite_ir::operation::ShutdownScriptVariant;
@@ -804,7 +805,7 @@ fn execute_send_funding_created_uses_wire_funding_pubkey() {
     let mut b = ProgramBuilder::new();
     let funding = create_funding_tx(&mut b);
     b.append(Operation::BroadcastTransaction, &[funding.tx]);
-    send_funding_created_with(&mut b, funding, funding.acceptor_privkey);
+    send_funding_created_with(&mut b, funding, funding.acceptor_privkey, None);
 
     // Signing with a key the peer did not negotiate marks the channel as
     // having sent an invalid signature, so receiving a `funding_signed` would
@@ -853,7 +854,7 @@ fn execute_send_funding_created_after_funding_built_does_not_track_channel() {
         ],
     );
     b.append(
-        Operation::SendFundingCreated,
+        Operation::SendFundingCreated { malformation: None },
         &[
             second_tx,
             funding.opener_privkey,
@@ -940,6 +941,105 @@ fn execute_send_funding_created_no_accept_channel() {
 }
 
 #[test]
+fn execute_send_funding_created_malformed_funding_txid() {
+    let malformed_txid = Txid::from_byte_array([0x00; 32]);
+    let malformation = Malformation {
+        offset: FundingCreated::FUNDING_TXID_FIELD.offset,
+        bytes: malformed_txid.to_byte_array().to_vec(),
+    };
+
+    let mut fx = Fixture::new().with_negotiation(sample_funding_negotiation());
+    fx.run(&malformed_send_funding_created_program(malformation));
+
+    let fc: FundingCreated = fx.sent(0);
+    assert_eq!(fc.funding_txid, malformed_txid);
+    assert_eq!(fc.funding_output_index, 0);
+
+    // The channel is tracked under the advertised outpoint, not the resolved one.
+    let advertised_outpoint = OutPoint {
+        txid: malformed_txid,
+        vout: 0,
+    };
+    assert_eq!(fx.channel_states().len(), 1);
+    assert!(!fx.channel_states().contains_key(&funding_channel_id()));
+
+    let state = fx.channel_state(&ChannelId::v1_from_funding_outpoint(advertised_outpoint));
+    assert_eq!(state.config.funding_outpoint, advertised_outpoint);
+
+    // The outpoint no longer belongs to the resolved funding transaction, but
+    // the signature is genuine and covers the advertised outpoint.
+    assert!(!state.is_funding_outpoint_valid);
+    assert!(!state.sent_invalid_signature);
+    let holder = HolderIdentity {
+        side: Side::Acceptor,
+        funding_privkey: acceptor_funding_sk(),
+    };
+    assert!(
+        state
+            .config
+            .verify_counterparty_signature(&state.commitment, &holder, &fc.signature)
+    );
+}
+
+#[test]
+fn execute_send_funding_created_malformed_zero_signature() {
+    // Overwriting the signature with zeros leaves the all-zero placeholder
+    // unchanged, so nothing is signed and the zero signature goes out. The
+    // channel is still tracked, with the signature flagged invalid.
+    let malformation = Malformation {
+        offset: FundingCreated::SIGNATURE_FIELD.offset,
+        bytes: vec![0x00; 64],
+    };
+
+    let mut fx = Fixture::new().with_negotiation(sample_funding_negotiation());
+    fx.run(&malformed_send_funding_created_program(malformation));
+
+    let fc: FundingCreated = fx.sent(0);
+    assert_eq!(fc.signature, Signature::from_compact(&[0u8; 64]).unwrap());
+
+    // The outpoint is untouched, so the channel is tracked under it.
+    assert_eq!(fc.funding_txid, funding_outpoint().txid);
+    assert_eq!(fc.funding_output_index, 0);
+    assert_eq!(fx.channel_states().len(), 1);
+
+    let state = fx.channel_state(&funding_channel_id());
+    assert_eq!(state.config.funding_outpoint, funding_outpoint());
+    assert!(state.is_funding_outpoint_valid);
+    assert!(state.sent_invalid_signature);
+}
+
+#[test]
+fn execute_send_funding_created_malformed_undecodable_signature() {
+    // A signature of all-ones has r and s past the curve order, so the message
+    // no longer decodes. The bytes still go out as-is and the channel is
+    // tracked from the negotiated parameters.
+    let signature_offset = FundingCreated::SIGNATURE_FIELD.offset;
+    let malformation = Malformation {
+        offset: signature_offset,
+        bytes: vec![0xff; 64],
+    };
+
+    let mut fx = Fixture::new().with_negotiation(sample_funding_negotiation());
+    fx.run(&malformed_send_funding_created_program(malformation));
+
+    let sent = fx.sent_bytes(0);
+    assert_eq!(
+        Message::decode(sent),
+        Err(BoltError::InvalidSignature([0xff; 64]))
+    );
+    assert_eq!(&sent[signature_offset as usize..], [0xff; 64]);
+
+    // Everything before the signature is unchanged, so the channel is tracked
+    // under the resolved outpoint with only the signature flagged.
+    assert_eq!(fx.channel_states().len(), 1);
+
+    let state = fx.channel_state(&funding_channel_id());
+    assert_eq!(state.config.funding_outpoint, funding_outpoint());
+    assert!(state.is_funding_outpoint_valid);
+    assert!(state.sent_invalid_signature);
+}
+
+#[test]
 fn execute_recv_funding_signed_unknown_channel() {
     let channel_id = ChannelId::new([0xbb; 32]);
 
@@ -981,7 +1081,8 @@ fn execute_recv_funding_signed_after_invalid_funding_created() {
     // in `open_channel`.
     let mut b = ProgramBuilder::new();
     let funding = create_funding_tx(&mut b);
-    let funding_created = send_funding_created_with(&mut b, funding, funding.acceptor_privkey);
+    let funding_created =
+        send_funding_created_with(&mut b, funding, funding.acceptor_privkey, None);
     b.append(Operation::RecvFundingSigned, &[funding_created.sent]);
 
     let err = recv_funding_signed_fixture().run_err(&b.build());
@@ -1001,7 +1102,7 @@ fn execute_recv_funding_signed_duplicate() {
     let mut b = ProgramBuilder::new();
     let first = send_funding_created(&mut b);
     b.append(Operation::RecvFundingSigned, &[first.sent]);
-    let second = send_funding_created_with(&mut b, first.tx, first.tx.opener_privkey);
+    let second = send_funding_created_with(&mut b, first.tx, first.tx.opener_privkey, None);
     b.append(Operation::RecvFundingSigned, &[second.sent]);
 
     let err = recv_funding_signed_fixture()
@@ -1215,7 +1316,7 @@ fn execute_recv_channel_ready_funding_mined_prematurely_is_noop() {
     // Mine past the negotiated `minimum_depth` *before* sending
     // `funding_created`.
     b.append(Operation::MineBlocks(8), &[]);
-    let funding_created = send_funding_created_with(&mut b, funding, funding.opener_privkey);
+    let funding_created = send_funding_created_with(&mut b, funding, funding.opener_privkey, None);
     b.append(Operation::RecvFundingSigned, &[funding_created.sent]);
     b.append(Operation::RecvChannelReady, &[]);
 
@@ -1248,7 +1349,7 @@ fn execute_recv_channel_ready_invalid_signature_is_noop() {
     // A `funding_signed` answering a `funding_created` we signed with the wrong
     // key is itself a violation, which `FundingSignedOracle` reports. So we
     // don't receive one, letting `RecvChannelReady` be reached.
-    send_funding_created_with(&mut b, funding, funding.acceptor_privkey);
+    send_funding_created_with(&mut b, funding, funding.acceptor_privkey, None);
     b.append(Operation::MineBlocks(8), &[]);
     b.append(Operation::RecvChannelReady, &[]);
 
