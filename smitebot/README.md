@@ -54,9 +54,9 @@ index, so a given runner always draws the same flags:
 
 For IR scenarios (scenario names starting with `ir`), the required AFL++ custom mutator environment variables are injected automatically. User `afl_env` values override strategy defaults.
 
-`start` begins fresh campaigns only. If `output_dir` already holds a prior run's `fuzzer_stats`, it exits with an error instead of resuming (resume is not yet supported).
+A runner whose `output_dir/<id>` already holds a prior run's `fuzzer_stats` resumes it in place (`afl-fuzz -i -`): it reloads its own queue, keeps its cumulative stats, and does not re-import `seed_dir`; AFL++ moves the prior `crashes/` and `hangs/` aside under a timestamped name. Runners without prior output (e.g. after raising `runners`) start from `seed_dir`. Stop the prior campaign first: `start` refuses to run while an afl-fuzz still holds a runner directory (AFL++ locks it for its lifetime). The prior run's Nyx `workdir` is removed before launch so secondaries wait for the new primary's snapshot instead of booting into a stale one. Each `start` gets a new campaign id and tmux session, so `stop` and `status` take the id it prints.
 
-After spawning, startup is verified by polling for `fuzzer_stats` files. Because AFL++ writes `fuzzer_stats` only after calibrating every seed (minutes under Nyx), a runner is reported as failed the moment its tmux window exits rather than after a fixed timeout; the poll otherwise waits up to a generous ceiling (10 min) for a runner that stays alive but never starts. On failure, the tmux session is preserved with `remain-on-exit` so error output can be inspected.
+After spawning, startup is verified by polling for `fuzzer_stats` files. Because AFL++ writes `fuzzer_stats` only after calibrating every seed (minutes under Nyx), a runner is reported as failed the moment its tmux window exits rather than after a fixed timeout; the poll otherwise waits up to 1 min, after which runners that are still alive are handed off as running. On failure, the tmux session is preserved with `remain-on-exit` so error output can be inspected.
 
 Campaign state is saved to `~/.smitebot/runs/<campaign-id>/state.json` for use by future `stop` and `status` commands.
 
