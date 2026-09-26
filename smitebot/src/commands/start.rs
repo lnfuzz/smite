@@ -16,7 +16,7 @@ use crate::commands::build::{BuildInputs, run_build};
 use crate::config::CampaignConfig;
 use crate::state::{CampaignState, RunnerState, Status};
 use crate::tmux;
-use crate::utils::{command_stdout, docker_image_id, setup_nyx, shell_quote};
+use crate::utils::{afl_bin_dir, command_stdout, docker_image_id, setup_nyx, shell_quote};
 
 /// How long to wait for `fuzzer_stats` before treating alive runners as started.
 ///
@@ -503,7 +503,7 @@ fn build_runner_shell_cmd(
     seed_dir: &Path,
     testcache_mb: Option<u64>,
 ) -> String {
-    let afl_fuzz = config.aflpp_path.join("afl-fuzz");
+    let afl_fuzz = afl_bin_dir(&config.aflpp_path).join("afl-fuzz");
     // -L (MOpt) is incompatible with custom mutators; runner_strategy skips it
     // when an IR scenario or the user's afl_env supplies AFL_CUSTOM_MUTATOR_LIBRARY.
     let has_custom_mutator = config.scenario.starts_with("ir")

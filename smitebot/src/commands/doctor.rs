@@ -10,7 +10,7 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::config::CampaignConfig;
-use crate::utils::{find_in_path, is_executable};
+use crate::utils::{afl_bin_dir, find_in_path, is_executable};
 
 /// AFL++ binaries required for campaign execution and corpus minimization.
 const AFL_TOOLS: &[&str] = &["afl-fuzz", "afl-cmin", "afl-tmin", "afl-whatsup"];
@@ -143,6 +143,10 @@ enum CheckFailure {
         "libnyx.so not found under --aflpp-path; rebuild AFL++ with Nyx support (see nyx_mode/README.md in your AFL++ source tree)"
     )]
     LibnyxNotFound,
+    #[error(
+        "nyx_mode/packer/packer not found under --aflpp-path; Nyx packer is required for scripts/setup-nyx.sh"
+    )]
+    NyxPackerNotFound,
     #[error("backdoor disabled; run ./scripts/enable-vmware-backdoor.sh to enable")]
     VMwareBackdoorDisabled,
 }
@@ -178,7 +182,7 @@ impl DoctorCommand {
             None => None,
         };
         let inputs = DoctorInputs::resolve(config.as_ref(), args);
-        let aflpp_root = &inputs.aflpp_root;
+        let afl_bin = afl_bin_dir(&inputs.aflpp_root);
         let smite_dir = &inputs.smite_dir;
 
         // Keep a predictable order for operator readability and stable JSON output.
@@ -190,14 +194,15 @@ impl DoctorCommand {
             ),
             DoctorCheck::new("/dev/kvm accessible", check_kvm_access()),
             DoctorCheck::new("Docker daemon reachable", check_docker_daemon()),
-            DoctorCheck::new("AFL++ built with Nyx support", check_libnyx(aflpp_root)),
+            DoctorCheck::new("AFL++ built with Nyx support", check_libnyx(&afl_bin)),
+            DoctorCheck::new("Nyx packer available", check_nyx_packer(&inputs.aflpp_root)),
             DoctorCheck::new("VMware backdoor enabled", check_vmware_backdoor_enabled()),
         ];
 
         for &tool in AFL_TOOLS {
             checks.push(DoctorCheck::new(
                 tool,
-                require_executable(&aflpp_root.join(tool)),
+                require_executable(&afl_bin.join(tool)),
             ));
         }
 
@@ -315,12 +320,29 @@ fn check_docker_daemon() -> Result<(), CheckFailure> {
     }
 }
 
-/// Checks whether `libnyx.so` exists under the AFL++ root used for fuzzing.
-fn check_libnyx(aflpp_root: &Path) -> Result<(), CheckFailure> {
-    if aflpp_root.join("libnyx.so").exists() {
+/// Checks whether `libnyx.so` exists in AFL++'s binary directory.
+fn check_libnyx(afl_bin: &Path) -> Result<(), CheckFailure> {
+    if afl_bin.join("libnyx.so").exists() {
         Ok(())
     } else {
         Err(CheckFailure::LibnyxNotFound)
+    }
+}
+
+/// Checks for the Nyx packer tree `scripts/setup-nyx.sh` needs to build a sharedir.
+///
+/// The packer lives in the AFL++ source tree rather than next to the binaries,
+/// so it is resolved from the configured root instead of [`afl_bin_dir`].
+fn check_nyx_packer(aflpp_root: &Path) -> Result<(), CheckFailure> {
+    if aflpp_root
+        .join("nyx_mode")
+        .join("packer")
+        .join("packer")
+        .is_dir()
+    {
+        Ok(())
+    } else {
+        Err(CheckFailure::NyxPackerNotFound)
     }
 }
 
@@ -499,6 +521,25 @@ mod tests {
         fs::set_permissions(&tool_path, perms).unwrap();
 
         assert!(require_executable(&tempdir.path().join("afl-fuzz")).is_ok());
+    }
+
+    #[test]
+    fn check_nyx_packer_accepts_aflpp_root_with_packer() {
+        let tempdir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tempdir.path().join("nyx_mode/packer/packer")).unwrap();
+
+        assert!(check_nyx_packer(tempdir.path()).is_ok());
+    }
+
+    #[test]
+    fn check_nyx_packer_rejects_bin_dir_of_installed_package() {
+        let tempdir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tempdir.path().join("nyx_mode/packer/packer")).unwrap();
+        let bin = tempdir.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+
+        let err = check_nyx_packer(&bin).unwrap_err();
+        assert!(err.to_string().contains("nyx_mode/packer/packer not found"));
     }
 
     #[test]

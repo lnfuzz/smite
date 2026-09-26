@@ -187,7 +187,7 @@ Checks performed:
 - CPU virtualization enabled (`vmx` or `svm`)
 - `/dev/kvm` is present and openable
 - Docker daemon is reachable (`docker version`)
-- AFL++ built with Nyx support (`libnyx.so` under `--aflpp-path`)
+- AFL++ built with Nyx support (`libnyx.so` and Nyx packer available under `--aflpp-path`)
 - VMware backdoor is enabled
 - AFL++ tools (`afl-fuzz`, `afl-cmin`, `afl-tmin`, `afl-whatsup`) are executable
 - Required host tools (`bash`, `python`, `python3`, `tmux`)
