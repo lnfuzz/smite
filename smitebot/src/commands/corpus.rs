@@ -10,7 +10,7 @@ use std::process::Command;
 use clap::{Args, Subcommand};
 
 use crate::state::CampaignState;
-use crate::utils::{find_in_path, is_executable};
+use crate::utils::{afl_bin_dir, find_in_path, is_executable};
 
 /// Command handler for `smitebot corpus`.
 pub struct CorpusCommand;
@@ -373,7 +373,7 @@ fn output_dir_occupied(output: &Path) -> bool {
 /// searching `$PATH`.
 fn find_afl_cmin(aflpp_path: Option<&Path>) -> Option<PathBuf> {
     if let Some(path) = aflpp_path {
-        let candidate = path.join("afl-cmin");
+        let candidate = afl_bin_dir(path).join("afl-cmin");
         if is_executable(&candidate) {
             return Some(candidate);
         }
