@@ -23,6 +23,19 @@ pub fn is_executable(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
 }
 
+/// Returns the directory holding AFL++'s binaries and `libnyx.so`.
+///
+/// A source build keeps them at the tree root; an installed package puts them
+/// under `bin/`.
+pub fn afl_bin_dir(aflpp_path: &Path) -> PathBuf {
+    let bin = aflpp_path.join("bin");
+    if bin.join("afl-fuzz").is_file() {
+        bin
+    } else {
+        aflpp_path.to_path_buf()
+    }
+}
+
 /// Wraps a string in single quotes for safe interpolation into a shell command.
 ///
 /// Embedded single quotes are escaped with the standard `'\''` idiom. Used for
@@ -199,6 +212,22 @@ mod tests {
         let path_value = OsString::from(tempdir.path());
         let found = find_in_path_with_path("afl-fuzz", &path_value);
         assert!(found.is_none());
+    }
+
+    #[test]
+    fn afl_bin_dir_is_root_for_source_tree() {
+        let tempdir = tempfile::tempdir().unwrap();
+        fs::write(tempdir.path().join("afl-fuzz"), "").unwrap();
+        assert_eq!(afl_bin_dir(tempdir.path()), tempdir.path());
+    }
+
+    #[test]
+    fn afl_bin_dir_is_bin_for_installed_package() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let bin = tempdir.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        fs::write(bin.join("afl-fuzz"), "").unwrap();
+        assert_eq!(afl_bin_dir(tempdir.path()), bin);
     }
 
     #[test]
