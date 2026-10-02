@@ -46,7 +46,7 @@ RUN find eclair-node/target -name "eclair-node-*-bin.zip" \
         -exec unzip {} -d /opt \; && \
     mv /opt/eclair-node-* /opt/eclair
 
-# Build the eclair-sancov Java agent.
+# Build the eclair-sancov coverage instrumenter and runtime.
 COPY workloads/eclair/eclair-sancov/ /eclair-sancov/
 WORKDIR /eclair-sancov
 RUN mvn package
@@ -59,13 +59,13 @@ RUN cc -shared -fPIC \
     src/main/c/shmutil.c \
     -o /usr/local/lib/libeclair-sancov.so
 
-# Count instrumentable Eclair methods to determine TARGET_MAP_SIZE.
-# EclairEdgeCounter scans the same fr/acinq/eclair/ methods that
-# EclairTransformer will instrument, so the count matches exactly.
-RUN java -cp target/eclair-sancov-0.0.0.jar EclairEdgeCounter \
-    $(find /opt/eclair/lib -name "*.jar" | tr '\n' ' ') \
+# Instrument Eclair's JARs in place; the probe count becomes TARGET_MAP_SIZE.
+# The probes call EclairSanCov, placed in lib/ because eclair-node.sh puts
+# that directory itself on the classpath.
+RUN java -cp target/eclair-sancov-0.0.0.jar EclairInstrumenter /opt/eclair/lib \
     > /tmp/eclair-edge-count.txt && \
-    echo "Eclair edge count: $(cat /tmp/eclair-edge-count.txt)"
+    cp target/classes/EclairSanCov.class /opt/eclair/lib/ && \
+    echo "Eclair probe count: $(cat /tmp/eclair-edge-count.txt)"
 
 # Copy smite workspace files and build all scenario binaries
 WORKDIR /smite
@@ -106,8 +106,7 @@ COPY --from=builder /opt/eclair /opt/eclair
 COPY --from=builder /usr/local/bin/bitcoind /usr/local/bin/bitcoind
 COPY --from=builder /usr/local/bin/bitcoin-cli /usr/local/bin/bitcoin-cli
 
-# Copy coverage agent and JNI shared library
-COPY --from=builder /eclair-sancov/target/eclair-sancov-0.0.0.jar /eclair-sancov.jar
+# Copy the JNI library EclairSanCov uses to map the AFL shared memory
 COPY --from=builder /usr/local/lib/libeclair-sancov.so /usr/local/lib/libeclair-sancov.so
 
 # Copy crash handlers and eclair scenario binary
