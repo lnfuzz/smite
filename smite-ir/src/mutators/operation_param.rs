@@ -3,16 +3,20 @@
 use bitcoin::secp256k1::SecretKey;
 use rand::seq::IteratorRandom;
 use rand::{Rng, RngExt};
-use smite::bolt::{ChannelTypeVariant, MAX_MESSAGE_SIZE, ShortChannelId};
+use smite::bolt::{
+    ChannelTypeVariant, MAX_MESSAGE_SIZE, MalformableField, MessageType, ShortChannelId,
+};
 
 use super::Mutator;
+use crate::malform::Malformation;
 use crate::operation::{AcceptChannelField, ShutdownScriptVariant};
 use crate::{Operation, Program};
 
 /// Mutates the embedded parameter of a randomly chosen `is_param_mutable`
 /// instruction. For numeric loads, applies a random arithmetic tweak. For byte
 /// loads, flips/adds/removes bytes. For extract operations, swaps to a random
-/// field with the same output type.
+/// field with the same output type. For messages with malformations, randomly
+/// sets, replaces, or clears the malformation applied to the encoded message.
 pub struct OperationParamMutator;
 
 impl Mutator for OperationParamMutator {
@@ -98,6 +102,11 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
             }
             true
         }
+        Operation::SendFundingCreated { malformation } => mutate_malformation(
+            malformation,
+            MessageType::FUNDING_CREATED.malformable_fields(),
+            rng,
+        ),
         Operation::SendChannelReady { include_alias } => {
             // Toggle the SCID alias TLV. Flipping always changes the value;
             // a random bool could repeat it and waste the mutation.
@@ -117,7 +126,6 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         | Operation::BuildAnnouncementSignatures
         | Operation::SendMessage
         | Operation::SendOpenChannel
-        | Operation::SendFundingCreated
         | Operation::SendShutdown
         | Operation::RecvAcceptChannel
         | Operation::RecvFundingSigned
@@ -381,6 +389,81 @@ fn mutate_private_key(bytes: &mut [u8; 32], rng: &mut impl Rng) {
         // value below it, and setting the low bit rules out zero.
         bytes[0] = 0;
         bytes[31] |= 1;
+    }
+}
+
+// -- Malformations --
+
+/// Sets, replaces, or clears the malformation of a `Send*` operation.
+///
+/// `fields` is the allowlist of fields that can be malformed in the message
+/// sent by the operation. Other fields are already reachable through the IR's
+/// own parameters, so malforming them would only duplicate the tweaks above.
+///
+/// Returns `true` if the malformation changed.
+///
+/// # Panics
+///
+/// Panics if `fields` is empty or if a chosen field is zero-length. A message
+/// type reaching here must have at least one malformable field, and a
+/// zero-length field would encode to no replacement bytes at all, so either
+/// indicates that the operation and its field table have drifted apart.
+fn mutate_malformation(
+    malformation: &mut Option<Malformation>,
+    fields: &[MalformableField],
+    rng: &mut impl Rng,
+) -> bool {
+    assert!(!fields.is_empty(), "no malformable fields for operation");
+
+    // Half the time, clear instead of replacing, so an already malformed
+    // message can find its way back to a well-formed encoding.
+    if malformation.is_some() && rng.random() {
+        *malformation = None;
+        return true;
+    }
+
+    // Otherwise malform a randomly chosen field, overwriting any existing
+    // malformation. Redrawing the same offset and bytes is not a change.
+    let field = &fields[rng.random_range(0..fields.len())];
+    assert!(
+        field.len > 0,
+        "zero-length malformable field {}",
+        field.name
+    );
+
+    let new = Malformation {
+        offset: field.offset,
+        bytes: malformed_bytes(field.len as usize, rng),
+    };
+    if malformation.as_ref() == Some(&new) {
+        return false;
+    }
+    *malformation = Some(new);
+    true
+}
+
+/// Generates `len` replacement bytes for a malformed field.
+///
+/// Either fully random bytes or a repeated byte biased toward the interesting
+/// byte values. A multi-byte field as wide as an interesting integer can also
+/// be replaced by one directly, in big endian.
+fn malformed_bytes(len: usize, rng: &mut impl Rng) -> Vec<u8> {
+    let strategies = if matches!(len, 2 | 4 | 8) { 3 } else { 2 };
+    match rng.random_range(0..strategies) {
+        // Fully random bytes.
+        0 => {
+            let mut bytes = vec![0u8; len];
+            rng.fill(&mut bytes[..]);
+            bytes
+        }
+        // A repeated byte, biased toward the interesting byte values.
+        1 => vec![repeated_byte(rng); len],
+        // An interesting integer of the field's exact width, in big endian.
+        _ => match len {
+            2 => interesting_u16(rng).to_be_bytes().to_vec(),
+            4 => interesting_u32(rng).to_be_bytes().to_vec(),
+            _ => interesting_u64(rng).to_be_bytes().to_vec(),
+        },
     }
 }
 
@@ -722,5 +805,15 @@ mod tests {
         }
         assert!(all_zeros, "mutate_bytes never produced an all-zero field");
         assert!(all_ones, "mutate_bytes never produced an all-ones field");
+    }
+
+    #[test]
+    fn malformed_bytes_has_requested_len() {
+        let mut rng = SmallRng::seed_from_u64(0);
+        for len in [1, 2, 3, 4, 8, 32, 64] {
+            for _ in 0..100 {
+                assert_eq!(malformed_bytes(len, &mut rng).len(), len);
+            }
+        }
     }
 }

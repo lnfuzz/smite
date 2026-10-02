@@ -225,17 +225,21 @@ impl Fixture {
         self.executor.conn.sent.len()
     }
 
-    /// Decodes the `n`th message the executor sent, panicking if it is not an
-    /// `M`.
-    pub fn sent<M: FromMessage>(&self, n: usize) -> M {
-        let bytes = self.executor.conn.sent.get(n).unwrap_or_else(|| {
+    /// Returns the raw bytes of the `n`th message the executor sent.
+    pub fn sent_bytes(&self, n: usize) -> &[u8] {
+        self.executor.conn.sent.get(n).unwrap_or_else(|| {
             panic!(
                 "expected at least {} sent messages, got {}",
                 n + 1,
                 self.sent_len()
             )
-        });
-        let msg = Message::decode(bytes).expect("valid message");
+        })
+    }
+
+    /// Decodes the `n`th message the executor sent, panicking if it is not an
+    /// `M`.
+    pub fn sent<M: FromMessage>(&self, n: usize) -> M {
+        let msg = Message::decode(self.sent_bytes(n)).expect("valid message");
         let got = msg.to_string();
         M::from_message(msg).unwrap_or_else(|| panic!("expected {}, got {got}", M::TYPE))
     }

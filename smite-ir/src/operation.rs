@@ -16,7 +16,7 @@ use rand::{Rng, RngExt};
 use serde::{Deserialize, Serialize};
 use smite::bolt::{ChannelTypeVariant, ShortChannelId};
 
-use super::VariableType;
+use super::{Malformation, VariableType};
 
 /// An IR operation.  Each instruction in a program contains one operation plus
 /// input variable indices.
@@ -188,7 +188,11 @@ pub enum Operation {
     ///   0: `funding_transaction` (`FundingTransaction`)
     ///   1: `opener_funding_privkey` (`PrivateKey`)
     ///   2: `temporary_channel_id` (`ChannelId`)
-    SendFundingCreated,
+    SendFundingCreated {
+        /// [`Malformation`] to overwrite the derived funding outpoint or
+        /// signature.
+        malformation: Option<Malformation>,
+    },
     /// Build and send a `channel_ready` message (BOLT 2, type 36).
     ///
     /// The alias TLV is optional in `channel_ready`. Since every `u64` is a
@@ -508,6 +512,15 @@ fn format_hex(bytes: &[u8]) -> String {
     s
 }
 
+/// Format a malformation as `malformation@<offset>=<hex>`. Returns
+/// `malformation=none` when there is none.
+fn format_malformation(malformation: Option<&Malformation>) -> String {
+    match malformation {
+        Some(m) => format!("malformation@{}={}", m.offset, format_hex(&m.bytes)),
+        None => "malformation=none".to_string(),
+    }
+}
+
 /// Print an Operation. Operations that take no variable inputs include parens
 /// (e.g., `LoadAmount(100000)`, `LoadChainHashFromContext()`). Operations that do take
 /// inputs omit parens so `Program::Display` can append them `(v0, v1, ...)`.
@@ -548,7 +561,13 @@ impl fmt::Display for Operation {
             Self::BuildAnnouncementSignatures => write!(f, "BuildAnnouncementSignatures"),
             Self::SendMessage => write!(f, "SendMessage"),
             Self::SendOpenChannel => write!(f, "SendOpenChannel"),
-            Self::SendFundingCreated => write!(f, "SendFundingCreated"),
+            Self::SendFundingCreated { malformation } => {
+                write!(
+                    f,
+                    "SendFundingCreated{{{}}}",
+                    format_malformation(malformation.as_ref())
+                )
+            }
             Self::SendChannelReady { include_alias } => {
                 write!(f, "SendChannelReady{{include_alias={include_alias}}}")
             }
@@ -598,7 +617,7 @@ impl Operation {
             | Self::MineBlocks(_)
             | Self::BroadcastTransaction => None,
             Self::SendOpenChannel => Some(VariableType::SentOpenChannel),
-            Self::SendFundingCreated => Some(VariableType::SentFundingCreated),
+            Self::SendFundingCreated { .. } => Some(VariableType::SentFundingCreated),
             Self::SendShutdown => Some(VariableType::SentShutdown),
             Self::RecvAcceptChannel => Some(VariableType::AcceptChannel),
         }
@@ -702,7 +721,7 @@ impl Operation {
             ],
             Self::SendMessage => vec![VariableType::Message],
             Self::SendOpenChannel => vec![VariableType::OpenChannelMessage],
-            Self::SendFundingCreated => vec![
+            Self::SendFundingCreated { .. } => vec![
                 VariableType::FundingTransaction, // funding_transaction
                 VariableType::PrivateKey,         // opener_funding_privkey
                 VariableType::ChannelId,          // temporary_channel_id
@@ -758,7 +777,7 @@ impl Operation {
             | Self::BuildAnnouncementSignatures
             | Self::SendMessage
             | Self::SendOpenChannel
-            | Self::SendFundingCreated
+            | Self::SendFundingCreated { .. }
             | Self::SendChannelReady { .. }
             | Self::SendShutdown
             | Self::RecvFundingSigned
@@ -806,7 +825,7 @@ impl Operation {
             Self::CreateFundingTransaction
             | Self::SendMessage
             | Self::SendOpenChannel
-            | Self::SendFundingCreated
+            | Self::SendFundingCreated { .. }
             | Self::SendChannelReady { .. }
             | Self::SendShutdown
             | Self::RecvAcceptChannel
@@ -862,7 +881,7 @@ impl Operation {
             // the private mempool holds, `BroadcastTransaction` dedups against
             // it, and `LookupShortChannelId` reads chain state.
             Self::CreateFundingTransaction
-            | Self::SendFundingCreated
+            | Self::SendFundingCreated { .. }
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
@@ -901,6 +920,7 @@ impl Operation {
             | Self::LoadChannelType(_)
             | Self::ExtractAcceptChannel(_)
             | Self::BuildNodeAnnouncement { .. }
+            | Self::SendFundingCreated { .. }
             | Self::SendChannelReady { .. }
             | Self::MineBlocks(_) => true,
 
@@ -914,7 +934,6 @@ impl Operation {
             | Self::BuildAnnouncementSignatures
             | Self::SendMessage
             | Self::SendOpenChannel
-            | Self::SendFundingCreated
             | Self::SendShutdown
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned

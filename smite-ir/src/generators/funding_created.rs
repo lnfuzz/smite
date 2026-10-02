@@ -40,7 +40,7 @@ impl Generator for FundingCreatedGenerator {
 
         // Build and send funding_created.
         let sent_funding_created = builder.append(
-            Operation::SendFundingCreated,
+            Operation::SendFundingCreated { malformation: None },
             &[
                 funding_transaction,
                 opener_funding_privkey,

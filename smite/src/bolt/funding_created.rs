@@ -1,8 +1,8 @@
 //! BOLT 2 funding created message.
 
-use super::BoltError;
 use super::types::TemporaryChannelId;
 use super::wire::WireFormat;
+use super::{BoltError, MalformableField};
 use bitcoin::Txid;
 use bitcoin::secp256k1::ecdsa::Signature;
 
@@ -24,6 +24,31 @@ pub struct FundingCreated {
 }
 
 impl FundingCreated {
+    /// Fields whose encoded bytes may be overwritten before sending: the
+    /// outpoint is derived from the constructed funding transaction and the
+    /// signature is computed, so neither is reachable through an IR parameter.
+    /// See [`MalformableField`].
+    pub const FUNDING_TXID_FIELD: MalformableField = MalformableField {
+        name: "funding_txid",
+        offset: 34,
+        len: 32,
+    };
+    pub const FUNDING_OUTPUT_INDEX_FIELD: MalformableField = MalformableField {
+        name: "funding_output_index",
+        offset: 66,
+        len: 2,
+    };
+    pub const SIGNATURE_FIELD: MalformableField = MalformableField {
+        name: "signature",
+        offset: 68,
+        len: 64,
+    };
+    pub const MALFORMABLE_FIELDS: &'static [MalformableField] = &[
+        Self::FUNDING_TXID_FIELD,
+        Self::FUNDING_OUTPUT_INDEX_FIELD,
+        Self::SIGNATURE_FIELD,
+    ];
+
     /// Encodes to wire format (without message type prefix).
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
@@ -163,6 +188,33 @@ mod tests {
         assert_eq!(
             FundingCreated::decode(&encoded),
             Err(BoltError::InvalidSignature(bad_sig))
+        );
+    }
+
+    #[test]
+    fn malformable_field_offsets_match_encoding() {
+        let msg = sample_funding_created();
+        let encoded = crate::bolt::Message::FundingCreated(msg.clone()).encode();
+
+        let encoded_field = |name: &str| {
+            let f = FundingCreated::MALFORMABLE_FIELDS
+                .iter()
+                .find(|f| f.name == name)
+                .expect("field is allowlisted");
+            &encoded[f.offset as usize..(f.offset + f.len) as usize]
+        };
+
+        assert_eq!(
+            encoded_field("funding_txid"),
+            msg.funding_txid.to_byte_array()
+        );
+        assert_eq!(
+            encoded_field("funding_output_index"),
+            msg.funding_output_index.to_be_bytes()
+        );
+        assert_eq!(
+            encoded_field("signature"),
+            msg.signature.serialize_compact()
         );
     }
 }
