@@ -31,8 +31,9 @@ pub enum Violation {
     /// requirement, one of:
     /// - it names a `temporary_channel_id` we sent no `open_channel` for,
     /// - it accepts an `open_channel` BOLT 2 required it to reject,
-    /// - its own fields breach the `accept_channel` requirements, or
-    /// - it reuses a `temporary_channel_id` still awaiting `funding_created`.
+    /// - its own fields breach the `accept_channel` requirements,
+    /// - it reuses a `temporary_channel_id` still awaiting `funding_created`, or
+    /// - it uses a pubkey already revealed by either side.
     #[error("invalid accept_channel for temporary_channel_id {0}: {1}")]
     InvalidAcceptChannel(TemporaryChannelId, String),
 

@@ -38,7 +38,7 @@ pub enum CommitmentError {
 }
 
 /// Identifies the channel participant relative to the funding flow.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
     Opener,
     Acceptor,
@@ -184,7 +184,7 @@ impl Side {
 impl HolderIdentity {
     /// Returns the counterparty side.
     #[must_use]
-    fn counterparty_side(&self) -> Side {
+    pub fn counterparty_side(&self) -> Side {
         self.side.other()
     }
 }

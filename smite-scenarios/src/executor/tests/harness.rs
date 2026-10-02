@@ -296,7 +296,11 @@ pub fn sample_accept_channel() -> AcceptChannel {
         minimum_depth: 6,
         to_self_delay: 144,
         max_accepted_htlcs: 483,
-        funding_pubkey: sample_pubkey(1),
+        // We don't use `sample_pubkey(1)` here because it was already used in
+        // `announced_open_channel` and recorded in `revealed_pubkeys`. Reusing
+        // it in `accept_channel` would therefore be flagged by the oracle as
+        // an invalid pubkey reuse.
+        funding_pubkey: sample_pubkey(7),
         revocation_basepoint: sample_pubkey(2),
         payment_basepoint: sample_pubkey(3),
         delayed_payment_basepoint: sample_pubkey(4),
