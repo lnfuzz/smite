@@ -846,7 +846,7 @@ fn build_funding_created(
         minimum_depth: accept_channel.minimum_depth,
     };
 
-    let state = config.new_initial_commitment(
+    let commitments = config.new_initial_commitments(
         open_channel.push_msat,
         open_channel.feerate_per_kw,
         open_channel.first_per_commitment_point,
@@ -856,7 +856,7 @@ fn build_funding_created(
         side: Side::Opener,
         funding_privkey: opener_funding_privkey,
     };
-    let signature = config.sign_counterparty_commitment(&state, &holder);
+    let signature = config.sign_counterparty_commitment(&commitments, &holder);
 
     // Only track a new channel when this negotiation has not built a
     // `funding_created` yet. If it has, we are likely resending one for the
@@ -889,7 +889,7 @@ fn build_funding_created(
             ChannelState::new(
                 config,
                 holder,
-                state,
+                commitments,
                 is_funding_outpoint_valid,
                 mined_txids.contains(&funding_outpoint.txid),
                 sent_invalid_signature,
@@ -926,12 +926,12 @@ fn build_channel_ready(
 
     // Record the holder's next per-commitment point from the first locally-sent
     // `channel_ready`'s `second_per_commitment_point`. We only do so when the
-    // channel is tracked, the commitment number is still 0, and the point is not
-    // yet recorded: `channel_ready` may be resent, but BOLT peers ignore
-    // redundant ones, so recording a resend would leave us with the wrong point
-    // and make us reject a valid received commitment signature as invalid.
+    // channel is tracked, the holder's commitment number is still 0, and the
+    // point is not yet recorded: `channel_ready` may be resent, but BOLT peers
+    // ignore redundant ones, so recording a resend would leave us with the wrong
+    // point and make us reject a valid received commitment signature as invalid.
     if let Some(state) = channel_states.get_mut(&channel_id)
-        && state.commitment.commitment_number == 0
+        && state.holder_commitment_state().commitment_number == 0
     {
         let next_point = state.next_holder_per_commitment_point_mut();
         if next_point.is_none() {
@@ -1226,18 +1226,19 @@ fn recv_channel_ready(
 
 /// Returns `true` if the target owes us a `channel_ready` message.
 ///
-/// A `channel_ready` is expected when a tracked channel is still at commitment
-/// number 0, the counterparty's next per-commitment point is unknown, the
-/// advertised funding outpoint pays the negotiated funding output, the funding
-/// transaction was mined only after we sent `funding_created`, we have not sent
-/// a signature the peer is required to reject, and it has at least
-/// `minimum_depth` confirmations (as specified in the received `accept_channel`).
+/// A `channel_ready` is expected when a tracked channel's counterparty
+/// commitment is still at commitment number 0, the counterparty's next
+/// per-commitment point is unknown, the advertised funding outpoint pays the
+/// negotiated funding output, the funding transaction was mined only after we
+/// sent `funding_created`, we have not sent a signature the peer is required to
+/// reject, and it has at least `minimum_depth` confirmations (as specified in
+/// the received `accept_channel`).
 fn is_channel_ready_expected(
     channel_states: &HashMap<ChannelId, ChannelState>,
     bitcoin_cli: &mut impl BitcoinRpc,
 ) -> bool {
     channel_states.values().any(|state| {
-        state.commitment.commitment_number == 0
+        state.counterparty_commitment_state().commitment_number == 0
             && state.next_counterparty_per_commitment_point().is_none()
             && state.is_funding_outpoint_valid
             && !state.was_funding_mined_prematurely

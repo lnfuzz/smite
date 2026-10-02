@@ -97,19 +97,20 @@ impl TestVectorFile {
         }
     }
 
-    /// Builds the commitment state for a vector.
-    fn build_commitment_state(&self, vector: &CommitmentVector) -> CommitmentState {
-        CommitmentState {
+    /// Builds the channel commitment states for both sides from a commitment vector.
+    fn build_channel_commitments(&self, vector: &CommitmentVector) -> ChannelCommitments {
+        let new_state = |local_side, per_commitment_point| CommitmentState {
+            local_side,
             commitment_number: self.commitment_number,
             feerate_per_kw: vector.feerate_per_kw,
-            opener: CommitmentPartyState {
-                per_commitment_point: self.opener.per_commitment_point,
-                balance_msat: vector.to_opener_msat,
-            },
-            acceptor: CommitmentPartyState {
-                per_commitment_point: self.acceptor.per_commitment_point,
-                balance_msat: vector.to_acceptor_msat,
-            },
+            per_commitment_point,
+            opener_balance_msat: vector.to_opener_msat,
+            acceptor_balance_msat: vector.to_acceptor_msat,
+        };
+
+        ChannelCommitments {
+            opener_state: new_state(Side::Opener, self.opener.per_commitment_point),
+            acceptor_state: new_state(Side::Acceptor, self.acceptor.per_commitment_point),
         }
     }
 
@@ -129,14 +130,13 @@ impl TestVectorFile {
     /// Checks one vector, returning a message per failed assertion.
     fn check_vector(&self, vector: &CommitmentVector) -> Vec<String> {
         let channel_config = self.build_channel_config(vector);
-        let commitment_state = self.build_commitment_state(vector);
+        let commitments = self.build_channel_commitments(vector);
         let opener_holder = self.build_holder_identity(Side::Opener);
         let acceptor_holder = self.build_holder_identity(Side::Acceptor);
         let mut failures = Vec::new();
 
         // Opener signs own commitment.
-        let local_signature =
-            channel_config.sign_holder_commitment(&commitment_state, &opener_holder);
+        let local_signature = channel_config.sign_holder_commitment(&commitments, &opener_holder);
         if local_signature != vector.local_signature {
             failures.push(format!(
                 "{}: local signature mismatch\n  expected: {}\n  actual:   {}",
@@ -146,7 +146,7 @@ impl TestVectorFile {
 
         // Acceptor signs opener's commitment, then the opener verifies it.
         let remote_signature =
-            channel_config.sign_counterparty_commitment(&commitment_state, &acceptor_holder);
+            channel_config.sign_counterparty_commitment(&commitments, &acceptor_holder);
         if remote_signature != vector.remote_signature {
             failures.push(format!(
                 "{}: remote signature mismatch\n  expected: {}\n  actual:   {}",
@@ -154,7 +154,7 @@ impl TestVectorFile {
             ));
         }
         if !channel_config.verify_counterparty_signature(
-            &commitment_state,
+            &commitments,
             &opener_holder,
             &vector.remote_signature,
         ) {
@@ -163,9 +163,9 @@ impl TestVectorFile {
 
         // Opener signs the acceptor's commitment, then the acceptor verifies it.
         let acceptor_commit_sig =
-            channel_config.sign_counterparty_commitment(&commitment_state, &opener_holder);
+            channel_config.sign_counterparty_commitment(&commitments, &opener_holder);
         if !channel_config.verify_counterparty_signature(
-            &commitment_state,
+            &commitments,
             &acceptor_holder,
             &acceptor_commit_sig,
         ) {

@@ -62,7 +62,7 @@ impl Oracle<FundingSignedContext<'_>> for FundingSignedOracle {
         // `funding_signed`, a channel_id collision (see above) surfaces here as
         // an invalid signature instead.
         if !channel.config.verify_counterparty_signature(
-            &channel.commitment,
+            &channel.commitments,
             &channel.holder,
             &context.funding_signed.signature,
         ) {
@@ -125,15 +125,15 @@ mod tests {
             },
             minimum_depth: 8,
         };
-        let commitment = config
-            .new_initial_commitment(3_000_000_000, 15_000, pkey1, pkey2)
-            .expect("valid initial commitment");
+        let commitments = config
+            .new_initial_commitments(3_000_000_000, 15_000, pkey1, pkey2)
+            .expect("valid initial commitments");
         let holder = HolderIdentity {
             side: Side::Opener,
             funding_privkey: secret_key(1),
         };
 
-        ChannelState::new(config, holder, commitment, true, false, false)
+        ChannelState::new(config, holder, commitments, true, false, false)
     }
 
     /// Valid `funding_signed` message for testing.
@@ -146,7 +146,7 @@ mod tests {
             channel_id: ChannelId::v1_from_funding_outpoint(channel.config.funding_outpoint),
             signature: channel
                 .config
-                .sign_counterparty_commitment(&channel.commitment, &acceptor),
+                .sign_counterparty_commitment(&channel.commitments, &acceptor),
         }
     }
 

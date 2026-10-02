@@ -107,7 +107,7 @@ fn new_initial_from_funding_msat_overflow() {
         u64::MAX,
         Features::from_bits(&[Features::OPTION_STATIC_REMOTEKEY]),
     );
-    let result = chan_config.new_initial_commitment(0, 15_000, sample_key, sample_key);
+    let result = chan_config.new_initial_commitments(0, 15_000, sample_key, sample_key);
     assert!(matches!(result, Err(CommitmentError::FundingMsatOverflow)));
 }
 
@@ -118,7 +118,7 @@ fn new_initial_from_funding_push_exceeds_funding() {
         1_000,
         Features::from_bits(&[Features::OPTION_STATIC_REMOTEKEY]),
     );
-    let result = chan_config.new_initial_commitment(2_000_000, 15_000, sample_key, sample_key);
+    let result = chan_config.new_initial_commitments(2_000_000, 15_000, sample_key, sample_key);
     assert!(matches!(result, Err(CommitmentError::PushExceedsFunding)));
 }
 

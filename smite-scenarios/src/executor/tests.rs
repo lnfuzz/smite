@@ -788,7 +788,7 @@ fn execute_send_funding_created_and_recv_funding_signed() {
     assert!(
         state
             .config
-            .verify_counterparty_signature(&state.commitment, &holder, &fc.signature)
+            .verify_counterparty_signature(&state.commitments, &holder, &fc.signature)
     );
 
     let pending = fx.negotiation(&TemporaryChannelId::new([0xbb; 32]));

@@ -86,30 +86,40 @@ pub struct ChannelConfig {
     pub minimum_depth: u32,
 }
 
-/// Per-party parameters used in a commitment transaction.
-pub struct CommitmentPartyState {
-    /// Per-commitment point used to derive all commitment-specific keys.
-    pub per_commitment_point: PublicKey,
-
-    /// Amount allocated to this party in millisatoshis.
-    /// Represents the balance before subtraction of fees, and anchors outputs.
-    /// In-flight HTLCs are represented as separate outputs in the commitment
-    /// transaction, so those values are already deducted from these balance values.
-    pub balance_msat: u64,
-}
-
-/// Parameters for building a commitment transaction.
+/// State of `local_side`'s commitment transaction.
+///
+/// Each side has its own commitment state, so the commitment number, fee rate,
+/// and balances may differ until both sides have caught up.
 pub struct CommitmentState {
+    /// Side whose commitment transaction this state is for.
+    pub local_side: Side,
     /// The commitment transaction number.
     pub commitment_number: u64,
     /// Fee rate for the commitment transaction.
     pub feerate_per_kw: u32,
-    /// Parameters for the channel opener.
-    pub opener: CommitmentPartyState,
-    /// Parameters for the channel acceptor.
-    pub acceptor: CommitmentPartyState,
+    /// Per-commitment point of `local_side`, used to derive commitment-specific
+    /// keys.
+    pub per_commitment_point: PublicKey,
+    /// Amount allocated to the opener in millisatoshis. Represents the balance
+    /// before subtraction of fees, and anchors outputs. In-flight HTLCs are
+    /// represented as separate outputs in the commitment transaction, so those
+    /// values are already deducted from these balance values.
+    pub opener_balance_msat: u64,
+    /// Amount allocated to the acceptor in millisatoshis. Represents the balance
+    /// before subtraction of fees, and anchors outputs. In-flight HTLCs are
+    /// represented as separate outputs in the commitment transaction, so those
+    /// values are already deducted from these balance values.
+    pub acceptor_balance_msat: u64,
     // TODO: When adding HTLC support, store pending HTLCs (offered/received) for both sides
     // to correctly compute balances and construct HTLC outputs in the commitment transaction.
+}
+
+/// State of both sides' commitments.
+pub struct ChannelCommitments {
+    /// State of the opener's commitment.
+    pub opener_state: CommitmentState,
+    /// State of the acceptor's commitment.
+    pub acceptor_state: CommitmentState,
 }
 
 /// Costs associated with a commitment transaction, including transaction fee
@@ -123,8 +133,6 @@ pub struct CommitmentCost {
 
 /// Per-commitment keys used when constructing a commitment transaction.
 struct TxCreationKeys {
-    /// Side whose commitment transaction these keys are for.
-    local_side: Side,
     /// Local delayed payment pubkey.
     local_delayedpubkey: PublicKey,
     /// Revocation pubkey for this commitment.
@@ -132,7 +140,7 @@ struct TxCreationKeys {
 }
 
 /// State of a single channel, including its static configuration, holder
-/// identity, and current commitment state.
+/// identity, and the state of each side's commitment.
 #[allow(clippy::struct_excessive_bools)] // Independent flags, not a state machine
 pub struct ChannelState {
     /// Channel configuration established at channel creation and unchanged
@@ -141,9 +149,9 @@ pub struct ChannelState {
     /// Holder-specific identity data (channel side and funding secret) used to
     /// sign commitment transactions and verify the counterparty's signatures.
     pub holder: HolderIdentity,
-    /// Current commitment state, updated as commitments are exchanged and
+    /// State of each side's commitment, updated as commitments are exchanged and
     /// revoked.
-    pub commitment: CommitmentState,
+    pub commitments: ChannelCommitments,
     /// Opener's next per-commitment point used to build its next commitment,
     /// revealed by `channel_ready` and then each `revoke_and_ack`. `None` until
     /// known.
@@ -195,7 +203,7 @@ impl ChannelState {
     pub fn new(
         config: ChannelConfig,
         holder: HolderIdentity,
-        commitment: CommitmentState,
+        commitments: ChannelCommitments,
         is_funding_outpoint_valid: bool,
         was_funding_mined_prematurely: bool,
         sent_invalid_signature: bool,
@@ -203,7 +211,7 @@ impl ChannelState {
         Self {
             config,
             holder,
-            commitment,
+            commitments,
             opener_next_per_commitment_point: None,
             acceptor_next_per_commitment_point: None,
             is_funding_outpoint_valid,
@@ -211,6 +219,18 @@ impl ChannelState {
             sent_invalid_signature,
             funding_signed_received: false,
         }
+    }
+
+    /// Returns the state of the holder's commitment.
+    #[must_use]
+    pub fn holder_commitment_state(&self) -> &CommitmentState {
+        self.commitments.state(self.holder.side)
+    }
+
+    /// Returns the state of the counterparty's commitment.
+    #[must_use]
+    pub fn counterparty_commitment_state(&self) -> &CommitmentState {
+        self.commitments.state(self.holder.counterparty_side())
     }
 
     /// Returns the holder's next per-commitment point.
@@ -233,7 +253,7 @@ impl ChannelState {
     /// Returns the counterparty's next per-commitment point.
     #[must_use]
     pub fn next_counterparty_per_commitment_point(&self) -> &Option<PublicKey> {
-        match self.holder.side.other() {
+        match self.holder.counterparty_side() {
             Side::Opener => &self.opener_next_per_commitment_point,
             Side::Acceptor => &self.acceptor_next_per_commitment_point,
         }
@@ -242,7 +262,7 @@ impl ChannelState {
     /// Returns a mutable reference to the counterparty's next per-commitment
     /// point.
     pub fn next_counterparty_per_commitment_point_mut(&mut self) -> &mut Option<PublicKey> {
-        match self.holder.side.other() {
+        match self.holder.counterparty_side() {
             Side::Opener => &mut self.opener_next_per_commitment_point,
             Side::Acceptor => &mut self.acceptor_next_per_commitment_point,
         }
@@ -258,7 +278,9 @@ impl ChannelConfig {
         }
     }
 
-    /// Constructs the initial commitment state after channel funding.
+    /// Constructs the initial commitment states for both sides after channel
+    /// funding. Both sides start with the same commitment state, except for the
+    /// per-commitment point and `local_side`.
     ///
     /// # Errors
     ///
@@ -267,13 +289,13 @@ impl ChannelConfig {
     ///   converting to millisatoshis.
     /// - [`CommitmentError::PushExceedsFunding`] if `push_msat` exceeds the total
     ///   funding amount in millisatoshis.
-    pub fn new_initial_commitment(
+    pub fn new_initial_commitments(
         &self,
         push_msat: u64,
         feerate_per_kw: u32,
         opener_per_commitment_point: PublicKey,
         acceptor_per_commitment_point: PublicKey,
-    ) -> Result<CommitmentState, CommitmentError> {
+    ) -> Result<ChannelCommitments, CommitmentError> {
         let funding_msat = self
             .funding_satoshis
             .checked_mul(1000)
@@ -283,17 +305,18 @@ impl ChannelConfig {
             .ok_or(CommitmentError::PushExceedsFunding)?;
         let to_acceptor_balance_msat = push_msat;
 
-        Ok(CommitmentState {
+        let new_state = |local_side, per_commitment_point| CommitmentState {
+            local_side,
             commitment_number: 0,
             feerate_per_kw,
-            opener: CommitmentPartyState {
-                per_commitment_point: opener_per_commitment_point,
-                balance_msat: to_opener_balance_msat,
-            },
-            acceptor: CommitmentPartyState {
-                per_commitment_point: acceptor_per_commitment_point,
-                balance_msat: to_acceptor_balance_msat,
-            },
+            per_commitment_point,
+            opener_balance_msat: to_opener_balance_msat,
+            acceptor_balance_msat: to_acceptor_balance_msat,
+        };
+
+        Ok(ChannelCommitments {
+            opener_state: new_state(Side::Opener, opener_per_commitment_point),
+            acceptor_state: new_state(Side::Acceptor, acceptor_per_commitment_point),
         })
     }
 
@@ -301,10 +324,11 @@ impl ChannelConfig {
     #[must_use]
     pub fn sign_counterparty_commitment(
         &self,
-        state: &CommitmentState,
+        commitments: &ChannelCommitments,
         holder: &HolderIdentity,
     ) -> Signature {
-        let commitment = self.build_commitment_tx(state, holder.counterparty_side());
+        let state = commitments.state(holder.counterparty_side());
+        let commitment = self.build_commitment_tx(state);
         self.sign_commitment_tx(&commitment, &holder.funding_privkey)
     }
 
@@ -313,11 +337,12 @@ impl ChannelConfig {
     #[must_use]
     pub fn verify_counterparty_signature(
         &self,
-        state: &CommitmentState,
+        commitments: &ChannelCommitments,
         holder: &HolderIdentity,
         commitment_sig: &Signature,
     ) -> bool {
-        let commitment = self.build_commitment_tx(state, holder.side);
+        let state = commitments.state(holder.side);
+        let commitment = self.build_commitment_tx(state);
         self.verify_commitment_sig(
             &commitment,
             &self.party(holder.counterparty_side()).funding_pubkey,
@@ -330,19 +355,17 @@ impl ChannelConfig {
     #[cfg(test)]
     fn sign_holder_commitment(
         &self,
-        state: &CommitmentState,
+        commitments: &ChannelCommitments,
         holder: &HolderIdentity,
     ) -> Signature {
-        let commitment = self.build_commitment_tx(state, holder.side);
+        let state = commitments.state(holder.side);
+        let commitment = self.build_commitment_tx(state);
         self.sign_commitment_tx(&commitment, &holder.funding_privkey)
     }
 
     /// Builds the commitment transaction. The commitment format (legacy or
     /// anchor) is determined by the `channel_type`.
-    ///
-    /// `local_side` selects whose commitment is built: the opener's or
-    /// the acceptor's.
-    fn build_commitment_tx(&self, state: &CommitmentState, local_side: Side) -> Transaction {
+    fn build_commitment_tx(&self, state: &CommitmentState) -> Transaction {
         // Obscured commitment number.
         let obscuring_factor = compute_obscuring_factor(
             &self.opener.payment_basepoint,
@@ -363,7 +386,7 @@ impl ChannelConfig {
                 .expect("commitment_number cannot be more than 48 bits");
 
         // Build the commitment transaction
-        let keys = TxCreationKeys::derive(self, state, local_side);
+        let keys = TxCreationKeys::derive(self, state);
         let outputs = self.build_commitment_outputs(state, &keys);
 
         // Witness is not included in the BIP 143 sighash, so we leave it empty.
@@ -405,22 +428,22 @@ impl ChannelConfig {
 
     /// Builds the lexicographically sorted commitment outputs.
     ///
-    /// Outputs are built for the commitment side the keys were derived for:
+    /// Outputs are built for the commitment side specified by `state`:
     /// the opener or the acceptor.
     fn build_commitment_outputs(
         &self,
         state: &CommitmentState,
         keys: &TxCreationKeys,
     ) -> Vec<TxOut> {
-        let local_side = keys.local_side;
+        let local_side = state.local_side;
         let anchor = self.channel_type.supports_feature(Features::OPTION_ANCHORS);
         let mut outputs: Vec<TxOut> = Vec::new();
 
         // Fee and balances.
         let commitment_cost = CommitmentCost::new(state.feerate_per_kw, &self.channel_type);
         let opener_balance =
-            (state.opener.balance_msat / 1000).saturating_sub(commitment_cost.total_sat());
-        let acceptor_balance = state.acceptor.balance_msat / 1000;
+            (state.opener_balance_msat / 1000).saturating_sub(commitment_cost.total_sat());
+        let acceptor_balance = state.acceptor_balance_msat / 1000;
 
         // Map opener/acceptor to local/remote for this commitment side.
         let (to_local_value, to_remote_value) = match local_side {
@@ -503,17 +526,14 @@ impl ChannelConfig {
     }
 }
 
-impl CommitmentState {
-    /// Returns the parameters for the given commitment side.
-    fn party(&self, side: Side) -> &CommitmentPartyState {
+impl ChannelCommitments {
+    /// Returns the state of the given side's commitment.
+    fn state(&self, side: Side) -> &CommitmentState {
         match side {
-            Side::Opener => &self.opener,
-            Side::Acceptor => &self.acceptor,
+            Side::Opener => &self.opener_state,
+            Side::Acceptor => &self.acceptor_state,
         }
     }
-
-    // TODO: When adding HTLC support, add `get_next_commitment_state` to build the next
-    // commitment state based on the previous state and the HTLCs claimed by both sides.
 }
 
 impl CommitmentCost {
@@ -534,14 +554,14 @@ impl CommitmentCost {
 }
 
 impl TxCreationKeys {
-    /// Derives the per-commitment keys for the `local_side`.
-    fn derive(config: &ChannelConfig, state: &CommitmentState, local_side: Side) -> Self {
+    /// Derives the per-commitment keys for the given commitment state.
+    fn derive(config: &ChannelConfig, state: &CommitmentState) -> Self {
+        let local_side = state.local_side;
+        let per_commitment_point = state.per_commitment_point;
         let local = config.party(local_side);
         let remote = config.party(local_side.other());
-        let per_commitment_point = state.party(local_side).per_commitment_point;
 
         Self {
-            local_side,
             local_delayedpubkey: derive_pubkey(
                 &local.delayed_payment_basepoint,
                 &per_commitment_point,
