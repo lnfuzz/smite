@@ -1266,6 +1266,65 @@ fn execute_recv_channel_ready_invalid_signature_is_noop() {
     assert_eq!(fx.queued_len(), 2);
 }
 
+#[test]
+fn execute_recv_channel_ready_already_recorded_is_noop() {
+    let (fx, target_pcp) = recv_channel_ready_fixture();
+    let mut fx = fx.queue(&Message::AcceptChannel(sample_accept_channel()));
+
+    let mut b = ProgramBuilder::new();
+    let funding_created = send_funding_created(&mut b);
+    b.append(Operation::RecvFundingSigned, &[funding_created.sent]);
+    b.append(Operation::MineBlocks(6), &[]);
+    // The target's `channel_ready` arrives before this `accept_channel`, so
+    // `RecvAcceptChannel` records it.
+    negotiate_channel(&mut b, &announced_open_channel());
+    b.append(Operation::RecvChannelReady, &[]);
+
+    // The `channel_ready` was already recorded, so `RecvChannelReady` must be
+    // a no-op.
+    fx.run(&b.build());
+
+    // The `channel_ready` was consumed and the target's next per-commitment
+    // point is now recorded.
+    let state = fx.channel_state(&funding_channel_id());
+    assert_eq!(
+        *state.next_counterparty_per_commitment_point(),
+        Some(target_pcp)
+    );
+    assert!(state.funding_signed_received);
+    assert_eq!(fx.queued_len(), 0);
+}
+
+#[test]
+fn execute_recv_implicit_channel_ready_unknown_channel() {
+    // No channel is tracked, so a `channel_ready` received while waiting for
+    // `accept_channel` is a violation.
+    let err = Fixture::new()
+        .queue(&channel_ready_reply(sample_pubkey(1)))
+        .queue(&Message::AcceptChannel(sample_accept_channel()))
+        .run_err(&negotiate_channel_program(&announced_open_channel()));
+    let ExecuteError::Violation(Violation::UnknownChannel(id)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*id, funding_channel_id());
+}
+
+#[test]
+fn execute_recv_channel_ready_unexpected_message() {
+    // The target owes us a `channel_ready` but sends an explicitly handled
+    // message instead, which `RecvChannelReady` must not skip.
+    let err = recv_funding_signed_fixture()
+        .queue(&Message::Init(Init::empty()))
+        .run_err(&recv_channel_ready_program(6));
+    assert!(matches!(
+        err,
+        ExecuteError::UnexpectedMessage {
+            expected: MessageType::CHANNEL_READY,
+            got: MessageType::INIT,
+        }
+    ));
+}
+
 // -- extract_field tests --
 
 // TODO: Once we can actually construct and send accept_channel messages, it
