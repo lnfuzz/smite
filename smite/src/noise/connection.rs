@@ -84,6 +84,7 @@ impl NoiseConnection {
         }
         let encrypted = self.cipher.encrypt(msg);
         self.stream.write_all(&encrypted)?;
+        rearm_quickack(&self.stream)?;
         Ok(())
     }
 
@@ -128,6 +129,33 @@ impl NoiseConnection {
     }
 }
 
+/// Makes the kernel ACK the peer's next segments immediately.
+///
+/// A peer without `TCP_NODELAY` (e.g. LDK) holds a small reply until we ACK its
+/// last segment, and Linux delays that ACK ~40 ms once we send right after a
+/// read. Sending leaves quick-ACK mode, so this must follow every send.
+fn rearm_quickack(stream: &TcpStream) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let one: libc::c_int = 1;
+    // SAFETY: the fd is owned by `stream`, which outlives the call, and the
+    // value pointer and length describe `one`, a live `c_int`.
+    let ret = unsafe {
+        libc::setsockopt(
+            stream.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            libc::TCP_QUICKACK,
+            (&raw const one).cast(),
+            libc::socklen_t::try_from(size_of_val(&one)).expect("c_int size fits socklen_t"),
+        )
+    };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
 /// Errors that can occur during connection operations.
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectionError {
@@ -140,4 +168,49 @@ pub enum ConnectionError {
     /// Message exceeds `MAX_MESSAGE_SIZE`
     #[error("message too large: {0} bytes (max {max})", max = MAX_MESSAGE_SIZE)]
     MessageTooLarge(usize),
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::os::fd::AsRawFd;
+
+    use super::{NoiseCipher, NoiseConnection};
+
+    fn quickack(stream: &TcpStream) -> bool {
+        let mut val: libc::c_int = 0;
+        let mut len = libc::socklen_t::try_from(size_of_val(&val)).unwrap();
+        // SAFETY: the fd is owned by `stream`, and the value pointer and length
+        // describe `val`, a live `c_int`.
+        let ret = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::IPPROTO_TCP,
+                libc::TCP_QUICKACK,
+                (&raw mut val).cast(),
+                &raw mut len,
+            )
+        };
+        assert_eq!(ret, 0, "{}", std::io::Error::last_os_error());
+        val != 0
+    }
+
+    #[test]
+    fn send_after_read_keeps_quickack() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        let mut conn = NoiseConnection {
+            stream,
+            cipher: NoiseCipher::new([1; 32], [2; 32], [3; 32]),
+        };
+
+        // Sending right after a read is what makes Linux delay its ACKs.
+        peer.write_all(&[0]).unwrap();
+        conn.stream.read_exact(&mut [0]).unwrap();
+        conn.send_message(b"ping").unwrap();
+
+        assert!(quickack(&conn.stream));
+    }
 }
