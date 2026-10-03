@@ -10,6 +10,7 @@ use super::*;
 use generators::{
     AnyGenerator, ChannelAnnouncementGenerator, ChannelReadyGenerator, ChannelUpdateGenerator,
     FundingCreatedGenerator, FundingFlowGenerator, NodeAnnouncementGenerator, OpenChannelGenerator,
+    SendErrorGenerator, SendWarningGenerator,
 };
 use minimizers::{CommonSubexpressionEliminator, DeadCodeEliminator, Minimizer};
 use mutators::{
@@ -604,6 +605,72 @@ fn display_send_shutdown_program() {
 }
 
 #[test]
+fn display_send_error_program() {
+    let instructions = vec![
+        Instruction {
+            operation: Operation::LoadChannelId([0x00; 32]),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadBytes(vec![0x6f, 0x6f, 0x70, 0x73]),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::SendError,
+            inputs: vec![0, 1],
+        },
+    ];
+
+    let program = Program { instructions };
+    let text = program.to_string();
+    let lines: Vec<&str> = text.lines().collect();
+
+    let cid_hex = "00".repeat(32);
+    let expected: Vec<String> = vec![
+        format!("v0 = LoadChannelId(0x{cid_hex})"),
+        "v1 = LoadBytes(0x6f6f7073)".into(),
+        "SendError(v0, v1)".into(),
+    ];
+    assert_eq!(lines.len(), expected.len(), "line count mismatch");
+    for (i, (got, want)) in lines.iter().zip(expected.iter()).enumerate() {
+        assert_eq!(got, want, "line {i} mismatch");
+    }
+}
+
+#[test]
+fn display_send_warning_program() {
+    let instructions = vec![
+        Instruction {
+            operation: Operation::LoadChannelId([0xcd; 32]),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadBytes(vec![0x6f, 0x6f, 0x70, 0x73]),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::SendWarning,
+            inputs: vec![0, 1],
+        },
+    ];
+
+    let program = Program { instructions };
+    let text = program.to_string();
+    let lines: Vec<&str> = text.lines().collect();
+
+    let cid_hex = "cd".repeat(32);
+    let expected: Vec<String> = vec![
+        format!("v0 = LoadChannelId(0x{cid_hex})"),
+        "v1 = LoadBytes(0x6f6f7073)".into(),
+        "SendWarning(v0, v1)".into(),
+    ];
+    assert_eq!(lines.len(), expected.len(), "line count mismatch");
+    for (i, (got, want)) in lines.iter().zip(expected.iter()).enumerate() {
+        assert_eq!(got, want, "line {i} mismatch");
+    }
+}
+
+#[test]
 fn postcard_roundtrip() {
     let program = Program {
         instructions: vec![
@@ -915,7 +982,9 @@ fn any_generator_all_is_complete() {
             | AnyGenerator::OpenChannel(_)
             | AnyGenerator::FundingCreated(_)
             | AnyGenerator::ChannelReady(_)
-            | AnyGenerator::FundingFlow(_) => 7,
+            | AnyGenerator::FundingFlow(_)
+            | AnyGenerator::SendError(_)
+            | AnyGenerator::SendWarning(_) => 9,
         }
     };
     assert_eq!(AnyGenerator::ALL.len(), variant_count(AnyGenerator::ALL[0]));
@@ -1602,6 +1671,113 @@ fn generated_channel_update_program_structure() {
     assert_eq!(build_count, 1, "expected exactly one BuildChannelUpdate");
 }
 
+fn generate_send_error_program(seed: u64) -> Program {
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut builder = ProgramBuilder::new();
+    SendErrorGenerator.generate(&mut builder, &mut rng);
+    builder.build()
+}
+
+// If SendErrorGenerator completes without panicking, every instruction has
+// correct input types (enforced by ProgramBuilder::append).
+#[test]
+fn generated_send_error_program_is_type_correct() {
+    for seed in 0..100 {
+        generate_send_error_program(seed);
+    }
+}
+
+/// Asserts that `program` ends with exactly one send matching `is_send`, and
+/// that its `channel_id` and `data` inputs are literal loads.
+fn assert_send_error_like_structure(program: &Program, is_send: fn(&Operation) -> bool) {
+    let ops: Vec<_> = program.instructions.iter().map(|i| &i.operation).collect();
+    assert!(
+        is_send(ops[ops.len() - 1]),
+        "last instruction should be the send"
+    );
+    assert_eq!(
+        ops.iter().filter(|op| is_send(op)).count(),
+        1,
+        "expected exactly one send"
+    );
+
+    let send = program.instructions.last().expect("non-empty");
+    assert!(
+        matches!(ops[send.inputs[0]], Operation::LoadChannelId(_)),
+        "channel_id input should be a LoadChannelId",
+    );
+    assert!(
+        matches!(ops[send.inputs[1]], Operation::LoadBytes(_)),
+        "data input should be a LoadBytes",
+    );
+}
+
+#[test]
+fn generated_send_error_program_structure() {
+    let program = generate_send_error_program(0);
+    assert_send_error_like_structure(&program, |op| matches!(op, Operation::SendError));
+}
+
+/// Returns whether the last instruction's `channel_id` input is the all-zero
+/// "all channels" id.
+fn targets_all_channels(program: &Program) -> bool {
+    let send = program.instructions.last().expect("non-empty");
+    matches!(
+        program.instructions[send.inputs[0]].operation,
+        Operation::LoadChannelId(id) if id == [0u8; 32],
+    )
+}
+
+// Both the all-channels id and a specific id must show up across seeds, so
+// the "fail everything" path gets fresh coverage without relying on mutation.
+#[test]
+fn generated_send_error_program_varies_channel_id_scope() {
+    let programs: Vec<_> = (0..100).map(generate_send_error_program).collect();
+    assert!(
+        programs.iter().any(targets_all_channels),
+        "never targets all channels"
+    );
+    assert!(
+        !programs.iter().all(targets_all_channels),
+        "always targets all channels"
+    );
+}
+
+fn generate_send_warning_program(seed: u64) -> Program {
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut builder = ProgramBuilder::new();
+    SendWarningGenerator.generate(&mut builder, &mut rng);
+    builder.build()
+}
+
+// If SendWarningGenerator completes without panicking, every instruction has
+// correct input types (enforced by ProgramBuilder::append).
+#[test]
+fn generated_send_warning_program_is_type_correct() {
+    for seed in 0..100 {
+        generate_send_warning_program(seed);
+    }
+}
+
+#[test]
+fn generated_send_warning_program_structure() {
+    let program = generate_send_warning_program(0);
+    assert_send_error_like_structure(&program, |op| matches!(op, Operation::SendWarning));
+}
+
+#[test]
+fn generated_send_warning_program_varies_channel_id_scope() {
+    let programs: Vec<_> = (0..100).map(generate_send_warning_program).collect();
+    assert!(
+        programs.iter().any(targets_all_channels),
+        "never targets all channels"
+    );
+    assert!(
+        !programs.iter().all(targets_all_channels),
+        "always targets all channels"
+    );
+}
+
 #[test]
 fn generated_open_channel_program_postcard_roundtrip() {
     let program = generate_open_channel_program(42);
@@ -1653,6 +1829,22 @@ fn generated_node_announcement_program_postcard_roundtrip() {
 #[test]
 fn generated_channel_update_program_postcard_roundtrip() {
     let program = generate_channel_update_program(42);
+    let bytes = postcard::to_allocvec(&program).expect("postcard serialization");
+    let decoded: Program = postcard::from_bytes(&bytes).expect("postcard deserialization");
+    assert_eq!(program, decoded);
+}
+
+#[test]
+fn generated_send_error_program_postcard_roundtrip() {
+    let program = generate_send_error_program(42);
+    let bytes = postcard::to_allocvec(&program).expect("postcard serialization");
+    let decoded: Program = postcard::from_bytes(&bytes).expect("postcard deserialization");
+    assert_eq!(program, decoded);
+}
+
+#[test]
+fn generated_send_warning_program_postcard_roundtrip() {
+    let program = generate_send_warning_program(42);
     let bytes = postcard::to_allocvec(&program).expect("postcard serialization");
     let decoded: Program = postcard::from_bytes(&bytes).expect("postcard deserialization");
     assert_eq!(program, decoded);

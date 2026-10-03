@@ -151,11 +151,14 @@ impl Fixture {
         self
     }
 
-    /// Records `pending` as the negotiation for its `temporary_channel_id`.
+    /// Records `pending` as the live negotiation for its `temporary_channel_id`.
     pub fn with_negotiation(mut self, pending: PendingChannel) -> Self {
+        let temporary_channel_id = pending.open_channel.temporary_channel_id;
         self.executor
             .negotiations
-            .insert(pending.open_channel.temporary_channel_id, pending);
+            .entry(temporary_channel_id)
+            .or_default()
+            .live = Some(pending);
         self
     }
 
@@ -184,11 +187,12 @@ impl Fixture {
             .expect_err("program execution failure")
     }
 
-    /// Returns the negotiation recorded for `id`.
+    /// Returns the live negotiation recorded for `id`.
     pub fn negotiation(&self, id: &TemporaryChannelId) -> &PendingChannel {
         self.executor
             .negotiations
             .get(id)
+            .and_then(|negotiation| negotiation.live.as_ref())
             .expect("negotiation recorded")
     }
 

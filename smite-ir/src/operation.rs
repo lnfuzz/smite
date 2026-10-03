@@ -214,6 +214,18 @@ pub enum Operation {
     ///   0: `channel_id`   (`ChannelId`)
     ///   1: `scriptpubkey` (`Bytes`)
     SendShutdown,
+    /// Build and send an `error` message (BOLT 1, type 17).
+    ///
+    /// Inputs (2):
+    ///   0: `channel_id` (`ChannelId`, all zeros = all channels)
+    ///   1: `data`       (`Bytes`)
+    SendError,
+    /// Build and send a `warning` message (BOLT 1, type 1).
+    ///
+    /// Inputs (2):
+    ///   0: `channel_id` (`ChannelId`, all zeros = not channel-specific)
+    ///   1: `data`       (`Bytes`)
+    SendWarning,
     /// Receive and parse an `accept_channel` response.
     /// Produces an `AcceptChannel` compound variable.
     RecvAcceptChannel,
@@ -553,6 +565,8 @@ impl fmt::Display for Operation {
                 write!(f, "SendChannelReady{{include_alias={include_alias}}}")
             }
             Self::SendShutdown => write!(f, "SendShutdown"),
+            Self::SendError => write!(f, "SendError"),
+            Self::SendWarning => write!(f, "SendWarning"),
             Self::RecvAcceptChannel => write!(f, "RecvAcceptChannel"),
             Self::RecvFundingSigned => write!(f, "RecvFundingSigned"),
             Self::RecvChannelReady => write!(f, "RecvChannelReady()"),
@@ -594,6 +608,8 @@ impl Operation {
             | Self::BuildAnnouncementSignatures => Some(VariableType::Message),
             Self::SendMessage
             | Self::SendChannelReady { .. }
+            | Self::SendError
+            | Self::SendWarning
             | Self::RecvChannelReady
             | Self::MineBlocks(_)
             | Self::BroadcastTransaction => None,
@@ -712,9 +728,9 @@ impl Operation {
                 VariableType::Point,          // second_per_commitment_point
                 VariableType::ShortChannelId, // short_channel_id (alias)
             ],
-            Self::SendShutdown => vec![
+            Self::SendShutdown | Self::SendError | Self::SendWarning => vec![
                 VariableType::ChannelId, // channel_id
-                VariableType::Bytes,     // scriptpubkey
+                VariableType::Bytes,     // scriptpubkey (shutdown) or data (error, warning)
             ],
             Self::RecvAcceptChannel => vec![VariableType::SentOpenChannel],
             Self::RecvFundingSigned => vec![VariableType::SentFundingCreated],
@@ -761,6 +777,8 @@ impl Operation {
             | Self::SendFundingCreated
             | Self::SendChannelReady { .. }
             | Self::SendShutdown
+            | Self::SendError
+            | Self::SendWarning
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
             | Self::MineBlocks(_)
@@ -809,6 +827,8 @@ impl Operation {
             | Self::SendFundingCreated
             | Self::SendChannelReady { .. }
             | Self::SendShutdown
+            | Self::SendError
+            | Self::SendWarning
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
@@ -853,7 +873,9 @@ impl Operation {
             | Self::SendMessage
             | Self::SendOpenChannel
             | Self::SendChannelReady { .. }
-            | Self::SendShutdown => true,
+            | Self::SendShutdown
+            | Self::SendError
+            | Self::SendWarning => true,
             // `CreateFundingTransaction` selects coins from the wallet, whose
             // contents change as transactions are created and broadcast.
             // `SendFundingCreated` builds its message from the recorded
@@ -916,6 +938,8 @@ impl Operation {
             | Self::SendOpenChannel
             | Self::SendFundingCreated
             | Self::SendShutdown
+            | Self::SendError
+            | Self::SendWarning
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
