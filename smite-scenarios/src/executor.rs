@@ -1150,6 +1150,8 @@ fn recv_non_ping(conn: &mut impl Connection, timeout: Duration) -> Result<Messag
             | Message::NodeAnnouncement(_)
             | Message::ChannelUpdate(_)
             | Message::AnnouncementSignatures(_)
+            | Message::QueryShortChannelIds(_)
+            | Message::ReplyShortChannelIdsEnd(_)
             | Message::GossipTimestampFilter(_) => {
                 log::debug!("skipping gossip message {msg}");
             }

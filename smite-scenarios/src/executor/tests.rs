@@ -8,7 +8,10 @@ use bitcoin::Amount;
 use bitcoin::secp256k1::{Secp256k1, SecretKey};
 use harness::*;
 use programs::*;
-use smite::bolt::{AcceptChannelTlvs, GossipTimestampFilter, Init, Ping};
+use smite::bolt::{
+    AcceptChannelTlvs, GossipTimestampFilter, Init, Ping, QueryShortChannelIds,
+    QueryShortChannelIdsTlvs, ReplyShortChannelIdsEnd,
+};
 use smite_ir::Instruction;
 use smite_ir::builder::ProgramBuilder;
 use smite_ir::operation::ShutdownScriptVariant;
@@ -393,9 +396,21 @@ fn execute_recv_auto_pong() {
 #[test]
 fn execute_recv_skips_gossip() {
     let gossip = GossipTimestampFilter::new([0u8; 32], 0, 86400);
+    let query = QueryShortChannelIds {
+        chain_hash: [0u8; 32],
+        // encoding type 0, then one 8-byte short_channel_id
+        encoded_short_ids: vec![0x00, 0x00, 0x08, 0x3b, 0x04, 0x00, 0x03, 0x4d, 0x00],
+        tlvs: QueryShortChannelIdsTlvs::default(),
+    };
+    let reply_end = ReplyShortChannelIdsEnd {
+        chain_hash: [0u8; 32],
+        full_information: 1,
+    };
 
     let mut fx = Fixture::new()
         .queue(&Message::GossipTimestampFilter(gossip))
+        .queue(&Message::QueryShortChannelIds(query))
+        .queue(&Message::ReplyShortChannelIdsEnd(reply_end))
         .queue(&Message::AcceptChannel(sample_accept_channel()));
     fx.run(&negotiate_channel_program(&announced_open_channel()));
 
