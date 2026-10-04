@@ -34,7 +34,8 @@
       "to_opener_msat": 7000000000,
       "to_acceptor_msat": 3000000000,
       "local_signature": "30450221008266ac6db5ea71aac3c95d97b0e172ff596844851a3216eb88382a8dddfd33d2022050e240974cfd5d708708b4365574517c18e7ae535ef732a3484d43d0d82be9f7",
-      "remote_signature": "3045022100f89034eba16b2be0e5581f750a0a6309192b75cce0f202f0ee2b4ec0cc394850022076c65dc507fe42276152b7a3d90e961e678adbe966e916ecfe85e64d430e75f3"
+      "remote_signature": "3045022100f89034eba16b2be0e5581f750a0a6309192b75cce0f202f0ee2b4ec0cc394850022076c65dc507fe42276152b7a3d90e961e678adbe966e916ecfe85e64d430e75f3",
+      "acceptor_num_htlcs": 0
     },
     {
       "name": "simple commitment tx with no HTLCs and single anchor",
@@ -43,25 +44,96 @@
       "to_opener_msat": 10000000000,
       "to_acceptor_msat": 0,
       "local_signature": "3044022007cf6b405e9c9b4f527b0ecad9d8bb661fabb8b12abf7d1c0b3ad1855db3ed490220616d5c1eeadccc63bd775a131149455d62d95a42c2a1b01cc7821fc42dce7778",
-      "remote_signature": "30440220655bf909fb6fa81d086f1336ac72c97906dce29d1b166e305c99152d810e26e1022051f577faa46412c46707aaac46b65d50053550a66334e00a44af2706f27a8658"
+      "remote_signature": "30440220655bf909fb6fa81d086f1336ac72c97906dce29d1b166e305c99152d810e26e1022051f577faa46412c46707aaac46b65d50053550a66334e00a44af2706f27a8658",
+      "acceptor_num_htlcs": 0
     },
     {
       "name": "commitment tx with two outputs untrimmed (minimum dust limit)",
       "feerate_per_kw": 4894,
       "dust_limit_satoshis": 4001,
-      "to_opener_msat": 6988000000,
-      "to_acceptor_msat": 3000000000,
+      "to_opener_msat": 6993000000,
+      "to_acceptor_msat": 3007000000,
+      "incoming_htlcs": [
+        {
+          "id": 0,
+          "amount_msat": 1000000,
+          "cltv_expiry": 500,
+          "payment_preimage": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "id": 1,
+          "amount_msat": 2000000,
+          "cltv_expiry": 501,
+          "payment_preimage": "0101010101010101010101010101010101010101010101010101010101010101"
+        },
+        {
+          "id": 4,
+          "amount_msat": 4000000,
+          "cltv_expiry": 504,
+          "payment_preimage": "0404040404040404040404040404040404040404040404040404040404040404"
+        }
+      ],
+      "outgoing_htlcs": [
+        {
+          "id": 2,
+          "amount_msat": 2000000,
+          "cltv_expiry": 502,
+          "payment_preimage": "0202020202020202020202020202020202020202020202020202020202020202"
+        },
+        {
+          "id": 3,
+          "amount_msat": 3000000,
+          "cltv_expiry": 503,
+          "payment_preimage": "0303030303030303030303030303030303030303030303030303030303030303"
+        }
+      ],
       "local_signature": "30450221009f16ac85d232e4eddb3fcd750a68ebf0b58e3356eaada45d3513ede7e817bf4c02207c2b043b4e5f971261975406cb955219fa56bffe5d834a833694b5abc1ce4cfd",
-      "remote_signature": "3045022100e784a66b1588575801e237d35e510fd92a81ae3a4a2a1b90c031ad803d07b3f3022021bc5f16501f167607d63b681442da193eb0a76b4b7fd25c2ed4f8b28fd35b95"
+      "remote_signature": "3045022100e784a66b1588575801e237d35e510fd92a81ae3a4a2a1b90c031ad803d07b3f3022021bc5f16501f167607d63b681442da193eb0a76b4b7fd25c2ed4f8b28fd35b95",
+      "acceptor_num_htlcs": 0
     },
     {
       "name": "commitment tx with one output untrimmed (minimum dust limit)",
       "feerate_per_kw": 6216010,
       "dust_limit_satoshis": 4001,
-      "to_opener_msat": 6988000000,
-      "to_acceptor_msat": 3000000000,
+      "to_opener_msat": 6993000000,
+      "to_acceptor_msat": 3007000000,
+      "incoming_htlcs": [
+        {
+          "id": 0,
+          "amount_msat": 1000000,
+          "cltv_expiry": 500,
+          "payment_preimage": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "id": 1,
+          "amount_msat": 2000000,
+          "cltv_expiry": 501,
+          "payment_preimage": "0101010101010101010101010101010101010101010101010101010101010101"
+        },
+        {
+          "id": 4,
+          "amount_msat": 4000000,
+          "cltv_expiry": 504,
+          "payment_preimage": "0404040404040404040404040404040404040404040404040404040404040404"
+        }
+      ],
+      "outgoing_htlcs": [
+        {
+          "id": 2,
+          "amount_msat": 2000000,
+          "cltv_expiry": 502,
+          "payment_preimage": "0202020202020202020202020202020202020202020202020202020202020202"
+        },
+        {
+          "id": 3,
+          "amount_msat": 3000000,
+          "cltv_expiry": 503,
+          "payment_preimage": "0303030303030303030303030303030303030303030303030303030303030303"
+        }
+      ],
       "local_signature": "30450221009ad80792e3038fe6968d12ff23e6888a565c3ddd065037f357445f01675d63f3022018384915e5f1f4ae157e15debf4f49b61c8d9d2b073c7d6f97c4a68caa3ed4c1",
-      "remote_signature": "30450221008fd5dbff02e4b59020d4cd23a3c30d3e287065fda75a0a09b402980adf68ccda022001e0b8b620cd915ddff11f1de32addf23d81d51b90e6841b2cb8dcaf3faa5ecf"
+      "remote_signature": "30450221008fd5dbff02e4b59020d4cd23a3c30d3e287065fda75a0a09b402980adf68ccda022001e0b8b620cd915ddff11f1de32addf23d81d51b90e6841b2cb8dcaf3faa5ecf",
+      "acceptor_num_htlcs": 0
     }
   ]
 }

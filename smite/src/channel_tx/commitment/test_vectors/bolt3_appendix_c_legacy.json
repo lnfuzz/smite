@@ -34,43 +34,184 @@
       "to_opener_msat": 7000000000,
       "to_acceptor_msat": 3000000000,
       "local_signature": "30440220616210b2cc4d3afb601013c373bbd8aac54febd9f15400379a8cb65ce7deca60022034236c010991beb7ff770510561ae8dc885b8d38d1947248c38f2ae055647142",
-      "remote_signature": "3045022100c3127b33dcc741dd6b05b1e63cbd1a9a7d816f37af9b6756fa2376b056f032370220408b96279808fe57eb7e463710804cdf4f108388bc5cf722d8c848d2c7f9f3b0"
+      "remote_signature": "3045022100c3127b33dcc741dd6b05b1e63cbd1a9a7d816f37af9b6756fa2376b056f032370220408b96279808fe57eb7e463710804cdf4f108388bc5cf722d8c848d2c7f9f3b0",
+      "acceptor_num_htlcs": 0
     },
     {
       "name": "commitment tx with two outputs untrimmed (minimum feerate)",
       "feerate_per_kw": 4915,
       "dust_limit_satoshis": 546,
-      "to_opener_msat": 6988000000,
-      "to_acceptor_msat": 3000000000,
+      "to_opener_msat": 6993000000,
+      "to_acceptor_msat": 3007000000,
+      "incoming_htlcs": [
+        {
+          "id": 0,
+          "amount_msat": 1000000,
+          "cltv_expiry": 500,
+          "payment_preimage": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "id": 1,
+          "amount_msat": 2000000,
+          "cltv_expiry": 501,
+          "payment_preimage": "0101010101010101010101010101010101010101010101010101010101010101"
+        },
+        {
+          "id": 4,
+          "amount_msat": 4000000,
+          "cltv_expiry": 504,
+          "payment_preimage": "0404040404040404040404040404040404040404040404040404040404040404"
+        }
+      ],
+      "outgoing_htlcs": [
+        {
+          "id": 2,
+          "amount_msat": 2000000,
+          "cltv_expiry": 502,
+          "payment_preimage": "0202020202020202020202020202020202020202020202020202020202020202"
+        },
+        {
+          "id": 3,
+          "amount_msat": 3000000,
+          "cltv_expiry": 503,
+          "payment_preimage": "0303030303030303030303030303030303030303030303030303030303030303"
+        }
+      ],
       "local_signature": "30450221008a953551f4d67cb4df3037207fc082ddaf6be84d417b0bd14c80aab66f1b01a402207508796dc75034b2dee876fe01dc05a08b019f3e5d689ac8842ade2f1befccf5",
-      "remote_signature": "304402203a286936e74870ca1459c700c71202af0381910a6bfab687ef494ef1bc3e02c902202506c362d0e3bee15e802aa729bf378e051644648253513f1c085b264cc2a720"
+      "remote_signature": "304402203a286936e74870ca1459c700c71202af0381910a6bfab687ef494ef1bc3e02c902202506c362d0e3bee15e802aa729bf378e051644648253513f1c085b264cc2a720",
+      "acceptor_num_htlcs": 1
     },
     {
       "name": "commitment tx with two outputs untrimmed (maximum feerate)",
       "feerate_per_kw": 9651180,
       "dust_limit_satoshis": 546,
-      "to_opener_msat": 6988000000,
-      "to_acceptor_msat": 3000000000,
+      "to_opener_msat": 6993000000,
+      "to_acceptor_msat": 3007000000,
+      "incoming_htlcs": [
+        {
+          "id": 0,
+          "amount_msat": 1000000,
+          "cltv_expiry": 500,
+          "payment_preimage": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "id": 1,
+          "amount_msat": 2000000,
+          "cltv_expiry": 501,
+          "payment_preimage": "0101010101010101010101010101010101010101010101010101010101010101"
+        },
+        {
+          "id": 4,
+          "amount_msat": 4000000,
+          "cltv_expiry": 504,
+          "payment_preimage": "0404040404040404040404040404040404040404040404040404040404040404"
+        }
+      ],
+      "outgoing_htlcs": [
+        {
+          "id": 2,
+          "amount_msat": 2000000,
+          "cltv_expiry": 502,
+          "payment_preimage": "0202020202020202020202020202020202020202020202020202020202020202"
+        },
+        {
+          "id": 3,
+          "amount_msat": 3000000,
+          "cltv_expiry": 503,
+          "payment_preimage": "0303030303030303030303030303030303030303030303030303030303030303"
+        }
+      ],
       "local_signature": "3045022100e11b638c05c650c2f63a421d36ef8756c5ce82f2184278643520311cdf50aa200220259565fb9c8e4a87ccaf17f27a3b9ca4f20625754a0920d9c6c239d8156a11de",
-      "remote_signature": "304402200a8544eba1d216f5c5e530597665fa9bec56943c0f66d98fc3d028df52d84f7002201e45fa5c6bc3a506cc2553e7d1c0043a9811313fc39c954692c0d47cfce2bbd3"
+      "remote_signature": "304402200a8544eba1d216f5c5e530597665fa9bec56943c0f66d98fc3d028df52d84f7002201e45fa5c6bc3a506cc2553e7d1c0043a9811313fc39c954692c0d47cfce2bbd3",
+      "acceptor_num_htlcs": 0
     },
     {
       "name": "commitment tx with one output untrimmed (minimum feerate)",
       "feerate_per_kw": 9651181,
       "dust_limit_satoshis": 546,
-      "to_opener_msat": 6988000000,
-      "to_acceptor_msat": 3000000000,
+      "to_opener_msat": 6993000000,
+      "to_acceptor_msat": 3007000000,
+      "incoming_htlcs": [
+        {
+          "id": 0,
+          "amount_msat": 1000000,
+          "cltv_expiry": 500,
+          "payment_preimage": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "id": 1,
+          "amount_msat": 2000000,
+          "cltv_expiry": 501,
+          "payment_preimage": "0101010101010101010101010101010101010101010101010101010101010101"
+        },
+        {
+          "id": 4,
+          "amount_msat": 4000000,
+          "cltv_expiry": 504,
+          "payment_preimage": "0404040404040404040404040404040404040404040404040404040404040404"
+        }
+      ],
+      "outgoing_htlcs": [
+        {
+          "id": 2,
+          "amount_msat": 2000000,
+          "cltv_expiry": 502,
+          "payment_preimage": "0202020202020202020202020202020202020202020202020202020202020202"
+        },
+        {
+          "id": 3,
+          "amount_msat": 3000000,
+          "cltv_expiry": 503,
+          "payment_preimage": "0303030303030303030303030303030303030303030303030303030303030303"
+        }
+      ],
       "local_signature": "304402207e8d51e0c570a5868a78414f4e0cbfaed1106b171b9581542c30718ee4eb95ba02203af84194c97adf98898c9afe2f2ed4a7f8dba05a2dfab28ac9d9c604aa49a379",
-      "remote_signature": "304402202ade0142008309eb376736575ad58d03e5b115499709c6db0b46e36ff394b492022037b63d78d66404d6504d4c4ac13be346f3d1802928a6d3ad95a6a944227161a2"
+      "remote_signature": "304402202ade0142008309eb376736575ad58d03e5b115499709c6db0b46e36ff394b492022037b63d78d66404d6504d4c4ac13be346f3d1802928a6d3ad95a6a944227161a2",
+      "acceptor_num_htlcs": 0
     },
     {
       "name": "commitment tx with fee greater than funder amount",
       "feerate_per_kw": 9651936,
       "dust_limit_satoshis": 546,
-      "to_opener_msat": 6988000000,
-      "to_acceptor_msat": 3000000000,
+      "to_opener_msat": 6993000000,
+      "to_acceptor_msat": 3007000000,
+      "incoming_htlcs": [
+        {
+          "id": 0,
+          "amount_msat": 1000000,
+          "cltv_expiry": 500,
+          "payment_preimage": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "id": 1,
+          "amount_msat": 2000000,
+          "cltv_expiry": 501,
+          "payment_preimage": "0101010101010101010101010101010101010101010101010101010101010101"
+        },
+        {
+          "id": 4,
+          "amount_msat": 4000000,
+          "cltv_expiry": 504,
+          "payment_preimage": "0404040404040404040404040404040404040404040404040404040404040404"
+        }
+      ],
+      "outgoing_htlcs": [
+        {
+          "id": 2,
+          "amount_msat": 2000000,
+          "cltv_expiry": 502,
+          "payment_preimage": "0202020202020202020202020202020202020202020202020202020202020202"
+        },
+        {
+          "id": 3,
+          "amount_msat": 3000000,
+          "cltv_expiry": 503,
+          "payment_preimage": "0303030303030303030303030303030303030303030303030303030303030303"
+        }
+      ],
       "local_signature": "304402207e8d51e0c570a5868a78414f4e0cbfaed1106b171b9581542c30718ee4eb95ba02203af84194c97adf98898c9afe2f2ed4a7f8dba05a2dfab28ac9d9c604aa49a379",
-      "remote_signature": "304402202ade0142008309eb376736575ad58d03e5b115499709c6db0b46e36ff394b492022037b63d78d66404d6504d4c4ac13be346f3d1802928a6d3ad95a6a944227161a2"
+      "remote_signature": "304402202ade0142008309eb376736575ad58d03e5b115499709c6db0b46e36ff394b492022037b63d78d66404d6504d4c4ac13be346f3d1802928a6d3ad95a6a944227161a2",
+      "acceptor_num_htlcs": 0
     }
   ]
 }
