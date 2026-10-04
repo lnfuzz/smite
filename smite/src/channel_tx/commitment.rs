@@ -169,6 +169,10 @@ pub struct ChannelState {
     /// Whether a `funding_signed` has already been accepted for this channel.
     /// Any later one means the target re-signed a channel it already funded.
     pub funding_signed_received: bool,
+    /// Whether the peer has already responded to our `shutdown`. A target may
+    /// ignore any `shutdown` after the first, so a later `RecvShutdown` for
+    /// this channel is a no-op.
+    pub counterparty_shutdown_received: bool,
 }
 
 impl Side {
@@ -210,6 +214,7 @@ impl ChannelState {
             was_funding_mined_prematurely,
             sent_invalid_signature,
             funding_signed_received: false,
+            counterparty_shutdown_received: false,
         }
     }
 
