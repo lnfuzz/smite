@@ -10,8 +10,26 @@ use smite::process::ManagedProcess;
 
 use super::TargetError;
 
-/// Number of blocks to generate at startup for coinbase maturity.
-pub const INITIAL_BLOCKS: u64 = 101;
+/// Blocks a coinbase output must be buried under before it can be spent.
+const COINBASE_MATURITY: u64 = 100;
+
+/// Mature coinbase outputs the wallet holds once startup is done.
+///
+/// Every block mined at startup pays its coinbase to the wallet, so this is
+/// also the number of separate UTXOs a program has to spend. It needs to cover
+/// more than one: channel establishment v2 has a program contribute several
+/// inputs to one funding transaction, and each `tx_add_input` locks the coin it
+/// selects so the next one cannot propose the same outpoint. A program may also
+/// open more than one channel. Sixteen leaves room for both, and mining the
+/// extra blocks costs nothing measurable, since it happens once before the
+/// snapshot is taken.
+const SPENDABLE_UTXOS: u64 = 16;
+
+/// Number of blocks to generate at startup.
+///
+/// Only outputs buried under [`COINBASE_MATURITY`] blocks are spendable, so the
+/// wallet ends up with [`SPENDABLE_UTXOS`] of them.
+pub const INITIAL_BLOCKS: u64 = COINBASE_MATURITY + SPENDABLE_UTXOS;
 
 /// Bitcoind configuration.
 pub struct BitcoindConfig {
