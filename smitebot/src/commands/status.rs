@@ -13,6 +13,7 @@ use std::path::Path;
 
 use clap::Args;
 
+use crate::error::CliError;
 use crate::state::{CampaignState, RunnerState, Status};
 use crate::tmux;
 use crate::utils::{self, shell_quote};
@@ -43,25 +44,8 @@ pub struct StatusArgs {
 impl StatusCommand {
     /// Reports the status of a campaign, either as a one-shot summary or by
     /// attaching to its live tmux dashboard.
-    pub fn execute(args: &StatusArgs) -> bool {
-        let Some(runs_dir) = CampaignState::runs_dir() else {
-            log::error!("unable to determine home directory");
-            return false;
-        };
-        let state_path = runs_dir.join(&args.campaign_id).join("state.json");
-
-        let state = match CampaignState::load(&state_path) {
-            Ok(state) => state,
-            Err(e) => {
-                log::error!("{e}");
-                log::error!(
-                    "campaign '{}' not found; list campaigns with: ls {}",
-                    args.campaign_id,
-                    runs_dir.display()
-                );
-                return false;
-            }
-        };
+    pub fn execute(args: &StatusArgs) -> Result<(), CliError> {
+        let state = CampaignState::load_campaign(&args.campaign_id)?;
 
         // state.status is written only at start and by `stop`, so it can be
         // stale (e.g. still "running" for a campaign that has since crashed).
@@ -70,24 +54,20 @@ impl StatusCommand {
         let session_alive = tmux::session_exists(&state.tmux_session);
 
         if !session_alive || args.summary {
-            let alive_runner_ids = match alive_runners(&state, session_alive) {
-                Ok(ids) => ids,
-                Err(e) => {
-                    // A live session we can't query is anomalous (both this and
-                    // the session check use tmux). Fail loudly rather than
-                    // silently render every runner as dead.
-                    log::error!(
-                        "could not determine per-runner liveness in session '{}': {e}",
-                        state.tmux_session
-                    );
-                    return false;
-                }
-            };
+            // A live session we can't query is anomalous (both this and the
+            // session check use tmux). Fail loudly rather than silently render
+            // every runner as dead.
+            let alive_runner_ids = alive_runners(&state, session_alive).map_err(|e| {
+                CliError::Msg(format!(
+                    "could not determine per-runner liveness in session '{}': {e}",
+                    state.tmux_session
+                ))
+            })?;
             print!(
                 "{}",
                 render_summary(&state, session_alive, &alive_runner_ids)
             );
-            return true;
+            return Ok(());
         }
 
         attach_dashboard(&state)
@@ -96,7 +76,7 @@ impl StatusCommand {
 
 /// Ensures a single reloading status window exists in the campaign session,
 /// then attaches to it.
-fn attach_dashboard(state: &CampaignState) -> bool {
+fn attach_dashboard(state: &CampaignState) -> Result<(), CliError> {
     let session = &state.tmux_session;
 
     // Re-run guard: reuse the window if `status` was already run on this live
@@ -105,14 +85,16 @@ fn attach_dashboard(state: &CampaignState) -> bool {
         Ok(true) => log::info!("status window already exists in session '{session}', attaching"),
         Ok(false) => {
             let cmd = dashboard_command(&state.id);
-            if let Err(e) = tmux::add_window(session, STATUS_WINDOW, &cmd) {
-                log::error!("failed to create status window in session '{session}': {e}");
-                return false;
-            }
+            tmux::add_window(session, STATUS_WINDOW, &cmd).map_err(|e| {
+                CliError::Msg(format!(
+                    "failed to create status window in session '{session}': {e}"
+                ))
+            })?;
         }
         Err(e) => {
-            log::error!("failed to query tmux session '{session}': {e}");
-            return false;
+            return Err(CliError::Msg(format!(
+                "failed to query tmux session '{session}': {e}"
+            )));
         }
     }
 
@@ -120,16 +102,15 @@ fn attach_dashboard(state: &CampaignState) -> bool {
     // status window is active right after we create it, but if the user switched
     // to a runner window and detached, a later `status` run would otherwise
     // attach to that runner window — so select the status window explicitly.
-    if let Err(e) = tmux::select_window(session, STATUS_WINDOW) {
-        log::error!("failed to select status window in session '{session}': {e}");
-        return false;
-    }
+    tmux::select_window(session, STATUS_WINDOW).map_err(|e| {
+        CliError::Msg(format!(
+            "failed to select status window in session '{session}': {e}"
+        ))
+    })?;
 
-    if let Err(e) = tmux::attach(session) {
-        log::error!("failed to attach to tmux session '{session}': {e}");
-        return false;
-    }
-    true
+    tmux::attach(session)
+        .map_err(|e| CliError::Msg(format!("failed to attach to tmux session '{session}': {e}")))?;
+    Ok(())
 }
 
 /// Builds the shell command for the reloading status window.

@@ -7,6 +7,7 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::config::CampaignConfig;
+use crate::error::CliError;
 
 /// Command handler for `smitebot config`.
 pub struct ConfigCommand;
@@ -48,7 +49,10 @@ struct ConfigErrorReport {
 
 impl ConfigCommand {
     /// Validates a campaign configuration file and reports the result.
-    pub fn execute(args: &ConfigArgs) -> bool {
+    ///
+    /// The report (plain or JSON) is the artifact and is always printed here, so
+    /// a failure returns [`CliError::Reported`]: `main` only sets the exit code.
+    pub fn execute(args: &ConfigArgs) -> Result<(), CliError> {
         match CampaignConfig::load(&args.path) {
             Ok(config) => {
                 let errors = config.check_paths();
@@ -96,7 +100,11 @@ impl ConfigCommand {
                         eprintln!("error: {error}");
                     }
                 }
-                valid
+                if valid {
+                    Ok(())
+                } else {
+                    Err(CliError::Reported)
+                }
             }
             Err(e) => {
                 if args.json {
@@ -110,7 +118,7 @@ impl ConfigCommand {
                 } else {
                     eprintln!("error: {e}");
                 }
-                false
+                Err(CliError::Reported)
             }
         }
     }

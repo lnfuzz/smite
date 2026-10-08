@@ -7,6 +7,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::CampaignConfig;
+use crate::error::CliError;
 
 /// Returns the current Unix timestamp in seconds.
 pub fn epoch_secs() -> u64 {
@@ -45,33 +46,28 @@ fn find_in_path_with_path(tool: &str, path_var: &OsStr) -> Option<PathBuf> {
 }
 
 /// Runs `scripts/setup-nyx.sh` to prepare the Nyx sharedir.
-pub fn setup_nyx(config: &CampaignConfig, image: &str) -> bool {
+pub fn setup_nyx(config: &CampaignConfig, image: &str) -> Result<(), CliError> {
     let script = config.smite_dir.join("scripts").join("setup-nyx.sh");
     if !script.exists() {
-        log::error!("setup-nyx.sh not found: {}", script.display());
-        return false;
+        return Err(CliError::Msg(format!(
+            "setup-nyx.sh not found: {}",
+            script.display()
+        )));
     }
 
-    let status = match Command::new(&script)
+    let status = Command::new(&script)
         .arg(&config.sharedir)
         .arg(image)
         .arg(&config.aflpp_path)
         .status()
-    {
-        Ok(status) => status,
-        Err(e) => {
-            log::error!("failed to run setup-nyx.sh: {e}");
-            return false;
-        }
-    };
+        .map_err(|e| CliError::Msg(format!("failed to run setup-nyx.sh: {e}")))?;
 
     if !status.success() {
-        log::error!("setup-nyx.sh failed with {status}");
-        return false;
+        return Err(CliError::Msg(format!("setup-nyx.sh failed with {status}")));
     }
 
     log::info!("Nyx sharedir ready at {}", config.sharedir.display());
-    true
+    Ok(())
 }
 
 /// Pins the calling thread, and every process it later spawns, to `cpu`.

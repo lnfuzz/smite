@@ -9,6 +9,7 @@ use std::process::Command;
 
 use clap::{Args, Subcommand};
 
+use crate::error::CliError;
 use crate::state::CampaignState;
 use crate::utils::{find_in_path, is_executable};
 
@@ -62,26 +63,10 @@ pub struct MinimizeArgs {
 
 impl CorpusCommand {
     /// Dispatches to the requested corpus subcommand.
-    pub fn execute(args: &CorpusArgs) -> bool {
+    pub fn execute(args: &CorpusArgs) -> Result<(), CliError> {
         match &args.command {
             CorpusSubcommand::Merge(a) => execute_merge(a),
             CorpusSubcommand::Minimize(a) => execute_minimize(a),
-        }
-    }
-}
-
-/// Loads the campaign state for `campaign_id`, logging a not-found hint on error.
-fn load_campaign(runs_dir: &Path, campaign_id: &str) -> Option<CampaignState> {
-    let state_path = runs_dir.join(campaign_id).join("state.json");
-    match CampaignState::load(&state_path) {
-        Ok(state) => Some(state),
-        Err(e) => {
-            log::error!("{e}");
-            log::error!(
-                "campaign '{campaign_id}' not found; list campaigns with: ls {}",
-                runs_dir.display()
-            );
-            None
         }
     }
 }
@@ -90,50 +75,40 @@ fn load_campaign(runs_dir: &Path, campaign_id: &str) -> Option<CampaignState> {
 ///
 /// All states are loaded before any file is written, so a bad campaign ID fails
 /// before the output directory is touched rather than leaving a partial merge.
-fn execute_merge(args: &MergeArgs) -> bool {
-    let Some(runs_dir) = CampaignState::runs_dir() else {
-        log::error!("unable to determine home directory");
-        return false;
-    };
-
+fn execute_merge(args: &MergeArgs) -> Result<(), CliError> {
     let mut states = Vec::with_capacity(args.campaign_ids.len());
     for campaign_id in &args.campaign_ids {
-        let Some(state) = load_campaign(&runs_dir, campaign_id) else {
-            return false;
-        };
-        states.push(state);
+        states.push(CampaignState::load_campaign(campaign_id)?);
     }
 
-    if output_dir_occupied(&args.output) {
-        return false;
+    if let Some(conflict) = output_dir_conflict(&args.output) {
+        return Err(CliError::Msg(conflict));
     }
 
-    if let Err(e) = fs::create_dir_all(&args.output) {
-        log::error!(
+    fs::create_dir_all(&args.output).map_err(|e| {
+        CliError::Msg(format!(
             "failed to create output directory {}: {e}",
             args.output.display()
-        );
-        return false;
-    }
+        ))
+    })?;
 
-    let Some((total_in, total_out)) = merge_states(&states, &args.output) else {
-        log::error!(
-            "merge failed partway; partial results may remain in {} — remove it before retrying",
+    let (total_in, total_out) = merge_states(&states, &args.output).map_err(|e| {
+        CliError::Msg(format!(
+            "{e}; partial results may remain in {} — remove it before retrying",
             args.output.display()
-        );
-        return false;
-    };
+        ))
+    })?;
 
     log::info!(
         "merged {total_in} files across {} campaign(s) → {total_out} unique files written to {}",
         args.campaign_ids.len(),
         args.output.display()
     );
-    true
+    Ok(())
 }
 
 /// Merges every runner queue of every state into `output`. See [`merge_dirs`].
-fn merge_states(states: &[CampaignState], output: &Path) -> Option<(usize, usize)> {
+fn merge_states(states: &[CampaignState], output: &Path) -> Result<(usize, usize), CliError> {
     let mut dirs = Vec::new();
     for state in states {
         for runner in &state.runners {
@@ -151,9 +126,9 @@ fn merge_states(states: &[CampaignState], output: &Path) -> Option<(usize, usize
 /// themselves, so a large corpus only costs 8 bytes per unique entry in memory.
 /// A 64-bit hash collision (silently dropping a distinct input) has probability
 /// ~n²/2⁶⁵, negligible for realistic corpus sizes. Returns `(files_read,
-/// files_written)`, or `None` if any read/write failed (logged at the failure
-/// site).
-fn merge_dirs(sources: &[PathBuf], output: &Path) -> Option<(usize, usize)> {
+/// files_written)`, or an error naming the first file that could not be read or
+/// written.
+fn merge_dirs(sources: &[PathBuf], output: &Path) -> Result<(usize, usize), CliError> {
     let mut seen: HashSet<u64> = HashSet::new();
     let mut total_in = 0usize;
     let mut total_out = 0usize;
@@ -164,47 +139,34 @@ fn merge_dirs(sources: &[PathBuf], output: &Path) -> Option<(usize, usize)> {
             continue;
         }
 
-        let entries = match fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(e) => {
-                log::error!("failed to read {}: {e}", dir.display());
-                return None;
-            }
-        };
+        let entries = fs::read_dir(dir)
+            .map_err(|e| CliError::Msg(format!("failed to read {}: {e}", dir.display())))?;
 
         for entry in entries {
-            let path = match entry {
-                Ok(e) => e.path(),
-                Err(e) => {
-                    log::error!("failed to read an entry in {}: {e}", dir.display());
-                    return None;
-                }
-            };
+            let path = entry
+                .map_err(|e| {
+                    CliError::Msg(format!("failed to read an entry in {}: {e}", dir.display()))
+                })?
+                .path();
             if !path.is_file() {
                 continue;
             }
-            let contents = match fs::read(&path) {
-                Ok(c) => c,
-                Err(e) => {
-                    log::error!("failed to read {}: {e}", path.display());
-                    return None;
-                }
-            };
+            let contents = fs::read(&path)
+                .map_err(|e| CliError::Msg(format!("failed to read {}: {e}", path.display())))?;
             total_in += 1;
             if seen.insert(content_hash(&contents)) {
                 let dest = output.join(format!("{total_out:06}"));
                 // `contents` is already in hand from the dedup read, so write it
                 // out directly rather than re-reading via fs::copy.
-                if let Err(e) = fs::write(&dest, &contents) {
-                    log::error!("failed to write {}: {e}", dest.display());
-                    return None;
-                }
+                fs::write(&dest, &contents).map_err(|e| {
+                    CliError::Msg(format!("failed to write {}: {e}", dest.display()))
+                })?;
                 total_out += 1;
             }
         }
     }
 
-    Some((total_in, total_out))
+    Ok((total_in, total_out))
 }
 
 /// Returns a 64-bit hash of `bytes` for content-based deduplication.
@@ -216,22 +178,22 @@ fn content_hash(bytes: &[u8]) -> u64 {
 
 /// Runs `afl-cmin -X` against the campaign's corpus to remove inputs that
 /// don't contribute new coverage.
-fn execute_minimize(args: &MinimizeArgs) -> bool {
+fn execute_minimize(args: &MinimizeArgs) -> Result<(), CliError> {
     let Some(runs_dir) = CampaignState::runs_dir() else {
-        log::error!("unable to determine home directory");
-        return false;
+        return Err(CliError::Msg(
+            "unable to determine home directory".to_string(),
+        ));
     };
 
-    let Some(state) = load_campaign(&runs_dir, &args.campaign_id) else {
-        return false;
-    };
+    let state = CampaignState::load_campaign(&args.campaign_id)?;
 
     // The --aflpp-path flag overrides the path recorded at campaign start, for when
     // the AFL++ checkout has since moved.
     let aflpp = args.aflpp_path.as_deref().or(state.aflpp_path.as_deref());
     let Some(afl_cmin) = find_afl_cmin(aflpp) else {
-        log::error!("afl-cmin not found; pass --aflpp-path <path> or add AFL++ to PATH");
-        return false;
+        return Err(CliError::Msg(
+            "afl-cmin not found; pass --aflpp-path <path> or add AFL++ to PATH".to_string(),
+        ));
     };
 
     let output = args
@@ -241,8 +203,8 @@ fn execute_minimize(args: &MinimizeArgs) -> bool {
 
     // Fail before booting Nyx if the output already holds a corpus. afl-cmin
     // guards this too, but it first deletes any `id:*` files in the directory.
-    if output_dir_occupied(&output) {
-        return false;
+    if let Some(conflict) = output_dir_conflict(&output) {
+        return Err(CliError::Msg(conflict));
     }
 
     // Minimize the given --input directories, or the campaign's runner queues.
@@ -258,7 +220,7 @@ fn execute_minimize(args: &MinimizeArgs) -> bool {
 
     let stage_dir = runs_dir.join(&args.campaign_id).join(".corpus-stage");
     let result = stage_inputs(&sources, &stage_dir)
-        && run_afl_cmin(&afl_cmin, &stage_dir, &output, &state.sharedir);
+        .and_then(|()| run_afl_cmin(&afl_cmin, &stage_dir, &output, &state.sharedir));
 
     // Remove the staging corpus, including on a staging failure; the minimized
     // output in `output` is what the user keeps. Ignore NotFound — staging may
@@ -271,15 +233,21 @@ fn execute_minimize(args: &MinimizeArgs) -> bool {
             stage_dir.display()
         );
     }
+
     result
 }
 
 /// Runs `afl-cmin -X` over `input`, writing the minimized corpus to `output`.
-fn run_afl_cmin(afl_cmin: &Path, input: &Path, output: &Path, sharedir: &Path) -> bool {
+fn run_afl_cmin(
+    afl_cmin: &Path,
+    input: &Path,
+    output: &Path,
+    sharedir: &Path,
+) -> Result<(), CliError> {
     log::info!("running afl-cmin on {}", input.display());
     log::info!("output: {}", output.display());
 
-    let status = match Command::new(afl_cmin)
+    let status = Command::new(afl_cmin)
         .arg("-i")
         .arg(input)
         .arg("-o")
@@ -287,85 +255,67 @@ fn run_afl_cmin(afl_cmin: &Path, input: &Path, output: &Path, sharedir: &Path) -
         .arg("-X")
         .arg(sharedir)
         .status()
-    {
-        Ok(s) => s,
-        Err(e) => {
-            log::error!("failed to run {}: {e}", afl_cmin.display());
-            return false;
-        }
-    };
+        .map_err(|e| CliError::Msg(format!("failed to run {}: {e}", afl_cmin.display())))?;
 
     if !status.success() {
-        log::error!("afl-cmin failed with {status}");
-        return false;
+        return Err(CliError::Msg(format!("afl-cmin failed with {status}")));
     }
 
     log::info!("minimized corpus written to {}", output.display());
-    true
+    Ok(())
 }
 
 /// Merges `sources` into `stage_dir` under short, sequential filenames for
-/// `afl-cmin -i`, returning whether staging succeeded.
+/// `afl-cmin -i`, returning an error if staging fails.
 ///
 /// AFL++ produces long input names near `NAME_MAX`, and afl-cmin can then exceed
 /// the max length during minimization: it stages each input into a temp dir as
 /// `<random-hex>_<basename>`, see
 /// <https://github.com/AFLplusplus/AFLplusplus/blob/4d0ec73b3eaad851402f18d63ea8344e9890d458/afl-cmin.py#L404>.
 /// Merging first gives inputs short names so afl-cmin stays under the limit.
-fn stage_inputs(sources: &[PathBuf], stage_dir: &Path) -> bool {
+fn stage_inputs(sources: &[PathBuf], stage_dir: &Path) -> Result<(), CliError> {
     // Start from a clean staging dir; a prior interrupted run may have left one.
-    if stage_dir.exists()
-        && let Err(e) = fs::remove_dir_all(stage_dir)
-    {
-        log::error!(
-            "failed to clear staging directory {}: {e}",
-            stage_dir.display()
-        );
-        return false;
+    if stage_dir.exists() {
+        fs::remove_dir_all(stage_dir).map_err(|e| {
+            CliError::Msg(format!(
+                "failed to clear staging directory {}: {e}",
+                stage_dir.display()
+            ))
+        })?;
     }
-    if let Err(e) = fs::create_dir_all(stage_dir) {
-        log::error!(
+    fs::create_dir_all(stage_dir).map_err(|e| {
+        CliError::Msg(format!(
             "failed to create staging directory {}: {e}",
             stage_dir.display()
-        );
-        return false;
-    }
+        ))
+    })?;
 
-    let Some((total_in, total_out)) = merge_dirs(sources, stage_dir) else {
-        return false;
-    };
+    let (total_in, total_out) = merge_dirs(sources, stage_dir)?;
     log::info!("staged {total_out} unique inputs (from {total_in}) for minimization");
-    true
+    Ok(())
 }
 
-/// Reports (with an error log) whether `output` already contains files.
+/// Returns an actionable message if `output` cannot safely receive a fresh
+/// corpus, or `None` if it is empty or absent.
 ///
 /// Both subcommands refuse a populated output directory so an existing corpus is
-/// never mixed into or overwritten. A missing directory counts as unoccupied (it
-/// will be created); any other `read_dir` error is treated as occupied so we
-/// never write over an unknown state.
-fn output_dir_occupied(output: &Path) -> bool {
+/// never mixed into or overwritten. A missing directory is fine (it will be
+/// created); any other `read_dir` error leaves occupancy unknown, so it is
+/// refused rather than risk writing over something.
+fn output_dir_conflict(output: &Path) -> Option<String> {
     match output.read_dir() {
-        Ok(mut entries) => {
-            if entries.next().is_some() {
-                log::error!(
-                    "output directory {} already contains files; choose a new directory or remove it first",
-                    output.display()
-                );
-                true
-            } else {
-                false
-            }
-        }
+        Ok(mut entries) => entries.next().is_some().then(|| {
+            format!(
+                "output directory {} already contains files; choose a new directory or remove it first",
+                output.display()
+            )
+        }),
         // A missing directory is the common, expected case — it will be created.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-        // Any other error (e.g. a permission problem, or a file where a directory
-        // was expected) leaves occupancy unknown; refuse rather than risk writing
-        // over something.
-        Err(e) => {
-            log::error!("cannot inspect output directory {}: {e}", output.display());
-            true
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => Some(format!(
+            "cannot inspect output directory {}: {e}",
+            output.display()
+        )),
     }
 }
 
@@ -498,7 +448,7 @@ mod tests {
         fs::write(src.join(&long_name), "payload").unwrap();
 
         let stage = dir.path().join("stage");
-        assert!(stage_inputs(&[src], &stage));
+        assert!(stage_inputs(&[src], &stage).is_ok());
 
         let names: Vec<String> = fs::read_dir(&stage)
             .unwrap()
@@ -529,26 +479,26 @@ mod tests {
         fs::create_dir_all(&stage).unwrap();
         fs::write(stage.join("stale"), "old").unwrap();
 
-        assert!(stage_inputs(&[src], &stage));
+        assert!(stage_inputs(&[src], &stage).is_ok());
 
         assert!(!stage.join("stale").exists());
         assert_eq!(dir_contents_sorted(&stage), ["fresh"]);
     }
 
     #[test]
-    fn output_dir_occupied_detects_existing_files() {
+    fn output_dir_conflict_detects_existing_files() {
         let dir = tempdir().unwrap();
-        // Absent directory is not occupied.
-        assert!(!output_dir_occupied(&dir.path().join("missing")));
+        // Absent directory does not conflict.
+        assert!(output_dir_conflict(&dir.path().join("missing")).is_none());
 
-        // Empty directory is not occupied.
+        // Empty directory does not conflict.
         let empty = dir.path().join("empty");
         fs::create_dir(&empty).unwrap();
-        assert!(!output_dir_occupied(&empty));
+        assert!(output_dir_conflict(&empty).is_none());
 
-        // A directory holding a corpus file is occupied.
+        // A directory holding a corpus file conflicts.
         fs::write(empty.join("000000"), b"x").unwrap();
-        assert!(output_dir_occupied(&empty));
+        assert!(output_dir_conflict(&empty).is_some());
     }
 
     #[test]

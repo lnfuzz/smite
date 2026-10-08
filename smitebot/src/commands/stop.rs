@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use clap::Args;
 
+use crate::error::CliError;
 use crate::state::{CampaignState, Status};
 use crate::tmux;
 use crate::utils;
@@ -40,29 +41,12 @@ pub struct StopArgs {
 impl StopCommand {
     /// Stops a campaign: reaps its runner process groups, tears down the tmux
     /// session, and records the stop in state.json.
-    pub fn execute(args: &StopArgs) -> bool {
-        let Some(runs_dir) = CampaignState::runs_dir() else {
-            log::error!("unable to determine home directory");
-            return false;
-        };
-        let state_path = runs_dir.join(&args.campaign_id).join("state.json");
-
-        let mut state = match CampaignState::load(&state_path) {
-            Ok(state) => state,
-            Err(e) => {
-                log::error!("{e}");
-                log::error!(
-                    "campaign '{}' not found; list campaigns with: ls {}",
-                    args.campaign_id,
-                    runs_dir.display()
-                );
-                return false;
-            }
-        };
+    pub fn execute(args: &StopArgs) -> Result<(), CliError> {
+        let mut state = CampaignState::load_campaign(&args.campaign_id)?;
 
         if state.status == Status::Stopped {
             log::info!("campaign {} is already stopped", state.id);
-            return true;
+            return Ok(());
         }
 
         let clean = terminate_runners(&state);
@@ -74,25 +58,24 @@ impl StopCommand {
 
         state.status = Status::Stopped;
         state.stop_time = Some(utils::epoch_secs());
-        if let Err(e) = state.save(&state_path) {
-            log::error!(
+        state.save_campaign().map_err(|e| {
+            CliError::Msg(format!(
                 "runners were reaped but recording the stop failed: {e}; \
                  campaign {} will still show as running in state.json",
                 state.id
-            );
-            return false;
-        }
+            ))
+        })?;
 
         if clean {
             log::info!("campaign {} stopped", state.id);
+            Ok(())
         } else {
-            log::error!(
+            Err(CliError::Msg(format!(
                 "campaign {} stopped, but some processes survived SIGKILL; \
                  inspect with `pgrep -a qemu` and kill them manually",
                 state.id
-            );
+            )))
         }
-        clean
     }
 }
 

@@ -11,6 +11,8 @@ use std::path::PathBuf;
 use clap::Args;
 use smite_ir::Program;
 
+use crate::error::CliError;
+
 /// Command handler for `smitebot print-ir`.
 pub struct PrintIrCommand;
 
@@ -23,33 +25,24 @@ pub struct PrintIrArgs {
 
 impl PrintIrCommand {
     /// Decodes the input at `args.path` and prints it as readable IR.
-    pub fn execute(args: &PrintIrArgs) -> bool {
-        let bytes = match fs::read(&args.path) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                log::error!("failed to read {}: {e}", args.path.display());
-                return false;
-            }
-        };
+    pub fn execute(args: &PrintIrArgs) -> Result<(), CliError> {
+        let bytes = fs::read(&args.path)
+            .map_err(|e| CliError::Msg(format!("failed to read {}: {e}", args.path.display())))?;
 
-        match render(&bytes) {
-            Ok(text) => {
-                // `Program`'s Display terminates every instruction with a
-                // newline, so an empty program renders to an empty string.
-                if text.is_empty() {
-                    println!("(empty program)");
-                }
-                print!("{text}");
-                true
-            }
-            Err(e) => {
-                log::error!(
-                    "failed to decode IR program from {}: {e}",
-                    args.path.display()
-                );
-                false
-            }
+        let text = render(&bytes).map_err(|e| {
+            CliError::Msg(format!(
+                "failed to decode IR program from {}: {e}",
+                args.path.display()
+            ))
+        })?;
+
+        // `Program`'s Display terminates every instruction with a newline, so an
+        // empty program renders to an empty string.
+        if text.is_empty() {
+            println!("(empty program)");
         }
+        print!("{text}");
+        Ok(())
     }
 }
 

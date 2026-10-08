@@ -20,6 +20,7 @@ use clap::Args;
 
 use crate::commands::build::{BuildInputs, run_build};
 use crate::config::CampaignConfig;
+use crate::error::CliError;
 use crate::latency_stats::{LatencyStats, avg_duration, mean_stddev};
 use crate::libnyx::{Libnyx, NyxReturn, PAYLOAD_HEADER_SIZE};
 use crate::utils::{pin_to_cpu, setup_nyx};
@@ -105,75 +106,34 @@ pub struct BenchExecArgs {
 }
 
 impl BenchExecCommand {
-    /// Runs the benchmark and returns whether it completed successfully.
-    pub fn execute(args: &BenchExecArgs) -> bool {
-        let iterations = match validate_iterations(args.iterations) {
-            Ok(n) => n,
-            Err(e) => {
-                log::error!("{e}");
-                return false;
-            }
-        };
-        let repeat = match validate_repeat(args.repeat) {
-            Ok(n) => n,
-            Err(e) => {
-                log::error!("{e}");
-                return false;
-            }
-        };
+    /// Runs the benchmark.
+    pub fn execute(args: &BenchExecArgs) -> Result<(), CliError> {
+        let iterations = validate_iterations(args.iterations)?;
+        let repeat = validate_repeat(args.repeat)?;
         // A zero timeout causes Nyx to silently turn off the timing the
         // benchmark exists to measure.
         if args.timeout_secs == 0 {
-            log::error!("Nyx requires --timeout to be at least 1 second");
-            return false;
+            return Err(CliError::Msg(
+                "Nyx requires --timeout to be at least 1 second".to_string(),
+            ));
         }
 
-        let config = match CampaignConfig::load(&args.path) {
-            Ok(c) => c,
-            Err(e) => {
-                log::error!("{e}");
-                return false;
-            }
-        };
+        let config = CampaignConfig::load(&args.path)?;
 
-        let input = match load_input(args) {
-            Ok(input) => input,
-            Err(e) => {
-                log::error!("{e}");
-                return false;
-            }
-        };
-        let max_input_size = match validate_max_input_size(args.max_input_size, input.len()) {
-            Ok(size) => size,
-            Err(e) => {
-                log::error!("{e}");
-                return false;
-            }
-        };
+        let input = load_input(args)?;
+        let max_input_size = validate_max_input_size(args.max_input_size, input.len())?;
 
-        let Some(libnyx_path) = locate_libnyx(&config) else {
-            return false;
-        };
+        let libnyx_path = locate_libnyx(&config)?;
 
-        if !ensure_sharedir(&config, args.no_build) {
-            return false;
-        }
+        ensure_sharedir(&config, args.no_build)?;
 
-        let libnyx = match Libnyx::load(&libnyx_path) {
-            Ok(lib) => lib,
-            Err(e) => {
-                log::error!("failed to load {}: {e}", libnyx_path.display());
-                return false;
-            }
-        };
+        let libnyx = Libnyx::load(&libnyx_path)
+            .map_err(|e| CliError::Msg(format!("failed to load {}: {e}", libnyx_path.display())))?;
 
         // Pin before booting: libnyx spawns QEMU as a child, so the VM inherits
         // this affinity mask. Doing it here also pins the timing loop itself.
         let cpu = args.cpu.unwrap_or(args.worker_id as usize);
-        if let Err(e) = pin_to_cpu(cpu) {
-            log::error!("{e}");
-            return false;
-        }
+        pin_to_cpu(cpu)?;
         log::info!("pinned to CPU {cpu}");
 
         // Each repeat is a fresh VM boot so the aggregate captures boot- and
@@ -183,7 +143,7 @@ impl BenchExecCommand {
             if repeat > 1 {
                 log::info!("benchmark run {}/{repeat}", run_index + 1);
             }
-            match run_once(
+            runs.push(run_once(
                 &libnyx,
                 &config,
                 &input,
@@ -191,13 +151,7 @@ impl BenchExecCommand {
                 max_input_size,
                 iterations,
                 run_index,
-            ) {
-                Ok(result) => runs.push(result),
-                Err(e) => {
-                    log::error!("{e}");
-                    return false;
-                }
-            }
+            )?);
         }
 
         let report = BenchReport {
@@ -210,7 +164,7 @@ impl BenchExecCommand {
         };
         report.print();
 
-        true
+        Ok(())
     }
 }
 
@@ -481,22 +435,23 @@ fn load_input(args: &BenchExecArgs) -> Result<Vec<u8>, String> {
 ///
 /// AFL++'s Nyx build is required both to prepare the sharedir (setup-nyx.sh)
 /// and to drive the VM at runtime, so it is checked before either.
-fn locate_libnyx(config: &CampaignConfig) -> Option<PathBuf> {
+fn locate_libnyx(config: &CampaignConfig) -> Result<PathBuf, CliError> {
     if !config.aflpp_path.exists() {
-        log::error!("aflpp_path does not exist: {}", config.aflpp_path.display());
-        return None;
+        return Err(CliError::Msg(format!(
+            "aflpp_path does not exist: {}",
+            config.aflpp_path.display()
+        )));
     }
 
     let libnyx_path = config.aflpp_path.join("libnyx.so");
     if !libnyx_path.exists() {
-        log::error!(
+        return Err(CliError::Msg(format!(
             "{} not found; build AFL++ with Nyx support (see nyx_mode/README.md)",
             libnyx_path.display()
-        );
-        return None;
+        )));
     }
 
-    Some(libnyx_path)
+    Ok(libnyx_path)
 }
 
 /// Builds the image and sets up the sharedir, or (when `no_build`) verifies an
@@ -504,25 +459,22 @@ fn locate_libnyx(config: &CampaignConfig) -> Option<PathBuf> {
 ///
 /// libnyx writes `config.ron` into the sharedir during setup-nyx.sh; its
 /// absence means the sharedir was never prepared.
-fn ensure_sharedir(config: &CampaignConfig, no_build: bool) -> bool {
+fn ensure_sharedir(config: &CampaignConfig, no_build: bool) -> Result<(), CliError> {
     if no_build {
         let config_ron = config.sharedir.join("config.ron");
         if !config_ron.exists() {
-            log::error!(
+            return Err(CliError::Msg(format!(
                 "Nyx sharedir is not set up ({} missing); drop --no-build, or run \
                  `smitebot start` / scripts/setup-nyx.sh first",
                 config_ron.display()
-            );
-            return false;
+            )));
         }
-        return true;
+        return Ok(());
     }
 
     let image = config.image_tag();
     log::info!("building Docker image {image}");
-    if !run_build(&BuildInputs::from_config(config, &image)) {
-        return false;
-    }
+    run_build(&BuildInputs::from_config(config, &image))?;
 
     log::info!("setting up Nyx sharedir at {}", config.sharedir.display());
     setup_nyx(config, &image)

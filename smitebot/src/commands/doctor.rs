@@ -10,6 +10,7 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::config::CampaignConfig;
+use crate::error::CliError;
 use crate::utils::{find_in_path, is_executable};
 
 /// AFL++ binaries required for campaign execution and corpus minimization.
@@ -166,15 +167,13 @@ impl Serialize for CheckFailure {
 
 impl DoctorCommand {
     /// Runs all doctor checks and prints either human-readable or JSON output.
-    pub fn execute(args: &DoctorArgs) -> bool {
+    ///
+    /// The checklist is the artifact and is always printed here, so a failing
+    /// check returns [`CliError::Reported`]: `main` only sets the exit code. A
+    /// config that fails to load, by contrast, is a logged operational error.
+    pub fn execute(args: &DoctorArgs) -> Result<(), CliError> {
         let config = match &args.config {
-            Some(path) => match CampaignConfig::load(path) {
-                Ok(c) => Some(c),
-                Err(e) => {
-                    log::error!("{e}");
-                    return false;
-                }
-            },
+            Some(path) => Some(CampaignConfig::load(path)?),
             None => None,
         };
         let inputs = DoctorInputs::resolve(config.as_ref(), args);
@@ -233,7 +232,11 @@ impl DoctorCommand {
             print_human_report(&report);
         }
 
-        report.overall
+        if report.overall {
+            Ok(())
+        } else {
+            Err(CliError::Reported)
+        }
     }
 }
 

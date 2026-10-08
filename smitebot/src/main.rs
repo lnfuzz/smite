@@ -2,6 +2,7 @@
 
 mod commands;
 mod config;
+mod error;
 mod latency_stats;
 mod libnyx;
 mod state;
@@ -18,6 +19,7 @@ use commands::{
     ReproduceArgs, ReproduceCommand, StartArgs, StartCommand, StatusArgs, StatusCommand, StopArgs,
     StopCommand,
 };
+use error::CliError;
 
 #[derive(Debug, Parser)]
 #[command(name = "smitebot", version, about = "Smite campaign manager")]
@@ -54,7 +56,7 @@ fn main() -> ExitCode {
     simple_logger::init_with_env().expect("Failed to initialize logger");
 
     let cli = Cli::parse();
-    let success = match cli.command {
+    let result = match cli.command {
         Commands::BenchExec(args) => BenchExecCommand::execute(&args),
         Commands::Build(args) => BuildCommand::execute(&args),
         Commands::Config(args) => ConfigCommand::execute(&args),
@@ -67,9 +69,13 @@ fn main() -> ExitCode {
         Commands::Stop(args) => StopCommand::execute(&args),
     };
 
-    if success {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        // The command already surfaced the failure itself (see CliError::Reported).
+        Err(CliError::Reported) => ExitCode::FAILURE,
+        Err(e) => {
+            log::error!("{e}");
+            ExitCode::FAILURE
+        }
     }
 }
