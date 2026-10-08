@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use bitcoin::secp256k1;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use smite::bitcoin::BitcoinCli;
 use smite::process::ManagedProcess;
 
@@ -64,6 +65,12 @@ pub struct ClnRpc {
 impl ClnRpc {
     /// Bound RPC socket I/O so a stalled lightningd cannot block indefinitely.
     const RPC_IO_TIMEOUT: Duration = Duration::from_secs(1);
+
+    fn new(cln_dir: &Path) -> Self {
+        Self {
+            rpc_socket: cln_dir.join("regtest").join("lightning-rpc"),
+        }
+    }
 
     /// Sends a JSON-RPC request to CLN over its Unix RPC socket and returns the
     /// `result` of the response.
@@ -276,6 +283,66 @@ impl ClnTarget {
 
         Ok((pubkey, info.blockheight))
     }
+
+    /// Funds CLN's on-chain wallet and waits until CLN sees the funds confirmed.
+    fn fund_wallet(cln_dir: &Path, bitcoin_cli: &BitcoinCli) -> Result<(), TargetError> {
+        #[derive(Deserialize)]
+        struct NewAddrResponse {
+            bech32: String,
+        }
+
+        #[derive(Deserialize)]
+        struct ListFundsResponse {
+            outputs: Vec<Output>,
+        }
+
+        #[derive(Deserialize)]
+        struct Output {
+            status: String,
+        }
+
+        let mut rpc = ClnRpc::new(cln_dir);
+        let NewAddrResponse { bech32 } = Self::rpc_json(
+            &rpc,
+            "newaddr",
+            serde_json::json!({"addresstype": "bech32"}),
+        )?;
+        bitcoind::fund_wallet(bitcoin_cli, &bech32)?;
+
+        log::info!("Waiting for lightningd to confirm its wallet funding...");
+        for _ in 0..120 {
+            // lightningd polls bitcoind only every 30s, so ask it to sync now.
+            rpc.chain_sync();
+            let funds: ListFundsResponse =
+                Self::rpc_json(&rpc, "listfunds", serde_json::json!({}))?;
+            if funds.outputs.iter().any(|o| o.status == "confirmed") {
+                log::info!(
+                    "lightningd confirmed {} funding outputs",
+                    funds.outputs.len()
+                );
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+
+        Err(TargetError::StartFailed(
+            "lightningd did not confirm its wallet funding".into(),
+        ))
+    }
+
+    /// Calls a lightningd RPC method and parses its result.
+    fn rpc_json<T: DeserializeOwned>(
+        rpc: &ClnRpc,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<T, TargetError> {
+        let result = rpc
+            .run(method, params)
+            .map_err(|e| TargetError::StartFailed(format!("lightningd {method} failed: {e}")))?;
+        serde_json::from_value(result).map_err(|e| {
+            TargetError::StartFailed(format!("failed to parse lightningd {method} result: {e}"))
+        })
+    }
 }
 
 impl Drop for ClnTarget {
@@ -321,6 +388,7 @@ impl Target for ClnTarget {
 
         let (bitcoind, bitcoin_cli) = bitcoind::start(&config.bitcoind_config(), &data_path)?;
         let (cln, pubkey, cln_dir) = Self::start_cln(&config, &data_path)?;
+        Self::fund_wallet(&cln_dir, &bitcoin_cli)?;
         let addr = SocketAddr::from(([127, 0, 0, 1], config.cln_p2p_port));
 
         log::info!("Both daemons are running, ready to fuzz");
@@ -345,9 +413,7 @@ impl Target for ClnTarget {
     }
 
     fn rpc(&self) -> Self::Rpc {
-        ClnRpc {
-            rpc_socket: self.cln_dir.join("regtest").join("lightning-rpc"),
-        }
+        ClnRpc::new(&self.cln_dir)
     }
 
     fn bitcoin_cli(&self) -> &BitcoinCli {

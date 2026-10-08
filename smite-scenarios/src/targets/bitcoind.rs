@@ -13,6 +13,26 @@ use super::TargetError;
 /// Number of blocks to generate at startup for coinbase maturity.
 pub const INITIAL_BLOCKS: u64 = 101;
 
+/// Blocks [`fund_wallet`] mines to confirm a target's funding.
+const FUNDING_BLOCKS: u64 = 1;
+
+/// Chain height once the target's wallet is funded.
+pub const FUNDED_HEIGHT: u64 = INITIAL_BLOCKS + FUNDING_BLOCKS;
+
+/// Wallet the fuzzer funds its own transactions from.
+const FUZZER_WALLET: &str = "default";
+
+/// Confirmed UTXOs each target's wallet starts with.
+///
+/// Targets need them to fee-bump and sweep on chain, and LDK rejects inbound
+/// anchor channels without an on-chain reserve. Separate coins let concurrent
+/// claims (e.g. anchor CPFP and HTLC claims) each find a confirmed input.
+const FUNDING_UTXOS: usize = 4;
+
+/// Value of each funding UTXO in BTC, well above LDK's default 25k sat
+/// per-channel anchor reserve.
+const FUNDING_UTXO_BTC: &str = "0.1";
+
 /// Bitcoind configuration.
 pub struct BitcoindConfig {
     /// Bitcoin RPC port (default: 18443 for regtest).
@@ -104,6 +124,7 @@ pub fn start(
     let cli = BitcoinCli {
         rpc_port: config.rpc_port,
         bitcoind_dir,
+        wallet: FUZZER_WALLET.into(),
     };
 
     // Wait for bitcoind to be ready
@@ -130,38 +151,22 @@ pub fn start(
     ))
 }
 
-/// Creates wallet and generates initial blocks.
+/// Creates the fuzzer's wallet and generates initial blocks.
 fn setup_wallet(cli: &BitcoinCli) -> Result<(), TargetError> {
-    // Create wallet
-    let status = cli
-        .run()
-        .arg("createwallet")
-        .arg("default")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
+    // Fails if the wallet already exists (i.e. SMITE_DATA_DIR was mounted).
+    cli.call(&["createwallet", &cli.wallet])?;
+    cli.call(&["-generate", &INITIAL_BLOCKS.to_string()])?;
+    Ok(())
+}
 
-    // command fails if wallet already exists (i.e. SMITE_DATA_DIR was mounted)
-    if !status.success() {
-        return Err(TargetError::StartFailed(
-            "failed to create wallet (does it already exist?)".into(),
-        ));
+/// Pays [`FUNDING_UTXOS`] outputs to a target's `address` from the fuzzer's
+/// wallet and mines [`FUNDING_BLOCKS`] to confirm them.
+pub fn fund_wallet(cli: &BitcoinCli, address: &str) -> Result<(), TargetError> {
+    log::info!("Funding target wallet at {address}");
+    // One payment per UTXO, as `sendmany` rejects repeated addresses.
+    for _ in 0..FUNDING_UTXOS {
+        cli.call(&["sendtoaddress", address, FUNDING_UTXO_BTC])?;
     }
-
-    // Generate initial blocks
-    let status = cli
-        .run()
-        .arg("-generate")
-        .arg(INITIAL_BLOCKS.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-
-    if !status.success() {
-        return Err(TargetError::StartFailed(
-            "failed to generate initial blocks".into(),
-        ));
-    }
-
+    cli.call(&["-generate", &FUNDING_BLOCKS.to_string()])?;
     Ok(())
 }

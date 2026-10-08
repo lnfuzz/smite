@@ -2,6 +2,7 @@
 //! `bitcoind` instances via `bitcoin-cli`.
 
 use std::cmp::Ordering;
+use std::io;
 use std::path::PathBuf;
 use std::process::Command;
 use std::str::FromStr;
@@ -68,6 +69,9 @@ pub struct BitcoinCli {
     pub rpc_port: u16,
     /// Path passed to `bitcoin-cli -datadir`.
     pub bitcoind_dir: PathBuf,
+    /// Wallet that wallet RPCs act on, required once `bitcoind` has more than
+    /// one wallet loaded.
+    pub wallet: String,
 }
 
 impl BitcoinCli {
@@ -79,9 +83,28 @@ impl BitcoinCli {
         cmd.arg("-regtest")
             .arg(format!("-datadir={}", self.bitcoind_dir.display()))
             .arg(format!("-rpcport={}", self.rpc_port))
+            .arg(format!("-rpcwallet={}", self.wallet))
             .arg("-rpcuser=rpcuser")
             .arg("-rpcpassword=rpcpass");
         cmd
+    }
+
+    /// Runs `bitcoin-cli` with `args` and returns its trimmed stdout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `bitcoin-cli` fails to execute or exits non-zero,
+    /// carrying its stderr in the latter case.
+    pub fn call(&self, args: &[&str]) -> io::Result<String> {
+        let output = self.run().args(args).output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "bitcoin-cli {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     }
 
     /// Mines the given number of blocks.

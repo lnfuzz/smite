@@ -8,7 +8,7 @@ use smite::scenarios::ScenarioError;
 
 use super::{handshake_with_target, ping_pong};
 use crate::executor::ProgramContext;
-use crate::targets::{INITIAL_BLOCKS, Target};
+use crate::targets::{FUNDED_HEIGHT, Target};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -76,10 +76,10 @@ impl<T: Target> SnapshotSetup<T> for PostInitSetup {
         let context = ProgramContext {
             target_pubkey: *target.pubkey(),
             chain_hash: REGTEST_CHAIN_HASH,
-            // All targets gate startup on `INITIAL_BLOCKS` being mined, so
-            // this is the floor. Dynamic per-target queries can replace it
-            // later.
-            block_height: u32::try_from(INITIAL_BLOCKS).expect("fits in u32"),
+            // All targets gate startup on their wallet funding confirming at
+            // `FUNDED_HEIGHT`, so this is the floor. Dynamic per-target
+            // queries can replace it later.
+            block_height: u32::try_from(FUNDED_HEIGHT).expect("fits in u32"),
             // Since we echo the same features the target sent, but strip both
             // required and optional bits to exercise only the single funded
             // flow and avoid unrelated noise, negotiated features are just the
