@@ -9,7 +9,7 @@
 // to read/write coverage counters directly at this address, avoiding the bounds
 // check and field load overhead of DirectByteBuffer.get/put.
 //
-// Called once from EclairSanCov.premain() before any class transformation.
+// Called once from EclairSanCov's static initializer, on the first probe.
 JNIEXPORT jlong JNICALL Java_EclairSanCov_mapShmAddr(JNIEnv *env, jclass cls,
                                                      jint shmId) {
   void *ptr = shmat((int)shmId, NULL, 0);

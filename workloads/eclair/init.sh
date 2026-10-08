@@ -20,8 +20,8 @@ export SMITE_CRASH_HANDLER=/nyx-jvm-crash-handler.so
 #   entirely. C2 runs expensive optimizations in background threads which get
 #   repeated every time we restore the VM snapshot, reducing fuzzing speed.
 #
-# -javaagent: Coverage agent that instruments bytecode and writes edge counters
-#   to AFL shared memory via JNI.
-export JAVA_OPTS="-XX:TieredStopAtLevel=1 -javaagent:/eclair-sancov.jar -Djava.library.path=/usr/local/lib"
+# -Djava.library.path: Where EclairSanCov loads the JNI library that maps the
+#   AFL shared memory its probes write to.
+export JAVA_OPTS="-XX:TieredStopAtLevel=1 -Djava.library.path=/usr/local/lib"
 
 /eclair-scenario > /init.log 2>&1
