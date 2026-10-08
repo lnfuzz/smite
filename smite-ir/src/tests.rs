@@ -679,6 +679,18 @@ fn postcard_roundtrip() {
 }
 
 #[test]
+fn reconnect_operation() {
+    let op = Operation::Reconnect;
+    assert_eq!(op.input_types(), vec![]);
+    assert_eq!(op.output_type(), None);
+    assert!(!op.is_param_mutable());
+    assert!(op.has_side_effects());
+    assert!(!op.depends_only_on_inputs());
+    assert!(!op.is_pure());
+    assert_eq!(op.to_string(), "Reconnect()");
+}
+
+#[test]
 fn mine_blocks_operation() {
     let op = Operation::MineBlocks(8);
     assert_eq!(op.input_types(), vec![]);

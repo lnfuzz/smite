@@ -1,7 +1,7 @@
 //! High-level encrypted connection for Lightning Network peers.
 
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::time::Duration;
 
 use bitcoin::secp256k1::{PublicKey, SecretKey};
@@ -17,6 +17,7 @@ use super::handshake::{ACT_TWO_SIZE, NoiseHandshake};
 pub struct NoiseConnection {
     stream: TcpStream,
     cipher: NoiseCipher,
+    connector: Connector,
 }
 
 impl NoiseConnection {
@@ -39,37 +40,33 @@ impl NoiseConnection {
         local_ephemeral: SecretKey,
         timeout: Duration,
     ) -> Result<Self, ConnectionError> {
-        let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
-        stream.set_nodelay(true)?;
-        stream.set_read_timeout(Some(timeout))?;
-        stream.set_write_timeout(Some(timeout))?;
+        let connector = Connector::new(addr, remote_pubkey, local_static, local_ephemeral, timeout);
+        let (stream, cipher) = connector.connect()?;
 
-        let cipher =
-            Self::perform_handshake(&mut stream, local_static, local_ephemeral, remote_pubkey)?;
-
-        Ok(Self { stream, cipher })
+        Ok(Self {
+            stream,
+            cipher,
+            connector,
+        })
     }
 
-    /// Performs the Noise handshake as initiator.
-    fn perform_handshake(
-        stream: &mut TcpStream,
-        local_static: SecretKey,
-        local_ephemeral: SecretKey,
-        remote_pubkey: PublicKey,
-    ) -> Result<NoiseCipher, ConnectionError> {
-        let mut handshake =
-            NoiseHandshake::new_initiator(local_static, local_ephemeral, remote_pubkey);
+    /// Reconnects to the same remote Lightning node, establishing a new TCP
+    /// connection and performing the Noise handshake.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if closing the current connection, establishing the new
+    /// connection, or completing the Noise handshake fails.
+    pub fn reconnect(&mut self) -> Result<(), ConnectionError> {
+        // Close the old connection before establishing the new one.
+        self.stream.shutdown(Shutdown::Both)?;
 
-        let act_one = handshake.get_act_one()?;
-        stream.write_all(&act_one)?;
+        // Replace the stream and cipher with those from the new connection.
+        let (stream, cipher) = self.connector.connect()?;
+        self.stream = stream;
+        self.cipher = cipher;
 
-        let mut act_two = [0u8; ACT_TWO_SIZE];
-        stream.read_exact(&mut act_two)?;
-
-        let act_three = handshake.process_act_two(&act_two)?;
-        stream.write_all(&act_three)?;
-
-        Ok(handshake.into_cipher()?)
+        Ok(())
     }
 
     /// Sends an encrypted message to the peer.
@@ -125,6 +122,70 @@ impl NoiseConnection {
         let msg = self.cipher.decrypt_message(&encrypted_msg)?;
 
         Ok(msg)
+    }
+}
+
+/// Stores the connection parameters needed to establish a Noise-encrypted
+/// connection to a remote Lightning node. Retained by [`NoiseConnection`] to
+/// reconnect to the same peer via [`reconnect`](NoiseConnection::reconnect).
+struct Connector {
+    addr: SocketAddr,
+    remote_pubkey: PublicKey,
+    local_static: SecretKey,
+    local_ephemeral: SecretKey,
+    timeout: Duration,
+}
+
+impl Connector {
+    /// Creates a connector with the address, keys, and timeout needed to
+    /// establish the connection.
+    fn new(
+        addr: SocketAddr,
+        remote_pubkey: PublicKey,
+        local_static: SecretKey,
+        local_ephemeral: SecretKey,
+        timeout: Duration,
+    ) -> Self {
+        Self {
+            addr,
+            remote_pubkey,
+            local_static,
+            local_ephemeral,
+            timeout,
+        }
+    }
+
+    /// Opens a TCP connection to the remote Lightning node and performs the
+    /// Noise handshake, returning the connected stream and cipher.
+    fn connect(&self) -> Result<(TcpStream, NoiseCipher), ConnectionError> {
+        let mut stream = TcpStream::connect_timeout(&self.addr, self.timeout)?;
+        stream.set_nodelay(true)?;
+        stream.set_read_timeout(Some(self.timeout))?;
+        stream.set_write_timeout(Some(self.timeout))?;
+
+        let cipher = self.perform_handshake(&mut stream)?;
+
+        Ok((stream, cipher))
+    }
+
+    /// Performs the Noise handshake as initiator.
+    fn perform_handshake(&self, stream: &mut TcpStream) -> Result<NoiseCipher, ConnectionError> {
+        let mut handshake = NoiseHandshake::new_initiator(
+            self.local_static,
+            self.local_ephemeral,
+            self.remote_pubkey,
+        );
+
+        let act_one = handshake.get_act_one()?;
+        stream.write_all(&act_one)?;
+
+        let mut act_two = [0u8; ACT_TWO_SIZE];
+        stream.read_exact(&mut act_two)?;
+
+        let act_three = handshake.process_act_two(&act_two)?;
+        stream.write_all(&act_three)?;
+
+        Ok(handshake.into_cipher()?)
     }
 }
 

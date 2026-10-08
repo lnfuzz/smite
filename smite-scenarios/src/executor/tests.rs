@@ -408,6 +408,64 @@ fn execute_recv_skips_gossip() {
 }
 
 #[test]
+fn execute_reconnect_exchanges_init() {
+    // A stale negotiation that never reached `funding_signed` and so must be
+    // dropped on reconnect.
+    let stale_id = TemporaryChannelId::new([0xcc; 32]);
+    // A second UTXO so the program can build a second funding transaction.
+    let mut second_utxo = sample_utxo();
+    second_utxo.amount = Amount::from_sat(20_010_000);
+    second_utxo.outpoint.vout = 1;
+    let mut stale = sample_funding_negotiation();
+    stale.open_channel.temporary_channel_id = stale_id;
+    stale.open_channel.funding_satoshis = 20_000_000;
+    stale.accept_channel.as_mut().unwrap().temporary_channel_id = stale_id;
+
+    // Create funding transactions for both negotiations and send
+    // `funding_created`. The first receives `funding_signed`, while the second
+    // does not and is therefore discarded on reconnect.
+    let mut b = ProgramBuilder::new();
+    let funding_created_1 = send_funding_created(&mut b);
+    b.append(Operation::RecvFundingSigned, &[funding_created_1.sent]);
+    let tx = create_funding_tx_with(&mut b, 20_000_000, 15_000);
+    let stale_temp_chan_id = b.append(Operation::LoadChannelId(stale_id.0), &[]);
+    b.append(
+        Operation::SendFundingCreated,
+        &[tx.tx, tx.opener_privkey, stale_temp_chan_id],
+    );
+    b.append(Operation::Reconnect, &[]);
+
+    let mut fx = Fixture::new()
+        .with_utxos(vec![sample_utxo(), second_utxo])
+        .with_negotiation(sample_funding_negotiation())
+        .queue(&funding_signed_reply(funding_channel_id()))
+        .with_negotiation(stale)
+        .queue(&Message::Init(Init::empty()));
+    fx.run(&b.build());
+
+    // Every queued reply was consumed and the reconnect sent exactly one `init`
+    // (after the `funding_created` from the funding flow).
+    assert_eq!(fx.queued_len(), 0);
+    assert_eq!(fx.sent_len(), 3);
+    let sent: Init = fx.sent(2);
+    assert_eq!(sent.globalfeatures, Vec::<u8>::new());
+    assert_eq!(
+        sent.features,
+        sample_context().negotiated_features.into_bytes()
+    );
+
+    // The funded channel and its negotiation survived the reconnect, the stale
+    // negotiation was discarded.
+    assert_eq!(fx.channel_states().len(), 1);
+    assert!(fx.channel_states().contains_key(&funding_channel_id()));
+    assert_eq!(fx.negotiations().len(), 1);
+    assert!(
+        fx.negotiations()
+            .contains_key(&TemporaryChannelId::new([0xbb; 32]))
+    );
+}
+
+#[test]
 fn execute_records_negotiation_for_open_and_accept() {
     let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
 
@@ -421,7 +479,7 @@ fn execute_records_negotiation_for_open_and_accept() {
     );
     let accept_channel = pending.accept_channel.as_ref().unwrap();
     assert_eq!(accept_channel.clone(), sample_accept_channel());
-    assert!(!pending.funding_built);
+    assert!(pending.funded_channel_id.is_none());
 }
 
 #[test]
@@ -541,7 +599,7 @@ fn execute_records_open_channel_for_duplicate_id_after_funding() {
     let pending = fx.negotiation(&temporary_channel_id);
     assert_eq!(pending.open_channel.funding_satoshis, 100_000);
     assert!(pending.accept_channel.is_none());
-    assert!(!pending.funding_built);
+    assert!(pending.funded_channel_id.is_none());
 }
 
 // -- Panic path tests --
@@ -792,7 +850,7 @@ fn execute_send_funding_created_and_recv_funding_signed() {
     );
 
     let pending = fx.negotiation(&TemporaryChannelId::new([0xbb; 32]));
-    assert!(pending.funding_built);
+    assert!(pending.funded_channel_id.is_some());
     assert_eq!(fx.rpc().chain_syncs, 0);
 }
 

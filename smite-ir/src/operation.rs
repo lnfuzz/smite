@@ -228,6 +228,9 @@ pub enum Operation {
     /// point unknown) and its funding transaction has enough confirmations for
     /// the target to have sent `channel_ready`.
     RecvChannelReady,
+    /// Close the connection and establish a fresh one to the target, re-running
+    /// the Noise handshake and exchanging `init`.
+    Reconnect,
     /// Mines the given number of blocks on the Bitcoin network.
     MineBlocks(u8),
     /// Sign wallet inputs of the transaction and broadcast it via `bitcoin-cli`.
@@ -556,6 +559,7 @@ impl fmt::Display for Operation {
             Self::RecvAcceptChannel => write!(f, "RecvAcceptChannel"),
             Self::RecvFundingSigned => write!(f, "RecvFundingSigned"),
             Self::RecvChannelReady => write!(f, "RecvChannelReady()"),
+            Self::Reconnect => write!(f, "Reconnect()"),
             Self::MineBlocks(v) => write!(f, "MineBlocks({v})"),
             Self::BroadcastTransaction => write!(f, "BroadcastTransaction"),
             Self::LookupShortChannelId => write!(f, "LookupShortChannelId"),
@@ -595,6 +599,7 @@ impl Operation {
             Self::SendMessage
             | Self::SendChannelReady { .. }
             | Self::RecvChannelReady
+            | Self::Reconnect
             | Self::MineBlocks(_)
             | Self::BroadcastTransaction => None,
             Self::SendOpenChannel => Some(VariableType::SentOpenChannel),
@@ -626,6 +631,7 @@ impl Operation {
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadChainHashFromContext
             | Self::RecvChannelReady
+            | Self::Reconnect
             | Self::MineBlocks(_) => vec![],
 
             Self::DerivePoint => vec![VariableType::PrivateKey],
@@ -763,6 +769,7 @@ impl Operation {
             | Self::SendShutdown
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
+            | Self::Reconnect
             | Self::MineBlocks(_)
             | Self::BroadcastTransaction
             | Self::LookupShortChannelId => vec![],
@@ -812,6 +819,7 @@ impl Operation {
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
+            | Self::Reconnect
             | Self::MineBlocks(_)
             | Self::BroadcastTransaction => true,
         }
@@ -858,14 +866,16 @@ impl Operation {
             // contents change as transactions are created and broadcast.
             // `SendFundingCreated` builds its message from the recorded
             // negotiation and channel state. The `Recv` operations read
-            // whatever the target sends us. `MineBlocks` also mines whatever
-            // the private mempool holds, `BroadcastTransaction` dedups against
-            // it, and `LookupShortChannelId` reads chain state.
+            // whatever the target sends us. `Reconnect` re-establishes the
+            // connection and depends on live transport state. `MineBlocks` also
+            // mines whatever the private mempool holds, `BroadcastTransaction`
+            // dedups against it, and `LookupShortChannelId` reads chain state.
             Self::CreateFundingTransaction
             | Self::SendFundingCreated
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
+            | Self::Reconnect
             | Self::MineBlocks(_)
             | Self::BroadcastTransaction
             | Self::LookupShortChannelId => false,
@@ -919,6 +929,7 @@ impl Operation {
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
+            | Self::Reconnect
             | Self::BroadcastTransaction
             | Self::LookupShortChannelId => false,
         }

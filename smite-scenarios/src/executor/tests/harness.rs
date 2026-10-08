@@ -41,6 +41,10 @@ impl Connection for MockConnection {
     fn read_timeout(&self) -> Result<Option<Duration>, ConnectionError> {
         Ok(None)
     }
+
+    fn reconnect(&mut self) -> Result<(), ConnectionError> {
+        Ok(())
+    }
 }
 
 // Mocking BitcoinCli via MockBitcoinCli
@@ -203,6 +207,11 @@ impl Fixture {
     /// Returns every channel state the executor recorded.
     pub fn channel_states(&self) -> &HashMap<ChannelId, ChannelState> {
         &self.executor.channel_states
+    }
+
+    /// Returns every negotiation the executor recorded.
+    pub fn negotiations(&self) -> &HashMap<TemporaryChannelId, PendingChannel> {
+        &self.executor.negotiations
     }
 
     /// Returns the mock bitcoind the executor drives.
@@ -504,6 +513,6 @@ pub fn sample_funding_negotiation() -> PendingChannel {
             first_per_commitment_point: acceptor_pk,
             tlvs: AcceptChannelTlvs::default(),
         }),
-        funding_built: false,
+        funded_channel_id: None,
     }
 }

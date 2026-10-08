@@ -54,7 +54,7 @@ impl Oracle<AcceptChannelContext<'_>> for AcceptChannelOracle {
         let Some(PendingChannel {
             open_channel,
             accept_channel: previous_accept_channel,
-            funding_built,
+            funded_channel_id,
         }) = context.negotiation
         else {
             return Err(Violation::InvalidAcceptChannel(
@@ -86,7 +86,7 @@ impl Oracle<AcceptChannelContext<'_>> for AcceptChannelOracle {
         }
 
         // Check that the `temporary_channel_id` was not reused.
-        if previous_accept_channel.is_some() && !funding_built {
+        if previous_accept_channel.is_some() && funded_channel_id.is_none() {
             return Err(Violation::InvalidAcceptChannel(
                 context.accept_channel.temporary_channel_id,
                 "temporary_channel_id reuse: previous negotiation has not reached funding_created"
@@ -444,7 +444,9 @@ fn max_accepted_htlcs_limit(channel_type: &Features) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bolt::{AcceptChannelTlvs, CHAIN_HASH_SIZE, OpenChannelTlvs, TemporaryChannelId};
+    use crate::bolt::{
+        AcceptChannelTlvs, CHAIN_HASH_SIZE, ChannelId, OpenChannelTlvs, TemporaryChannelId,
+    };
     use bitcoin::hashes::Hash;
     use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
     use bitcoin::{PubkeyHash, ScriptBuf, WPubkeyHash};
@@ -513,7 +515,7 @@ mod tests {
         PendingChannel {
             open_channel: oc,
             accept_channel: None,
-            funding_built: false,
+            funded_channel_id: None,
         }
     }
 
@@ -1238,7 +1240,7 @@ mod tests {
     fn temporary_channel_id_reuse_after_funding_created() {
         let mut negotiation = pending_negotiation(open_channel());
         negotiation.accept_channel = Some(accept_channel());
-        negotiation.funding_built = true;
+        negotiation.funded_channel_id = Some(ChannelId::ALL);
 
         assert_pass(
             &accept_channel(),

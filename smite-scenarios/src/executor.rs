@@ -9,9 +9,9 @@ use bitcoin::{OutPoint, ScriptBuf, Txid};
 use smite::bitcoin::{BitcoinCli, TxBlockPosition, Utxo};
 use smite::bolt::{
     AcceptChannel, AnnouncementSignatures, ChannelAnnouncement, ChannelId, ChannelReady,
-    ChannelReadyTlvs, ChannelUpdate, Features, FromMessage, FundingCreated, FundingSigned, Message,
-    MessageType, NodeAnnouncement, OpenChannel, OpenChannelTlvs, Pong, ShortChannelId, Shutdown,
-    TemporaryChannelId,
+    ChannelReadyTlvs, ChannelUpdate, Features, FromMessage, FundingCreated, FundingSigned, Init,
+    InitTlvs, Message, MessageType, NodeAnnouncement, OpenChannel, OpenChannelTlvs, Pong,
+    ShortChannelId, Shutdown, TemporaryChannelId,
 };
 use smite::channel_tx::{
     ChannelConfig, ChannelPartyConfig, ChannelState, FundingTransaction, HolderIdentity, Side,
@@ -175,6 +175,14 @@ pub trait Connection {
     ///
     /// Returns an error if the timeout cannot be read.
     fn read_timeout(&self) -> Result<Option<Duration>, ConnectionError>;
+
+    /// Reconnects to the same remote Lightning node, establishing a new TCP
+    /// connection and performing the Noise handshake.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the reconnect fails.
+    fn reconnect(&mut self) -> Result<(), ConnectionError>;
 }
 
 impl Connection for NoiseConnection {
@@ -192,6 +200,10 @@ impl Connection for NoiseConnection {
 
     fn read_timeout(&self) -> Result<Option<Duration>, ConnectionError> {
         NoiseConnection::read_timeout(self)
+    }
+
+    fn reconnect(&mut self) -> Result<(), ConnectionError> {
+        NoiseConnection::reconnect(self)
     }
 }
 
@@ -538,6 +550,21 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     None
                 }
 
+                Operation::Reconnect => {
+                    log::debug!("[{:?}] Reconnect: re-dialing", start.elapsed());
+                    self.conn.reconnect()?;
+                    recv_bolt::<Init>(&mut self.conn, RECV_IDLE_TIMEOUT)?;
+                    let our_init = build_init(
+                        &mut self.channel_states,
+                        &mut self.negotiations,
+                        &self.context.negotiated_features,
+                    );
+                    let encoded = Message::Init(our_init.clone()).encode();
+                    self.conn.send_message(&encoded)?;
+                    log::debug!("[{:?}] Reconnect: init exchanged", start.elapsed());
+                    None
+                }
+
                 Operation::MineBlocks(v) => {
                     // Clear the private mempool and mine the requested blocks,
                     // adding those transactions to the first block.
@@ -736,6 +763,50 @@ fn create_funding_transaction(
     Ok(funding)
 }
 
+/// Builds the `init` message sent on (re)connect and updates the executor's
+/// tracked state to match what the target retains across the reconnect.
+///
+/// The `init` advertises the features negotiated on the original connection so
+/// the peer retains the same view of the session. The state update then
+/// discards every negotiation and channel that had not received
+/// `funding_signed` before the reconnect: the target does not resend it, so
+/// such entries can no longer progress and the target itself has forgotten them.
+fn build_init(
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    negotiations: &mut HashMap<TemporaryChannelId, PendingChannel>,
+    negotiated_features: &Features,
+) -> Init {
+    // BOLT 2: after reconnecting, the target discards any `open_channel` for
+    // which it has not yet received `funding_created`, allowing its
+    // `temporary_channel_id` to be reused for a new negotiation.
+    //
+    // Also discard negotiations whose `funding_signed` was not received before
+    // reconnect. The target will not resend it, so retaining such a negotiation
+    // would leave its channel state unable to progress.
+    negotiations.retain(|_, pending| {
+        pending
+            .funded_channel_id
+            .and_then(|id| channel_states.get(&id))
+            .is_some_and(|state| state.funding_signed_received)
+    });
+
+    // BOLT 2: after reconnecting, the target remembers any channel for which it
+    // has already sent `funding_signed`. Preserve those channels and discard
+    // the rest, since `funding_signed` is not resent after reconnect and any
+    // buffered message from the previous connection is lost.
+    channel_states.retain(|_, state| state.funding_signed_received);
+
+    // Put all negotiated features in `features` and leave the legacy
+    // `globalfeatures` empty. Peers combine both fields with a logical OR, so
+    // this is equivalent to splitting the features across the two fields and
+    // avoids advertising features greater than 13 in `globalfeatures`.
+    Init {
+        globalfeatures: Vec::new(),
+        features: negotiated_features.clone().into_bytes(),
+        tlvs: InitTlvs::default(),
+    }
+}
+
 /// Builds an `OpenChannel` from 20 input variables (wire order).
 fn build_open_channel(variables: &[Option<Variable>], inputs: &[usize]) -> OpenChannel {
     OpenChannel {
@@ -866,7 +937,7 @@ fn build_funding_created(
     //
     // This also means that building the same message again must not clobber a
     // channel whose state has already been established (and possibly advanced).
-    if !pending.funding_built {
+    if pending.funded_channel_id.is_none() {
         let channel_id = ChannelId::v1_from_funding_outpoint(config.funding_outpoint);
 
         // Check whether the funding outpoint is valid and contains the
@@ -895,14 +966,15 @@ fn build_funding_created(
                 sent_invalid_signature,
             )
         });
-    }
 
-    // Mark this negotiation as having built `funding_created`. It is retained
-    // so repeated `funding_created` messages can still be built, but a later
-    // `open_channel` reusing this `temporary_channel_id` starts a fresh
-    // negotiation.
-    if let Some(pending) = negotiations.get_mut(&temporary_channel_id) {
-        pending.funding_built = true;
+        // Record the channel ID from the funding outpoint. Retain this
+        // negotiation so repeated `funding_created` messages can still be built,
+        // while a later `open_channel` reusing this `temporary_channel_id`
+        // starts a fresh negotiation.
+        negotiations
+            .get_mut(&temporary_channel_id)
+            .expect("temporary_channel_id already exists")
+            .funded_channel_id = Some(channel_id);
     }
 
     Ok(FundingCreated {
@@ -1216,6 +1288,11 @@ fn recv_channel_ready(
 ) -> Result<(), ExecuteError> {
     let cr: ChannelReady = recv_bolt(conn, RECV_CHANNEL_READY_TIMEOUT)?;
 
+    // FIXME: If the target sent `funding_signed` before reconnecting but we did
+    // not receive it, it may send `channel_ready` once the funding transaction
+    // reaches minimum depth. We would then flag it as an unknown channel. Check
+    // whether the channel maps to a funding transaction we broadcast that is in
+    // `mined_txids`, and discard the `channel_ready` in that case.
     let state = channel_states
         .get_mut(&cr.channel_id)
         .ok_or(Violation::UnknownChannel(cr.channel_id))?;
@@ -1260,7 +1337,7 @@ fn record_send_open_channel(
 ) {
     if negotiations
         .get(&open_channel.temporary_channel_id)
-        .is_some_and(|pending| !pending.funding_built)
+        .is_some_and(|pending| pending.funded_channel_id.is_none())
     {
         return;
     }
@@ -1270,7 +1347,7 @@ fn record_send_open_channel(
         PendingChannel {
             open_channel: open_channel.clone(),
             accept_channel: None,
-            funding_built: false,
+            funded_channel_id: None,
         },
     );
 }
