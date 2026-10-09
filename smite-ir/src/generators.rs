@@ -22,6 +22,7 @@ pub use node_announcement::NodeAnnouncementGenerator;
 pub use open_channel::OpenChannelGenerator;
 
 use rand::Rng;
+use rand::seq::IndexedRandom;
 
 use super::builder::ProgramBuilder;
 
@@ -55,6 +56,32 @@ impl AnyGenerator {
         Self::ChannelReady(ChannelReadyGenerator),
         Self::FundingFlow(FundingFlowGenerator),
     ];
+
+    /// Relative pick weight for [`Self::choose`]; 0 disables.
+    #[must_use]
+    pub fn weight(&self) -> u32 {
+        match self {
+            Self::ChannelAnnouncement(_)
+            | Self::ChannelUpdate(_)
+            | Self::NodeAnnouncement(_)
+            | Self::OpenChannel(_)
+            | Self::FundingCreated(_)
+            | Self::ChannelReady(_)
+            | Self::FundingFlow(_) => 10,
+        }
+    }
+
+    /// Picks a generator from `ALL` with probability proportional to its
+    /// [`Self::weight`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if every generator has a weight of zero.
+    pub fn choose(rng: &mut impl Rng) -> Self {
+        *Self::ALL
+            .choose_weighted(rng, Self::weight)
+            .expect("at least one generator must have non-zero weight")
+    }
 }
 
 impl Generator for AnyGenerator {
