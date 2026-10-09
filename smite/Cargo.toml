@@ -35,3 +35,4 @@ hex = "0.4"
 [dev-dependencies]
 tempfile = "3"
 bitcoin = { workspace = true, features = ["serde"] }
+hex = { version = "0.4", features = ["serde"] }

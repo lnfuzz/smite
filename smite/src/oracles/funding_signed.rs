@@ -65,6 +65,7 @@ impl Oracle<FundingSignedContext<'_>> for FundingSignedOracle {
             &channel.commitments,
             &channel.holder,
             &context.funding_signed.signature,
+            &[],
         ) {
             return Err(Violation::InvalidFundingSigned(
                 context.funding_signed.channel_id,
@@ -95,6 +96,7 @@ mod tests {
 
     /// Valid channel state for testing.
     fn channel_state() -> ChannelState {
+        let skey1 = secret_key(1);
         let pkey1 = pubkey(1);
         let pkey2 = pubkey(2);
 
@@ -112,6 +114,7 @@ mod tests {
                 payment_basepoint: pkey1,
                 revocation_basepoint: pkey1,
                 delayed_payment_basepoint: pkey1,
+                htlc_basepoint: pkey1,
                 dust_limit_satoshis: 546,
                 to_self_delay: 144,
             },
@@ -120,6 +123,7 @@ mod tests {
                 payment_basepoint: pkey2,
                 revocation_basepoint: pkey2,
                 delayed_payment_basepoint: pkey2,
+                htlc_basepoint: pkey2,
                 dust_limit_satoshis: 546,
                 to_self_delay: 144,
             },
@@ -130,7 +134,8 @@ mod tests {
             .expect("valid initial commitments");
         let holder = HolderIdentity {
             side: Side::Opener,
-            funding_privkey: secret_key(1),
+            funding_privkey: skey1,
+            htlc_basepoint_privkey: skey1,
         };
 
         ChannelState::new(config, holder, commitments, true, false, false)
@@ -138,15 +143,18 @@ mod tests {
 
     /// Valid `funding_signed` message for testing.
     fn funding_signed(channel: &ChannelState) -> FundingSigned {
+        let skey2 = secret_key(2);
         let acceptor = HolderIdentity {
             side: Side::Acceptor,
-            funding_privkey: secret_key(2),
+            funding_privkey: skey2,
+            htlc_basepoint_privkey: skey2,
         };
         FundingSigned {
             channel_id: ChannelId::v1_from_funding_outpoint(channel.config.funding_outpoint),
             signature: channel
                 .config
-                .sign_counterparty_commitment(&channel.commitments, &acceptor),
+                .sign_counterparty_commitment(&channel.commitments, &acceptor)
+                .0,
         }
     }
 

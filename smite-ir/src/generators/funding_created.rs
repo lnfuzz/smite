@@ -20,6 +20,7 @@ impl Generator for FundingCreatedGenerator {
     fn generate(&self, builder: &mut ProgramBuilder, rng: &mut impl Rng) {
         // Funding and commitment transaction keys and parameters.
         let opener_funding_privkey = builder.pick_variable(VariableType::PrivateKey, rng);
+        let opener_htlc_basepoint_privkey = builder.pick_variable(VariableType::PrivateKey, rng);
         let opener_funding_pubkey =
             builder.append(Operation::DerivePoint, &[opener_funding_privkey]);
         let acceptor_funding_pubkey = builder.pick_variable(VariableType::Point, rng);
@@ -44,6 +45,7 @@ impl Generator for FundingCreatedGenerator {
             &[
                 funding_transaction,
                 opener_funding_privkey,
+                opener_htlc_basepoint_privkey,
                 temporary_channel_id,
             ],
         );

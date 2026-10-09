@@ -404,6 +404,18 @@ pub fn acceptor_funding_sk() -> SecretKey {
         .expect("valid secret key")
 }
 
+/// The opener's htlc basepoint key for the funding flow.
+pub fn opener_htlc_basepoint_sk() -> SecretKey {
+    SecretKey::from_str("1111111111111111111111111111111111111111111111111111111111111111")
+        .expect("valid secret key")
+}
+
+/// The acceptor's htlc basepoint key for the funding flow.
+pub fn acceptor_htlc_basepoint_sk() -> SecretKey {
+    SecretKey::from_str("4444444444444444444444444444444444444444444444444444444444444444")
+        .expect("valid secret key")
+}
+
 /// The outpoint of the funding transaction the funding-flow programs build.
 pub fn funding_outpoint() -> OutPoint {
     OutPoint {
