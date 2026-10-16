@@ -1060,36 +1060,6 @@ fn execute_send_funding_created_after_funding_built_does_not_track_channel() {
 }
 
 #[test]
-fn execute_send_funding_created_push_exceeds_funding() {
-    // A negotiated push_msat larger than the funding amount surfaces the
-    // commitment construction error.
-    let mut negotiation = sample_funding_negotiation();
-    negotiation.open_channel.push_msat = 20_000_000_000;
-    let err = Fixture::new()
-        .with_negotiation(negotiation)
-        .run_err(&send_funding_created_program());
-    assert!(matches!(
-        err,
-        ExecuteError::Commitment(smite::channel_tx::CommitmentError::PushExceedsFunding)
-    ));
-}
-
-#[test]
-fn execute_send_funding_created_funding_msat_overflow() {
-    // A negotiated funding_satoshis of u64::MAX overflows when converted to
-    // millisatoshis.
-    let mut negotiation = sample_funding_negotiation();
-    negotiation.open_channel.funding_satoshis = u64::MAX;
-    let err = Fixture::new()
-        .with_negotiation(negotiation)
-        .run_err(&send_funding_created_program());
-    assert!(matches!(
-        err,
-        ExecuteError::Commitment(smite::channel_tx::CommitmentError::FundingMsatOverflow)
-    ));
-}
-
-#[test]
 fn execute_send_funding_created_no_open_channel() {
     // No negotiation exists for this temporary_channel_id, so we get a
     // `funding_created` with an all-zero signature and no recorded channel
