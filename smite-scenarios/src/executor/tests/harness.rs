@@ -467,11 +467,11 @@ pub fn channel_ready_reply(second_per_commitment_point: PublicKey) -> Message {
     })
 }
 
-/// A fixture with the funding negotiation seeded and the target's
-/// `funding_signed` queued, as the funding-flow instructions expect.
+/// A fixture with the target's `accept_channel` and `funding_signed` for the
+/// funding flow queued.
 pub fn recv_funding_signed_fixture() -> Fixture {
     Fixture::new()
-        .with_negotiation(sample_funding_negotiation())
+        .queue(&Message::AcceptChannel(funded_accept_channel()))
         .queue(&funding_signed_reply(funding_channel_id()))
 }
 

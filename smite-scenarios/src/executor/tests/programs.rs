@@ -270,8 +270,8 @@ pub fn send_funding_created(b: &mut ProgramBuilder) -> SentFundingCreated {
 /// `signing_privkey`.
 ///
 /// The `temporary_channel_id` is [`TEMPORARY_CHANNEL_ID`], the one
-/// `announced_open_channel` and `sample_funding_negotiation` use, so that the
-/// executor finds the negotiation whose commitment it must sign.
+/// `announced_open_channel` and `funded_open_channel` use, so that the executor
+/// finds the negotiation whose commitment it must sign.
 pub fn send_funding_created_with(
     b: &mut ProgramBuilder,
     tx: FundingTxVars,
@@ -298,22 +298,42 @@ pub fn send_funding_created_program() -> Program {
     b.build()
 }
 
-/// A program that sends `funding_created` and receives the peer's
-/// `funding_signed`.
-pub fn send_funding_created_and_recv_funding_signed_program() -> Program {
+/// The variables a funded channel produces.
+#[derive(Clone, Copy)]
+pub struct FundedChannel {
+    pub negotiated: NegotiatedChannel,
+    pub funding_created: SentFundingCreated,
+    /// The funded channel's ID from `RecvFundingSigned`.
+    pub channel_id: usize,
+}
+
+/// Negotiates [`funded_open_channel`], sends `funding_created` and receives the
+/// peer's `funding_signed`.
+pub fn fund_channel(b: &mut ProgramBuilder) -> FundedChannel {
+    let negotiated = negotiate_channel(b, &funded_open_channel());
+    let funding_created = send_funding_created(b);
+    let channel_id = b.append(Operation::RecvFundingSigned, &[funding_created.sent]);
+
+    FundedChannel {
+        negotiated,
+        funding_created,
+        channel_id,
+    }
+}
+
+/// A program that funds a channel.
+pub fn fund_channel_program() -> Program {
     let mut b = ProgramBuilder::new();
-    let funding_created = send_funding_created(&mut b);
-    b.append(Operation::RecvFundingSigned, &[funding_created.sent]);
+    fund_channel(&mut b);
 
     b.build()
 }
 
-/// A program that sends `funding_created`, receives `funding_signed`, mines
-/// `confirmations` blocks, and receives the target's `channel_ready`.
+/// A program that funds a channel, mines `confirmations` blocks, and receives
+/// the target's `channel_ready`.
 pub fn recv_channel_ready_program(confirmations: u8) -> Program {
     let mut b = ProgramBuilder::new();
-    let funding_created = send_funding_created(&mut b);
-    b.append(Operation::RecvFundingSigned, &[funding_created.sent]);
+    fund_channel(&mut b);
     b.append(Operation::MineBlocks(confirmations), &[]);
     b.append(Operation::RecvChannelReady, &[]);
 
