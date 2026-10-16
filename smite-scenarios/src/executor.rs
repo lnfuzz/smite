@@ -819,7 +819,7 @@ fn build_open_channel(variables: &[Option<Variable>], inputs: &[usize]) -> OpenC
     }
 }
 
-/// Builds a `funding_created` message from 3 input variables.
+/// Builds a `funding_created` message from 4 input variables.
 ///
 /// Channel parameters are read from the negotiated `open_channel` and
 /// `accept_channel` messages recorded in `negotiations`, ensuring the
@@ -828,6 +828,7 @@ fn build_open_channel(variables: &[Option<Variable>], inputs: &[usize]) -> OpenC
 ///
 /// If the negotiation for `temporary_channel_id` is incomplete, emits a
 /// `funding_created` with the derived outpoint and an all-zero signature.
+#[allow(clippy::too_many_lines)]
 fn build_funding_created(
     variables: &[Option<Variable>],
     inputs: &[usize],
@@ -837,7 +838,8 @@ fn build_funding_created(
 ) -> Result<FundingCreated, ExecuteError> {
     let funding_tx = resolve_funding_transaction(variables, inputs[0]);
     let opener_funding_privkey_bytes = resolve_private_key(variables, inputs[1]);
-    let temporary_channel_id = resolve_channel_id(variables, inputs[2]);
+    let opener_htlc_basepoint_privkey_bytes = resolve_private_key(variables, inputs[2]);
+    let temporary_channel_id = resolve_channel_id(variables, inputs[3]);
 
     let funding_outpoint = OutPoint {
         txid: funding_tx.tx.compute_txid(),
@@ -871,12 +873,15 @@ fn build_funding_created(
 
     let opener_funding_privkey =
         SecretKey::from_slice(&opener_funding_privkey_bytes).expect("valid private key");
+    let opener_htlc_basepoint_privkey =
+        SecretKey::from_slice(&opener_htlc_basepoint_privkey_bytes).expect("valid private key");
 
     let opener = ChannelPartyConfig {
         funding_pubkey: open_channel.funding_pubkey,
         payment_basepoint: open_channel.payment_basepoint,
         revocation_basepoint: open_channel.revocation_basepoint,
         delayed_payment_basepoint: open_channel.delayed_payment_basepoint,
+        htlc_basepoint: open_channel.htlc_basepoint,
         dust_limit_satoshis: open_channel.dust_limit_satoshis,
         to_self_delay: open_channel.to_self_delay,
     };
@@ -885,6 +890,7 @@ fn build_funding_created(
         payment_basepoint: accept_channel.payment_basepoint,
         revocation_basepoint: accept_channel.revocation_basepoint,
         delayed_payment_basepoint: accept_channel.delayed_payment_basepoint,
+        htlc_basepoint: accept_channel.htlc_basepoint,
         dust_limit_satoshis: accept_channel.dust_limit_satoshis,
         to_self_delay: accept_channel.to_self_delay,
     };
@@ -906,8 +912,10 @@ fn build_funding_created(
     let holder = HolderIdentity {
         side: Side::Opener,
         funding_privkey: opener_funding_privkey,
+        htlc_basepoint_privkey: opener_htlc_basepoint_privkey,
     };
-    let signature = config.sign_counterparty_commitment(&commitments, &holder);
+    let (signature, htlc_signatures) = config.sign_counterparty_commitment(&commitments, &holder);
+    assert_eq!(htlc_signatures, Vec::<Signature>::new()); // There are no HTLCs in the initial commitment transaction.
 
     // Only track a new channel when this negotiation has not built a
     // `funding_created` yet. If it has, we are likely resending one for the

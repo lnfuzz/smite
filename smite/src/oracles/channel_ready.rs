@@ -171,6 +171,7 @@ mod tests {
             payment_basepoint: key,
             revocation_basepoint: key,
             delayed_payment_basepoint: key,
+            htlc_basepoint: key,
             dust_limit_satoshis: 546,
             to_self_delay: 144,
         };
@@ -189,6 +190,7 @@ mod tests {
         let holder = HolderIdentity {
             side: Side::Opener,
             funding_privkey: secret_key(1),
+            htlc_basepoint_privkey: secret_key(1),
         };
 
         ChannelState::new(config, holder, commitments, true, false, false)

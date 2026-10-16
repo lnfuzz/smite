@@ -7,7 +7,10 @@
 //! `raw_program` is an exception and doesn't use [`ProgramBuilder`] since its
 //! purpose is to create malformed program.
 
-use super::harness::{PointSource, SampleOpenChannel, acceptor_funding_sk, opener_funding_sk};
+use super::harness::{
+    PointSource, SampleOpenChannel, acceptor_funding_sk, opener_funding_sk,
+    opener_htlc_basepoint_sk,
+};
 use crate::executor::*;
 use smite_ir::Instruction;
 use smite_ir::builder::ProgramBuilder;
@@ -248,6 +251,7 @@ pub fn create_funding_tx_with(
 #[derive(Clone, Copy)]
 pub struct SentFundingCreated {
     pub tx: FundingTxVars,
+    pub htlc_basepoint_privkey: usize,
     pub temporary_channel_id: usize,
     /// The `SendFundingCreated` result, an affine variable a single
     /// `RecvFundingSigned` may consume.
@@ -274,14 +278,24 @@ pub fn send_funding_created_with(
     tx: FundingTxVars,
     signing_privkey: usize,
 ) -> SentFundingCreated {
+    let htlc_basepoint_privkey = b.append(
+        Operation::LoadPrivateKey(opener_htlc_basepoint_sk().secret_bytes()),
+        &[],
+    );
     let temporary_channel_id = b.append(Operation::LoadChannelId([0xbb; 32]), &[]);
     let sent = b.append(
         Operation::SendFundingCreated,
-        &[tx.tx, signing_privkey, temporary_channel_id],
+        &[
+            tx.tx,
+            signing_privkey,
+            htlc_basepoint_privkey,
+            temporary_channel_id,
+        ],
     );
 
     SentFundingCreated {
         tx,
+        htlc_basepoint_privkey,
         temporary_channel_id,
         sent,
     }
