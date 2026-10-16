@@ -170,14 +170,6 @@ impl Fixture {
         self
     }
 
-    /// Records `pending` as the negotiation for its `temporary_channel_id`.
-    pub fn with_negotiation(mut self, pending: PendingChannel) -> Self {
-        self.executor
-            .negotiations
-            .insert(pending.open_channel.temporary_channel_id, pending);
-        self
-    }
-
     /// Queues `msg` as the peer's next reply.
     pub fn queue(mut self, msg: &Message) -> Self {
         self.executor.conn.recv_queue.push_back(msg.encode());
@@ -525,50 +517,45 @@ pub fn funded_accept_channel() -> AcceptChannel {
     }
 }
 
-/// The negotiation of [`funded_open_channel`] and [`funded_accept_channel`].
-pub fn sample_funding_negotiation() -> PendingChannel {
-    PendingChannel {
-        open_channel: funded_open_channel().message,
-        accept_channel: Some(funded_accept_channel()),
-        funding_built: false,
+/// A [`funded_open_channel`] with a different `temporary_channel_id`, so that
+/// it negotiates a second channel.
+pub fn second_funded_open_channel() -> SampleOpenChannel {
+    let mut oc = funded_open_channel();
+    oc.message.temporary_channel_id = SECOND_TEMPORARY_CHANNEL_ID;
+    oc
+}
+
+/// The target's `accept_channel` for [`second_funded_open_channel`].
+pub fn second_funded_accept_channel() -> AcceptChannel {
+    AcceptChannel {
+        temporary_channel_id: SECOND_TEMPORARY_CHANNEL_ID,
+        // `AcceptChannelOracle` rejects a per-commitment point reused from
+        // another channel.
+        first_per_commitment_point: sample_pubkey(12),
+        ..funded_accept_channel()
     }
 }
 
-/// A [`sample_funding_negotiation`] with a different `temporary_channel_id` and
-/// funding amount, so that it funds a different channel.
-pub fn second_funding_negotiation() -> PendingChannel {
-    let mut negotiation = sample_funding_negotiation();
-    negotiation.open_channel.temporary_channel_id = SECOND_TEMPORARY_CHANNEL_ID;
-    negotiation.open_channel.funding_satoshis = 20_000_000;
-    negotiation
-        .accept_channel
-        .as_mut()
-        .expect("accept_channel present")
-        .temporary_channel_id = SECOND_TEMPORARY_CHANNEL_ID;
-
-    negotiation
-}
-
-/// The channel id [`second_funding_negotiation`]'s funding transaction
-/// produces.
+/// The channel id the second channel's funding transaction produces, funded
+/// from the second UTXO of [`two_funding_negotiations_fixture`].
 pub fn second_funding_channel_id() -> ChannelId {
     ChannelId::v1_from_funding_outpoint(OutPoint {
-        txid: "cb6f11974ce6265f81037dc7c0e3f054462f645361bc1e10c208f132f4acbe8d"
+        txid: "4babf25e65e63224c937fb3b8a31a813d91936bf5c3c5cd7fd1e83986ddc90ee"
             .parse()
             .expect("valid txid"),
         vout: 0,
     })
 }
 
-/// A fixture with both [`sample_funding_negotiation`] and
-/// [`second_funding_negotiation`] seeded, and a UTXO to fund each.
+/// A fixture with the target's `accept_channel` for both
+/// [`funded_open_channel`] and [`second_funded_open_channel`] queued, and a
+/// UTXO to fund each.
 pub fn two_funding_negotiations_fixture() -> Fixture {
     let mut second_utxo = sample_utxo();
-    second_utxo.amount = Amount::from_sat(20_010_000);
     second_utxo.outpoint.vout = 1;
 
     Fixture::new()
         .with_utxos(vec![sample_utxo(), second_utxo])
-        .with_negotiation(sample_funding_negotiation())
-        .with_negotiation(second_funding_negotiation())
+        .queue(&Message::AcceptChannel(funded_accept_channel()))
+        .queue(&Message::AcceptChannel(second_funded_accept_channel()))
 }

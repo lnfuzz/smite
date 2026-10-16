@@ -9,7 +9,7 @@
 
 use super::harness::{
     PointSource, SampleOpenChannel, TEMPORARY_CHANNEL_ID, acceptor_funding_sk, funded_open_channel,
-    opener_funding_sk, second_funding_negotiation,
+    opener_funding_sk, second_funded_open_channel,
 };
 use crate::executor::*;
 use smite_ir::Instruction;
@@ -340,17 +340,26 @@ pub fn recv_channel_ready_program(confirmations: u8) -> Program {
     b.build()
 }
 
-/// A program that sends `funding_created` for both negotiations of
-/// `two_funding_negotiations_fixture` without awaiting `funding_signed`, mines
-/// to their `minimum_depth`, and receives a `channel_ready` for each.
+/// A program that negotiates [`funded_open_channel`] and
+/// [`second_funded_open_channel`], sends `funding_created` for both without
+/// awaiting `funding_signed`, mines to their `minimum_depth`, and receives a
+/// `channel_ready` for each.
 pub fn recv_two_channel_ready_program() -> Program {
-    let second = second_funding_negotiation().open_channel;
+    let second = second_funded_open_channel();
 
     let mut b = ProgramBuilder::new();
+    negotiate_channel(&mut b, &funded_open_channel());
+    negotiate_channel(&mut b, &second);
     send_funding_created(&mut b);
-    let tx = create_funding_tx_with(&mut b, second.funding_satoshis, FUNDING_FEERATE_PER_KW);
-    let temporary_channel_id =
-        b.append(Operation::LoadChannelId(second.temporary_channel_id.0), &[]);
+    let tx = create_funding_tx_with(
+        &mut b,
+        second.message.funding_satoshis,
+        FUNDING_FEERATE_PER_KW,
+    );
+    let temporary_channel_id = b.append(
+        Operation::LoadChannelId(second.message.temporary_channel_id.0),
+        &[],
+    );
     b.append(
         Operation::SendFundingCreated,
         &[tx.tx, tx.opener_privkey, temporary_channel_id],
