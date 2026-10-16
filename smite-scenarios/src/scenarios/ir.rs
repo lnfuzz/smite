@@ -99,12 +99,6 @@ impl<T: Target, S: SnapshotSetup<T>> Scenario for IrScenario<T, S> {
                 // the available UTXOs can't cover. Not a bug in the target.
                 log::debug!("[{:?}] insufficient funds: {e}", start.elapsed());
             }
-            Err(ExecuteError::Commitment(e)) => {
-                // The mutator generated a funding amount/push_msat combination
-                // that can't form a valid initial commitment transaction. Not a
-                // bug in the target.
-                log::debug!("[{:?}] invalid commitment: {e}", start.elapsed());
-            }
             Err(ExecuteError::Violation(v)) => {
                 let violation = v.to_string();
                 if T::is_violation_known(&violation) {

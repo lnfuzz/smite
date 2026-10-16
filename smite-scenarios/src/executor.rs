@@ -226,10 +226,6 @@ pub enum ExecuteError {
     #[error("funding: {0}")]
     InsufficientFunds(#[from] smite::channel_tx::InsufficientFunds),
 
-    /// Failed to construct the initial commitment state.
-    #[error("commitment: {0}")]
-    Commitment(#[from] smite::channel_tx::CommitmentError),
-
     /// The target broke a protocol invariant. Surfaced to the scenario as a
     /// failure; see [`Violation`] for the full catalog of target-bug findings.
     #[error(transparent)]
@@ -479,7 +475,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         &mut self.channel_states,
                         &mut self.negotiations,
                         &self.mined_txids,
-                    )?;
+                    );
                     let encoded = Message::FundingCreated(fc).encode();
                     log::debug!(
                         "[{:?}] SendFundingCreated: {} bytes",
@@ -828,13 +824,20 @@ fn build_open_channel(variables: &[Option<Variable>], inputs: &[usize]) -> OpenC
 ///
 /// If the negotiation for `temporary_channel_id` is incomplete, emits a
 /// `funding_created` with the derived outpoint and an all-zero signature.
+///
+/// # Panics
+///
+/// Panics if the negotiated parameters cannot form the initial commitments.
+/// This should be unreachable: the commitments are only built once the
+/// negotiation has an `accept_channel`, which is only recorded after
+/// `AcceptChannelOracle` has validated the `open_channel` parameters.
 fn build_funding_created(
     variables: &[Option<Variable>],
     inputs: &[usize],
     channel_states: &mut HashMap<ChannelId, ChannelState>,
     negotiations: &mut HashMap<TemporaryChannelId, PendingChannel>,
     mined_txids: &HashSet<Txid>,
-) -> Result<FundingCreated, ExecuteError> {
+) -> FundingCreated {
     let funding_tx = resolve_funding_transaction(variables, inputs[0]);
     let opener_funding_privkey_bytes = resolve_private_key(variables, inputs[1]);
     let temporary_channel_id = resolve_channel_id(variables, inputs[2]);
@@ -850,23 +853,23 @@ fn build_funding_created(
     // we cannot build the commitment to sign, so fall back to an unsigned
     // `funding_created` and leave `channel_states` untouched.
     let Some(pending) = negotiations.get(&temporary_channel_id) else {
-        return Ok(FundingCreated {
+        return FundingCreated {
             temporary_channel_id,
             funding_txid: funding_outpoint.txid,
             funding_output_index,
             signature: Signature::from_compact(&[0u8; 64])
                 .expect("zero bytes parse as a signature"),
-        });
+        };
     };
     let open_channel = &pending.open_channel;
     let Some(accept_channel) = pending.accept_channel.as_ref() else {
-        return Ok(FundingCreated {
+        return FundingCreated {
             temporary_channel_id,
             funding_txid: funding_outpoint.txid,
             funding_output_index,
             signature: Signature::from_compact(&[0u8; 64])
                 .expect("zero bytes parse as a signature"),
-        });
+        };
     };
 
     let opener_funding_privkey =
@@ -897,12 +900,14 @@ fn build_funding_created(
         minimum_depth: accept_channel.minimum_depth,
     };
 
-    let commitments = config.new_initial_commitments(
-        open_channel.push_msat,
-        open_channel.feerate_per_kw,
-        open_channel.first_per_commitment_point,
-        accept_channel.first_per_commitment_point,
-    )?;
+    let commitments = config
+        .new_initial_commitments(
+            open_channel.push_msat,
+            open_channel.feerate_per_kw,
+            open_channel.first_per_commitment_point,
+            accept_channel.first_per_commitment_point,
+        )
+        .expect("valid initial commitment amounts");
     let holder = HolderIdentity {
         side: Side::Opener,
         funding_privkey: opener_funding_privkey,
@@ -956,12 +961,12 @@ fn build_funding_created(
         pending.funding_built = true;
     }
 
-    Ok(FundingCreated {
+    FundingCreated {
         temporary_channel_id,
         funding_txid: funding_outpoint.txid,
         funding_output_index,
         signature,
-    })
+    }
 }
 
 /// Builds a `ChannelReady` from 3 input variables (wire order).
