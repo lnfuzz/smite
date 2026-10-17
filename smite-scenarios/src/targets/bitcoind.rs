@@ -10,8 +10,19 @@ use smite::process::ManagedProcess;
 
 use super::TargetError;
 
-/// Number of blocks to generate at startup for coinbase maturity.
-pub const INITIAL_BLOCKS: u64 = 101;
+/// Blocks a coinbase output must be buried under before the wallet spends it.
+const COINBASE_MATURITY: u64 = 100;
+
+/// Mature coinbase outputs the wallet holds after startup.
+///
+/// Funding a transaction locks the coins it selects, so a program that funds
+/// several transactions needs several coins, and mining them here means it
+/// never has to mine blocks during execution to get them.
+const SPENDABLE_UTXOS: u64 = 16;
+
+/// Number of blocks to generate at startup, each paying its coinbase to the
+/// wallet.
+pub const INITIAL_BLOCKS: u64 = COINBASE_MATURITY + SPENDABLE_UTXOS;
 
 /// Bitcoind configuration.
 pub struct BitcoindConfig {
