@@ -285,6 +285,7 @@ pub fn sample_context() -> ProgramContext {
             Features::OPTION_STATIC_REMOTEKEY,
             Features::OPTION_ANCHORS,
         ]),
+        local_node_secret: SecretKey::from_slice(&[0xee; 32]).unwrap(),
     }
 }
 

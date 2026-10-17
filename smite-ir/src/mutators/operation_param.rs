@@ -111,6 +111,7 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         | Operation::CreateFundingTransaction
         | Operation::LoadTargetPubkeyFromContext
         | Operation::LoadChainHashFromContext
+        | Operation::LoadLocalNodeSecretFromContext
         | Operation::BuildOpenChannel
         | Operation::BuildChannelAnnouncement
         | Operation::BuildChannelUpdate
