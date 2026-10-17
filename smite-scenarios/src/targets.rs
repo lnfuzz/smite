@@ -6,7 +6,7 @@ mod eclair;
 mod ldk;
 mod lnd;
 
-pub use bitcoind::INITIAL_BLOCKS;
+pub use bitcoind::FUNDED_HEIGHT;
 pub use cln::{ClnConfig, ClnRpc, ClnTarget};
 pub use eclair::{EclairConfig, EclairRpc, EclairTarget};
 pub use ldk::{LdkConfig, LdkRpc, LdkTarget};

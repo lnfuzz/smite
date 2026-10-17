@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use bitcoin::secp256k1;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use smite::bitcoin::BitcoinCli;
 use smite::process::ManagedProcess;
 
@@ -85,12 +86,11 @@ impl LndTarget {
     /// identity pubkey.
     fn start_lnd(
         config: &LndConfig,
-        data_dir: &Path,
+        lnd_dir: &Path,
     ) -> Result<(ManagedProcess, secp256k1::PublicKey), TargetError> {
         log::info!("Starting lnd...");
 
-        let lnd_dir = data_dir.join("lnd");
-        fs::create_dir_all(&lnd_dir)?;
+        fs::create_dir_all(lnd_dir)?;
 
         let mut cmd = Command::new("lnd");
         cmd.arg("--noseedbackup")
@@ -136,7 +136,7 @@ impl LndTarget {
             if !lnd.is_running() {
                 return Err(TargetError::StartFailed("lnd exited during startup".into()));
             }
-            if let Ok((pubkey, blockheight, synced_to_chain)) = Self::query_info(config, &lnd_dir) {
+            if let Ok((pubkey, blockheight, synced_to_chain)) = Self::query_info(config, lnd_dir) {
                 if blockheight >= bitcoind::INITIAL_BLOCKS && synced_to_chain {
                     log::info!("lnd synced (blockheight={blockheight})");
                     return Ok((lnd, pubkey));
@@ -163,22 +163,7 @@ impl LndTarget {
             synced_to_chain: bool,
         }
 
-        let output = Command::new("lncli")
-            .arg(format!("--lnddir={}", lnd_dir.display()))
-            .arg(format!("--rpcserver=127.0.0.1:{}", config.lnd_rpc_port))
-            .arg("--network=regtest")
-            .arg("getinfo")
-            .output()?;
-
-        if !output.status.success() {
-            return Err(TargetError::StartFailed(format!(
-                "lncli getinfo failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
-
-        let info: GetInfoResponse = serde_json::from_slice(&output.stdout)
-            .map_err(|e| TargetError::StartFailed(format!("failed to parse lncli output: {e}")))?;
+        let info: GetInfoResponse = Self::lncli(config, lnd_dir, &["getinfo"])?;
 
         log::info!(
             "LND identity pubkey: {}, blockheight: {}, synced_to_chain: {}",
@@ -195,6 +180,68 @@ impl LndTarget {
 
         Ok((pubkey, info.block_height, info.synced_to_chain))
     }
+
+    /// Funds LND's on-chain wallet and waits until LND sees the funds confirmed.
+    fn fund_wallet(
+        config: &LndConfig,
+        lnd_dir: &Path,
+        bitcoin_cli: &BitcoinCli,
+    ) -> Result<(), TargetError> {
+        #[derive(Deserialize)]
+        struct NewAddressResponse {
+            address: String,
+        }
+
+        // lncli prints 64-bit integers as JSON strings.
+        #[derive(Deserialize)]
+        struct WalletBalanceResponse {
+            confirmed_balance: String,
+        }
+
+        let NewAddressResponse { address } =
+            Self::lncli(config, lnd_dir, &["newaddress", "p2wkh"])?;
+        bitcoind::fund_wallet(bitcoin_cli, &address)?;
+
+        log::info!("Waiting for lnd to confirm its wallet funding...");
+        for _ in 0..120 {
+            let balance: WalletBalanceResponse = Self::lncli(config, lnd_dir, &["walletbalance"])?;
+            if balance.confirmed_balance != "0" {
+                log::info!("lnd confirmed balance: {} sat", balance.confirmed_balance);
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+
+        Err(TargetError::StartFailed(
+            "lnd did not confirm its wallet funding".into(),
+        ))
+    }
+
+    /// Runs an lncli command against LND and parses its JSON output.
+    fn lncli<T: DeserializeOwned>(
+        config: &LndConfig,
+        lnd_dir: &Path,
+        args: &[&str],
+    ) -> Result<T, TargetError> {
+        let output = Command::new("lncli")
+            .arg(format!("--lnddir={}", lnd_dir.display()))
+            .arg(format!("--rpcserver=127.0.0.1:{}", config.lnd_rpc_port))
+            .arg("--network=regtest")
+            .args(args)
+            .output()?;
+
+        let command = args.join(" ");
+        if !output.status.success() {
+            return Err(TargetError::StartFailed(format!(
+                "lncli {command} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+
+        serde_json::from_slice(&output.stdout).map_err(|e| {
+            TargetError::StartFailed(format!("failed to parse lncli {command} output: {e}"))
+        })
+    }
 }
 
 impl Target for LndTarget {
@@ -205,7 +252,9 @@ impl Target for LndTarget {
         let (data_path, temp_dir) = bitcoind::resolve_data_dir()?;
 
         let (bitcoind, bitcoin_cli) = bitcoind::start(&config.bitcoind_config(), &data_path)?;
-        let (lnd, pubkey) = Self::start_lnd(&config, &data_path)?;
+        let lnd_dir = data_path.join("lnd");
+        let (lnd, pubkey) = Self::start_lnd(&config, &lnd_dir)?;
+        Self::fund_wallet(&config, &lnd_dir, &bitcoin_cli)?;
         let addr = SocketAddr::from(([127, 0, 0, 1], config.lnd_p2p_port));
 
         log::info!("Both daemons are running, ready to fuzz");

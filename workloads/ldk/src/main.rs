@@ -107,8 +107,18 @@ fn main() {
         std::thread::sleep(Duration::from_secs(1));
     }
 
-    // Output for LdkTarget to parse.
+    // Output for LdkTarget to parse. LdkTarget funds ADDRESS, and READY
+    // follows once the funds confirm, so the node can fee-bump, sweep, and
+    // accept inbound anchor channels, which require an on-chain reserve.
     println!("PUBKEY:{}", node.node_id());
+    let address = node
+        .onchain_payment()
+        .new_address()
+        .expect("new on-chain address");
+    println!("ADDRESS:{address}");
+    while node.list_balances().spendable_onchain_balance_sats == 0 {
+        std::thread::sleep(Duration::from_secs(1));
+    }
     println!("READY");
 
     // Wait for signals. sigwait() blocks here without polling and returns

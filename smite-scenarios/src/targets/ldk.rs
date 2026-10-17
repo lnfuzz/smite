@@ -94,11 +94,12 @@ pub struct LdkTarget {
 }
 
 impl LdkTarget {
-    /// Starts ldk-node-wrapper and waits for it to be ready.
-    /// Returns the process and LDK's identity pubkey.
+    /// Starts ldk-node-wrapper, funds its on-chain wallet, and waits for it to
+    /// be ready. Returns the process and LDK's identity pubkey.
     fn start_ldk(
         config: &LdkConfig,
         data_dir: &Path,
+        bitcoin_cli: &BitcoinCli,
     ) -> Result<(ManagedProcess, secp256k1::PublicKey), TargetError> {
         log::info!("Starting ldk-node-wrapper...");
 
@@ -121,8 +122,10 @@ impl LdkTarget {
 
         let mut ldk = ManagedProcess::spawn(&mut cmd, "ldk-node-wrapper")?;
 
-        // Parse pubkey from stdout. The wrapper prints:
+        // Parse pubkey from stdout and fund the wallet address. The wrapper
+        // prints READY once the funding confirms:
         //   PUBKEY:<hex>
+        //   ADDRESS:<address>
         //   READY
         let stdout = ldk.inner().stdout.take().ok_or_else(|| {
             TargetError::StartFailed("ldk-node-wrapper stdout not captured".into())
@@ -142,6 +145,8 @@ impl LdkTarget {
                     TargetError::StartFailed(format!("failed to parse pubkey: {e}"))
                 })?);
                 log::info!("LDK identity pubkey: {hex}");
+            } else if let Some(address) = line.strip_prefix("ADDRESS:") {
+                bitcoind::fund_wallet(bitcoin_cli, address)?;
             } else if line == "READY" {
                 break;
             }
@@ -150,7 +155,7 @@ impl LdkTarget {
         let pubkey =
             pubkey.ok_or_else(|| TargetError::StartFailed("no PUBKEY line received".into()))?;
 
-        log::info!("ldk-node-wrapper is ready and synced");
+        log::info!("ldk-node-wrapper is ready, synced, and funded");
         Ok((ldk, pubkey))
     }
 }
@@ -163,7 +168,7 @@ impl Target for LdkTarget {
         let (data_path, temp_dir) = bitcoind::resolve_data_dir()?;
 
         let (bitcoind, bitcoin_cli) = bitcoind::start(&config.bitcoind_config(), &data_path)?;
-        let (ldk, pubkey) = Self::start_ldk(&config, &data_path)?;
+        let (ldk, pubkey) = Self::start_ldk(&config, &data_path, &bitcoin_cli)?;
         let addr = SocketAddr::from(([127, 0, 0, 1], config.ldk_p2p_port));
 
         log::info!("Both daemons are running, ready to fuzz");

@@ -21,6 +21,9 @@ use super::{Target, TargetError, TargetRpc, check_crash_log};
 /// API password for Eclair's REST API.
 const API_PASSWORD: &str = "fuzzpass";
 
+/// bitcoind wallet Eclair spends from, kept apart from the fuzzer's wallet.
+const ECLAIR_WALLET: &str = "eclair";
+
 /// Configuration for the Eclair target.
 pub struct EclairConfig {
     /// Bitcoin RPC port (default: 18443 for regtest).
@@ -101,6 +104,7 @@ impl EclairTarget {
              eclair.bitcoind.rpcuser=rpcuser\n\
              eclair.bitcoind.rpcpassword=rpcpass\n\
              eclair.bitcoind.rpcport={bitcoind_rpc_port}\n\
+             eclair.bitcoind.wallet={ECLAIR_WALLET}\n\
              eclair.bitcoind.zmqblock=\"tcp://127.0.0.1:{zmq_block_port}\"\n\
              eclair.bitcoind.zmqtx=\"tcp://127.0.0.1:{zmq_tx_port}\"\n",
             eclair_p2p_port = config.eclair_p2p_port,
@@ -112,6 +116,18 @@ impl EclairTarget {
         );
         fs::write(eclair_dir.join("eclair.conf"), conf)?;
         Ok(())
+    }
+
+    /// Creates and funds Eclair's bitcoind wallet. Eclair keeps its keys in
+    /// bitcoind, so this can run before Eclair starts.
+    fn fund_wallet(bitcoin_cli: &BitcoinCli) -> Result<(), TargetError> {
+        let wallet = BitcoinCli {
+            wallet: ECLAIR_WALLET.into(),
+            ..bitcoin_cli.clone()
+        };
+        wallet.call(&["createwallet", ECLAIR_WALLET])?;
+        let address = wallet.call(&["getnewaddress"])?;
+        bitcoind::fund_wallet(bitcoin_cli, &address)
     }
 
     /// Starts Eclair and waits for it to be ready and synced.
@@ -142,11 +158,11 @@ impl EclairTarget {
         let eclair = ManagedProcess::spawn(&mut cmd, "eclair")?;
 
         // Wait for Eclair to be ready and fully synced. We poll the REST API
-        // until blockHeight matches the initial blocks we generated.
+        // until blockHeight matches the block that confirmed its funding.
         log::info!("Waiting for eclair to be ready and synced...");
         for _ in 0..120 {
             if let Ok((pubkey, blockheight)) = Self::query_info(config) {
-                if blockheight >= bitcoind::INITIAL_BLOCKS {
+                if blockheight >= bitcoind::FUNDED_HEIGHT {
                     log::info!("eclair synced (blockheight={blockheight})");
                     return Ok((eclair, pubkey));
                 }
@@ -213,6 +229,7 @@ impl Target for EclairTarget {
         let (data_path, temp_dir) = bitcoind::resolve_data_dir()?;
 
         let (bitcoind, bitcoin_cli) = bitcoind::start(&config.bitcoind_config(), &data_path)?;
+        Self::fund_wallet(&bitcoin_cli)?;
         let (eclair, pubkey) = Self::start_eclair(&config, &data_path)?;
         let addr = SocketAddr::from(([127, 0, 0, 1], config.eclair_p2p_port));
 
