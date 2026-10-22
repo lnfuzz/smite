@@ -193,7 +193,7 @@ mod tests {
             htlc_basepoint_privkey: secret_key(1),
         };
 
-        ChannelState::new(config, holder, commitments, true, false, false)
+        ChannelState::new(config, holder, commitments, true, false, false, None, None)
     }
 
     /// Oracle inputs for testing. Defaults to a conforming `channel_ready`

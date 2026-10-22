@@ -137,7 +137,7 @@ mod tests {
             htlc_basepoint_privkey: skey1,
         };
 
-        ChannelState::new(config, holder, commitments, true, false, false)
+        ChannelState::new(config, holder, commitments, true, false, false, None, None)
     }
 
     /// Valid `funding_signed` message for testing.

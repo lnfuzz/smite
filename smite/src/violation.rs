@@ -60,4 +60,19 @@ pub enum Violation {
     /// - it reuses a per-commitment point from a previously revealed key.
     #[error("invalid channel_ready for channel_id {0}: {1}")]
     InvalidChannelReady(ChannelId, String),
+
+    /// The target's `shutdown` broke a BOLT 2 requirement, as judged by
+    /// [`crate::oracles::ShutdownOracle`]. The reason names the breached
+    /// requirement, one of:
+    /// - it names a `channel_id` we have not funded,
+    /// - it replies on a channel we sent an invalid signature for, which the
+    ///   target should have failed instead,
+    /// - it replies to a `shutdown` whose `scriptpubkey` broke the
+    ///   `upfront_shutdown_script` we committed to, which the target should have
+    ///   failed the connection over instead,
+    /// - its `scriptpubkey` differs from the `upfront_shutdown_script` the
+    ///   target committed to in its `accept_channel`, or
+    /// - its `scriptpubkey` is not a standard form for the negotiated features.
+    #[error("invalid shutdown for channel_id {0}: {1}")]
+    InvalidShutdown(ChannelId, String),
 }
