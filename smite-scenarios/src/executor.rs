@@ -21,7 +21,7 @@ use smite::channel_tx::{
 use smite::noise::{ConnectionError, NoiseConnection};
 use smite::oracles::{
     AcceptChannelContext, AcceptChannelOracle, ChannelReadyContext, ChannelReadyOracle,
-    FundingSignedContext, FundingSignedOracle, Oracle,
+    FundingSignedContext, FundingSignedOracle, Oracle, ShutdownContext, ShutdownOracle,
 };
 use smite::pending_channel::{KeyOrigin, PendingChannel};
 use smite::violation::Violation;
@@ -507,13 +507,14 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
 
                 Operation::SendShutdown => {
                     let sd = build_shutdown(&variables, &instr.inputs);
-                    let encoded = Message::Shutdown(sd).encode();
+                    let encoded = Message::Shutdown(sd.clone()).encode();
                     log::debug!(
                         "[{:?}] SendShutdown: {} bytes",
                         start.elapsed(),
                         encoded.len()
                     );
                     self.conn.send_message(&encoded)?;
+                    record_send_shutdown(&mut self.channel_states, &sd);
                     Some(Variable::SentShutdown)
                 }
 
@@ -566,6 +567,34 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         log::debug!("[{:?}] RecvChannelReady: received", start.elapsed());
                     }
                     None
+                }
+
+                Operation::RecvShutdown => {
+                    consume_affine(
+                        &mut variables,
+                        instr.inputs[0],
+                        instr.operation.input_types()[0],
+                    );
+                    let channel_id = resolve_channel_id(&variables, instr.inputs[1]);
+                    // TODO: we only expect `shutdown` when all HTLCs are resolved, else this is a
+                    // no-op.
+                    if is_shutdown_expected(&self.channel_states, channel_id) {
+                        log::debug!("[{:?}] RecvShutdown: waiting", start.elapsed());
+                        // `shutdown` is handled implicitly, so one for another channel is
+                        // recorded by `handle_implicit` and we keep waiting for ours.
+                        while is_shutdown_expected(&self.channel_states, channel_id) {
+                            self.recv_bolt::<Shutdown>(RECV_IDLE_TIMEOUT)?;
+                        }
+                        log::debug!("[{:?}] RecvShutdown: received", start.elapsed());
+                    }
+                    // Read the reply from the channel's state, so one recorded before this
+                    // instruction ran is reported just the same.
+                    let scriptpubkey = self
+                        .channel_states
+                        .get(&channel_id)
+                        .and_then(|state| state.counterparty_shutdown_script.clone())
+                        .unwrap_or_default();
+                    Some(Variable::Bytes(scriptpubkey))
                 }
 
                 Operation::MineBlocks(v) => {
@@ -669,6 +698,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
     ///
     /// This currently includes:
     /// - `channel_ready`
+    /// - `shutdown`
     ///
     /// # Errors
     ///
@@ -703,6 +733,16 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     funding_scid,
                     cr,
                 );
+                Ok(true)
+            }
+            Message::Shutdown(sd) => {
+                log::debug!("received shutdown on {}", sd.channel_id);
+                ShutdownOracle.evaluate(&ShutdownContext {
+                    shutdown: sd,
+                    channel: self.channel_states.get(&sd.channel_id),
+                    negotiated_features: &self.context.negotiated_features,
+                })?;
+                record_recv_shutdown(&mut self.channel_states, sd);
                 Ok(true)
             }
             _ => Ok(false),
@@ -780,8 +820,12 @@ define_resolver!(
 );
 
 /// Consumes an affine variable, leaving its slot void so it cannot be used
-/// again.
-fn consume_affine(variables: &mut [Option<Variable>], index: usize, expected: VariableType) {
+/// again, and returns it.
+fn consume_affine(
+    variables: &mut [Option<Variable>],
+    index: usize,
+    expected: VariableType,
+) -> Variable {
     assert!(
         expected.is_affine(),
         "consume_affine called with non-affine type {expected:?}; voiding the slot would break later reads"
@@ -790,7 +834,9 @@ fn consume_affine(variables: &mut [Option<Variable>], index: usize, expected: Va
     if actual != expected {
         type_mismatch(index, expected, actual);
     }
-    variables[index] = None;
+    variables[index]
+        .take()
+        .expect("resolve checked the slot is not void")
 }
 
 // -- Operation handlers --
@@ -1349,6 +1395,22 @@ fn is_channel_ready_expected(
     })
 }
 
+/// Returns `true` if we sent a `shutdown` on the given channel, the target has
+/// sent its `channel_ready` there, and it has not replied to our `shutdown` yet.
+///
+/// A target that has not sent `channel_ready` may ignore our `shutdown`, so we
+/// do not wait for a reply before then.
+fn is_shutdown_expected(
+    channel_states: &HashMap<ChannelId, ChannelState>,
+    channel_id: ChannelId,
+) -> bool {
+    channel_states.get(&channel_id).is_some_and(|state| {
+        state.our_shutdown_script.is_some()
+            && state.counterparty_shutdown_script.is_none()
+            && state.next_counterparty_per_commitment_point().is_some()
+    })
+}
+
 /// Records a sent `open_channel`, keyed by `temporary_channel_id`, so the
 /// funding flow can build commitments from the values actually put on the wire.
 ///
@@ -1490,6 +1552,39 @@ fn record_recv_channel_ready(
             commitment_number: 1,
         },
     );
+}
+
+/// Records a sent `shutdown`'s `scriptpubkey` in its channel's state, which is
+/// what makes a reply expected there.
+///
+/// The first one is kept: a target may ignore any `shutdown` after the first,
+/// so our first one is what it is replying to. A `shutdown` for a channel we do
+/// not track is not recorded, leaving no reply expected for it.
+fn record_send_shutdown(
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    shutdown: &Shutdown,
+) {
+    if let Some(state) = channel_states.get_mut(&shutdown.channel_id) {
+        state
+            .our_shutdown_script
+            .get_or_insert_with(|| shutdown.scriptpubkey.clone());
+    }
+}
+
+/// Records a received `shutdown`'s `scriptpubkey` in its channel's state.
+///
+/// The first one is kept: a target may ignore any `shutdown` after the first,
+/// so its first reply is the one a later `RecvShutdown` must report. A
+/// `shutdown` for a channel we do not track is not recorded.
+fn record_recv_shutdown(
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    shutdown: &Shutdown,
+) {
+    if let Some(state) = channel_states.get_mut(&shutdown.channel_id) {
+        state
+            .counterparty_shutdown_script
+            .get_or_insert_with(|| shutdown.scriptpubkey.clone());
+    }
 }
 
 /// Extracts a field from a parsed `accept_channel` message.
