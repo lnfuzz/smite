@@ -1561,6 +1561,42 @@ fn execute_recv_shutdown_unknown_channel() {
 }
 
 #[test]
+fn execute_records_negotiated_upfront_shutdown_scripts() {
+    // `ShutdownOracle` judges a received `shutdown` against both sides' upfront
+    // commitments, so the funding flow has to record them from the negotiated
+    // `open_channel` and `accept_channel`.
+    let our_upfront = ShutdownScriptVariant::P2wpkh([0x11; 20]).encode();
+    let their_upfront = ShutdownScriptVariant::P2wpkh([0x22; 20]).encode();
+
+    let mut oc = funded_open_channel();
+    oc.message.tlvs.upfront_shutdown_script = Some(our_upfront.clone());
+    let accept_channel = AcceptChannel {
+        tlvs: AcceptChannelTlvs {
+            upfront_shutdown_script: Some(their_upfront.clone()),
+            ..funded_accept_channel().tlvs
+        },
+        ..funded_accept_channel()
+    };
+
+    let mut b = ProgramBuilder::new();
+    negotiate_channel(&mut b, &oc);
+    let funding_created = send_funding_created(&mut b);
+    b.append(Operation::RecvFundingSigned, &[funding_created.sent]);
+
+    let mut fx = Fixture::new()
+        .queue(&Message::AcceptChannel(accept_channel))
+        .queue(&funding_signed_reply());
+    fx.run(&b.build());
+
+    let state = fx.channel_state(&funding_channel_id());
+    assert_eq!(state.our_upfront_shutdown_script, Some(our_upfront));
+    assert_eq!(
+        state.counterparty_upfront_shutdown_script,
+        Some(their_upfront)
+    );
+}
+
+#[test]
 fn execute_recv_shutdown_other_tracked_channel() {
     let channel_id = funding_channel_id();
     let other = second_funding_channel_id();

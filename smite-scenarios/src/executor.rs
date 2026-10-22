@@ -750,11 +750,8 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
             }
             Message::Shutdown(sd) => {
                 log::debug!("received shutdown on {}", sd.channel_id);
-                // TODO: `ShutdownOracle` must also reject a `shutdown`:
-                // * with a `scriptpubkey` differing from a non-zero-length upfront shutdown
-                //   script the target sent in `accept_channel`
-                // * sent while updates are pending on our commitment transaction, once HTLCs
-                //   are supported
+                // TODO: `ShutdownOracle` must also reject a `shutdown` sent while updates
+                // are pending on our commitment transaction, once HTLCs are supported.
                 ShutdownOracle.evaluate(&ShutdownContext {
                     shutdown: sd,
                     channel: self.channel_states.get(&sd.channel_id),
@@ -1033,6 +1030,8 @@ fn build_funding_created(
                 is_funding_outpoint_valid,
                 mined_txids.contains(&funding_outpoint.txid),
                 sent_invalid_signature,
+                open_channel.tlvs.upfront_shutdown_script.clone(),
+                accept_channel.tlvs.upfront_shutdown_script.clone(),
             )
         });
     }

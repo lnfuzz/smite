@@ -70,7 +70,12 @@ pub enum Violation {
     /// - it names a `channel_id` we have no channel tracked for,
     /// - it arrives before the target funded the channel with its
     ///   `funding_signed`,
-    /// - the target already sent a `shutdown` for the channel, or
+    /// - the target already sent a `shutdown` for the channel,
+    /// - it replies to a `shutdown` whose `scriptpubkey` broke the
+    ///   `upfront_shutdown_script` we committed to, which the target should have
+    ///   failed the connection over instead,
+    /// - its `scriptpubkey` differs from the `upfront_shutdown_script` the
+    ///   target committed to in its `accept_channel`, or
     /// - its `scriptpubkey` is not a standard form for the negotiated features.
     #[error("invalid shutdown for channel_id {0}: {1}")]
     InvalidShutdown(ChannelId, String),

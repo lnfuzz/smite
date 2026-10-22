@@ -13,13 +13,16 @@ pub struct ShutdownContext<'a> {
     /// or `None` if no channel is tracked for it.
     pub channel: Option<&'a ChannelState>,
     /// Features negotiated between the target node and Smite, which decide the
-    /// standard `scriptpubkey` forms.
+    /// standard `scriptpubkey` forms and whether `upfront_shutdown_script`s
+    /// bind.
     pub negotiated_features: &'a Features,
 }
 
 /// Checks that a received `shutdown` names a channel the target funded, that it
-/// is the only one for that channel, and that its `scriptpubkey` is a standard
-/// form for the negotiated features.
+/// is the only one for that channel, that it is not a reply to a `shutdown`
+/// breaking our `upfront_shutdown_script`, and that its `scriptpubkey` keeps the
+/// `upfront_shutdown_script` the target committed to and is a standard form for
+/// the negotiated features.
 pub struct ShutdownOracle;
 
 impl Oracle<ShutdownContext<'_>> for ShutdownOracle {
@@ -50,6 +53,44 @@ impl Oracle<ShutdownContext<'_>> for ShutdownOracle {
             return Err(Violation::InvalidShutdown(
                 *channel_id,
                 "second shutdown: one was already received for this channel".to_string(),
+            ));
+        }
+
+        // Check that the target did not reply to a `shutdown` that broke our own
+        // upfront commitment, since BOLT 2 requires it to fail the connection
+        // instead of replying.
+        if !channel.verify_our_upfront_shutdown_script(context.negotiated_features) {
+            return Err(Violation::InvalidShutdown(
+                *channel_id,
+                format!(
+                    "replied to a shutdown breaking our upfront_shutdown_script: sent {}, committed to {}",
+                    hex::encode(channel.our_shutdown_script.as_deref().unwrap_or_default()),
+                    hex::encode(
+                        channel
+                            .our_upfront_shutdown_script
+                            .as_deref()
+                            .unwrap_or_default()
+                    ),
+                ),
+            ));
+        }
+
+        // Check that the target kept the commitment it made in `accept_channel`.
+        if !channel
+            .verify_counterparty_upfront_shutdown_script(scriptpubkey, context.negotiated_features)
+        {
+            return Err(Violation::InvalidShutdown(
+                *channel_id,
+                format!(
+                    "upfront_shutdown_script mismatch: sent {}, committed to {}",
+                    hex::encode(scriptpubkey),
+                    hex::encode(
+                        channel
+                            .counterparty_upfront_shutdown_script
+                            .as_deref()
+                            .unwrap_or_default()
+                    ),
+                ),
             ));
         }
 
@@ -87,10 +128,10 @@ mod tests {
         PublicKey::from_secret_key(&Secp256k1::new(), &secret_key(seed))
     }
 
-    /// A standard P2WPKH `scriptpubkey`.
-    fn p2wpkh() -> Vec<u8> {
+    /// A standard P2WPKH `scriptpubkey`, hashing to `hash_byte` repeated.
+    fn p2wpkh(hash_byte: u8) -> Vec<u8> {
         let mut spk = vec![0x00, 0x14];
-        spk.extend_from_slice(&[0xab; 20]);
+        spk.extend_from_slice(&[hash_byte; 20]);
         spk
     }
 
@@ -112,7 +153,7 @@ mod tests {
 
     /// Valid `shutdown` message for testing.
     fn shutdown() -> Shutdown {
-        Shutdown::for_channel(ChannelId::new([1u8; 32]), p2wpkh())
+        Shutdown::for_channel(ChannelId::new([1u8; 32]), p2wpkh(0xab))
     }
 
     /// Funded channel state for testing.
@@ -147,7 +188,8 @@ mod tests {
             htlc_basepoint_privkey: secret_key(1),
         };
 
-        let mut state = ChannelState::new(config, holder, commitments, true, false, false);
+        let mut state =
+            ChannelState::new(config, holder, commitments, true, false, false, None, None);
         state.funding_signed_received = true;
 
         state
@@ -235,7 +277,7 @@ mod tests {
     #[test]
     fn rejects_second_shutdown() {
         let mut inputs = OracleInputs::default();
-        inputs.channel_mut().counterparty_shutdown_script = Some(p2wpkh());
+        inputs.channel_mut().counterparty_shutdown_script = Some(p2wpkh(0xab));
 
         assert_fail(
             &inputs,
@@ -259,6 +301,105 @@ mod tests {
 
             assert_fail(&inputs, "non-standard scriptpubkey");
         }
+    }
+
+    fn upfront_feature() -> Features {
+        Features::from_bits(&[Features::OPTION_UPFRONT_SHUTDOWN_SCRIPT])
+    }
+
+    /// Inputs where both sides committed to an `upfront_shutdown_script` and
+    /// each has so far kept it.
+    fn upfront_inputs() -> OracleInputs {
+        let mut inputs = OracleInputs {
+            shutdown: Shutdown::for_channel(shutdown().channel_id, p2wpkh(0x33)),
+            negotiated_features: upfront_feature(),
+            ..Default::default()
+        };
+        let channel = inputs.channel_mut();
+        channel.our_upfront_shutdown_script = Some(p2wpkh(0x55));
+        channel.our_shutdown_script = Some(p2wpkh(0x55));
+        channel.counterparty_upfront_shutdown_script = Some(p2wpkh(0x33));
+        inputs
+    }
+
+    #[test]
+    fn kept_upfront_scripts_pass() {
+        assert_pass(&upfront_inputs());
+    }
+
+    #[test]
+    fn rejects_counterparty_upfront_script_mismatch() {
+        let mut inputs = upfront_inputs();
+        // Standard form, but not the one the target committed to.
+        inputs.shutdown = Shutdown::for_channel(shutdown().channel_id, p2wpkh(0x44));
+
+        assert_fail(
+            &inputs,
+            &format!(
+                "upfront_shutdown_script mismatch: sent {}, committed to {}",
+                hex::encode(p2wpkh(0x44)),
+                hex::encode(p2wpkh(0x33)),
+            ),
+        );
+    }
+
+    #[test]
+    fn rejects_reply_to_shutdown_breaking_our_upfront_script() {
+        let mut inputs = upfront_inputs();
+        // We broke our own commitment, so the target had to fail the connection
+        // rather than reply, whatever its own `scriptpubkey` is.
+        inputs.channel_mut().our_shutdown_script = Some(p2wpkh(0x66));
+
+        assert_fail(
+            &inputs,
+            &format!(
+                "replied to a shutdown breaking our upfront_shutdown_script: sent {}, committed to {}",
+                hex::encode(p2wpkh(0x66)),
+                hex::encode(p2wpkh(0x55)),
+            ),
+        );
+    }
+
+    #[test]
+    fn empty_upfront_script_commits_to_nothing() {
+        // BOLT 2 lets either side opt out with a zero-length script.
+        let mut inputs = upfront_inputs();
+        let channel = inputs.channel_mut();
+        channel.our_upfront_shutdown_script = Some(Vec::new());
+        channel.our_shutdown_script = Some(p2wpkh(0x66));
+        channel.counterparty_upfront_shutdown_script = Some(Vec::new());
+
+        assert_pass(&inputs);
+    }
+
+    #[test]
+    fn upfront_scripts_only_bind_when_negotiated() {
+        let mut inputs = upfront_inputs();
+        inputs.negotiated_features = Features::new();
+        inputs.channel_mut().our_shutdown_script = Some(p2wpkh(0x66));
+        inputs.shutdown = Shutdown::for_channel(shutdown().channel_id, p2wpkh(0x44));
+
+        assert_pass(&inputs);
+    }
+
+    #[test]
+    fn unsolicited_shutdown_keeps_our_upfront_script() {
+        // The target may close first, so there is no `shutdown` of ours to
+        // break our own commitment.
+        let mut inputs = upfront_inputs();
+        inputs.channel_mut().our_shutdown_script = None;
+
+        assert_pass(&inputs);
+    }
+
+    #[test]
+    fn rejects_non_standard_script_matching_upfront_script() {
+        // A commitment to a non-standard form does not make it sendable.
+        let mut inputs = upfront_inputs();
+        inputs.shutdown = Shutdown::for_channel(shutdown().channel_id, p2pkh());
+        inputs.channel_mut().counterparty_upfront_shutdown_script = Some(p2pkh());
+
+        assert_fail(&inputs, "non-standard scriptpubkey");
     }
 
     #[test]

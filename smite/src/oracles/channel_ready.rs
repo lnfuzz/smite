@@ -239,7 +239,8 @@ mod tests {
             htlc_basepoint_privkey: secret_key(1),
         };
 
-        let mut state = ChannelState::new(config, holder, commitments, true, false, false);
+        let mut state =
+            ChannelState::new(config, holder, commitments, true, false, false, None, None);
         state.funding_signed_received = true;
         state
     }
