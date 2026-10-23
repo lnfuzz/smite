@@ -751,7 +751,6 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
             Message::Shutdown(sd) => {
                 log::debug!("received shutdown on {}", sd.channel_id);
                 // TODO: `ShutdownOracle` must also reject a `shutdown`:
-                // * with a `scriptpubkey` in a form the negotiated features disallow
                 // * with a `scriptpubkey` differing from a non-zero-length upfront shutdown
                 //   script the target sent in `accept_channel`
                 // * sent while updates are pending on our commitment transaction, once HTLCs
@@ -759,6 +758,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                 ShutdownOracle.evaluate(&ShutdownContext {
                     shutdown: sd,
                     channel: self.channel_states.get(&sd.channel_id),
+                    negotiated_features: &self.context.negotiated_features,
                 })?;
                 record_recv_shutdown(&mut self.channel_states, sd);
                 Ok(true)

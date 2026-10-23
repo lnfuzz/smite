@@ -1,7 +1,7 @@
 //! BOLT 2 `shutdown` oracle, for the cooperative close flow.
 
 use super::Oracle;
-use crate::bolt::Shutdown;
+use crate::bolt::{Features, Shutdown, is_standard_shutdown_script};
 use crate::channel_state::ChannelState;
 use crate::violation::Violation;
 
@@ -12,15 +12,22 @@ pub struct ShutdownContext<'a> {
     /// The channel the `shutdown` belongs to, identified by its `channel_id`,
     /// or `None` if no channel is tracked for it.
     pub channel: Option<&'a ChannelState>,
+    /// Features negotiated between the target node and Smite, which decide the
+    /// standard `scriptpubkey` forms.
+    pub negotiated_features: &'a Features,
 }
 
-/// Checks that a received `shutdown` names a channel we track, that the target
-/// funded it, and that it is the only one for that channel.
+/// Checks that a received `shutdown` names a channel the target funded, that it
+/// is the only one for that channel, and that its `scriptpubkey` is a standard
+/// form for the negotiated features.
 pub struct ShutdownOracle;
 
 impl Oracle<ShutdownContext<'_>> for ShutdownOracle {
     fn evaluate(&self, context: &ShutdownContext<'_>) -> Result<(), Violation> {
-        let Shutdown { channel_id, .. } = context.shutdown;
+        let Shutdown {
+            channel_id,
+            scriptpubkey,
+        } = context.shutdown;
 
         // Check that the `shutdown` names a channel we track.
         let Some(channel) = context.channel else {
@@ -46,6 +53,17 @@ impl Oracle<ShutdownContext<'_>> for ShutdownOracle {
             ));
         }
 
+        // Check that the `scriptpubkey` is a form BOLT 2 permits a sender to use.
+        if !is_standard_shutdown_script(scriptpubkey, context.negotiated_features) {
+            return Err(Violation::InvalidShutdown(
+                *channel_id,
+                format!(
+                    "non-standard scriptpubkey: {} is not permitted for the negotiated features",
+                    hex::encode(scriptpubkey),
+                ),
+            ));
+        }
+
         Ok(())
     }
 }
@@ -53,9 +71,12 @@ impl Oracle<ShutdownContext<'_>> for ShutdownOracle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bolt::{ChannelId, Features};
+    use crate::bolt::ChannelId;
     use crate::channel_tx::{ChannelConfig, ChannelPartyConfig, HolderIdentity, Side};
     use bitcoin::OutPoint;
+    use bitcoin::opcodes::all::{
+        OP_CHECKSIG, OP_DUP, OP_EQUAL, OP_EQUALVERIFY, OP_HASH160, OP_PUSHBYTES_20,
+    };
     use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 
     fn secret_key(seed: u8) -> SecretKey {
@@ -70,6 +91,22 @@ mod tests {
     fn p2wpkh() -> Vec<u8> {
         let mut spk = vec![0x00, 0x14];
         spk.extend_from_slice(&[0xab; 20]);
+        spk
+    }
+
+    /// A legacy P2PKH `scriptpubkey`.
+    fn p2pkh() -> Vec<u8> {
+        let mut spk = vec![OP_DUP.to_u8(), OP_HASH160.to_u8(), OP_PUSHBYTES_20.to_u8()];
+        spk.extend_from_slice(&[0xab; 20]);
+        spk.extend_from_slice(&[OP_EQUALVERIFY.to_u8(), OP_CHECKSIG.to_u8()]);
+        spk
+    }
+
+    /// A legacy P2SH `scriptpubkey`.
+    fn p2sh() -> Vec<u8> {
+        let mut spk = vec![OP_HASH160.to_u8(), OP_PUSHBYTES_20.to_u8()];
+        spk.extend_from_slice(&[0xab; 20]);
+        spk.push(OP_EQUAL.to_u8());
         spk
     }
 
@@ -121,6 +158,7 @@ mod tests {
     struct OracleInputs {
         shutdown: Shutdown,
         channel: Option<ChannelState>,
+        negotiated_features: Features,
     }
 
     impl Default for OracleInputs {
@@ -128,6 +166,7 @@ mod tests {
             Self {
                 shutdown: shutdown(),
                 channel: Some(channel_state()),
+                negotiated_features: Features::new(),
             }
         }
     }
@@ -137,6 +176,7 @@ mod tests {
             ShutdownOracle.evaluate(&ShutdownContext {
                 shutdown: &self.shutdown,
                 channel: self.channel.as_ref(),
+                negotiated_features: &self.negotiated_features,
             })
         }
 
@@ -201,5 +241,42 @@ mod tests {
             &inputs,
             "second shutdown: one was already received for this channel",
         );
+    }
+
+    #[test]
+    fn rejects_non_standard_scriptpubkey() {
+        // A receiver may accept legacy P2PKH/P2SH, but the target is the sender
+        // here, and no feature makes them a standard form for a sender to use.
+        for spk in [p2pkh(), p2sh()] {
+            let inputs = OracleInputs {
+                shutdown: Shutdown::for_channel(shutdown().channel_id, spk),
+                negotiated_features: Features::from_bits(&[
+                    Features::OPTION_SHUTDOWN_ANYSEGWIT,
+                    Features::OPTION_SIMPLE_CLOSE,
+                ]),
+                ..Default::default()
+            };
+
+            assert_fail(&inputs, "non-standard scriptpubkey");
+        }
+    }
+
+    #[test]
+    fn accepts_anysegwit_only_when_negotiated() {
+        let mut spk = vec![0x51, 0x02];
+        spk.extend_from_slice(&[0xcd; 2]);
+        let inputs = OracleInputs {
+            shutdown: Shutdown::for_channel(shutdown().channel_id, spk),
+            ..Default::default()
+        };
+
+        assert_fail(&inputs, "non-standard scriptpubkey");
+
+        let inputs = OracleInputs {
+            negotiated_features: Features::from_bits(&[Features::OPTION_SHUTDOWN_ANYSEGWIT]),
+            ..inputs
+        };
+
+        assert_pass(&inputs);
     }
 }
