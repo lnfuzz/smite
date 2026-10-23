@@ -14,8 +14,8 @@ pub struct ShutdownContext<'a> {
     pub channel: Option<&'a ChannelState>,
 }
 
-/// Checks that a received `shutdown` names a channel we track and that the
-/// target funded it.
+/// Checks that a received `shutdown` names a channel we track, that the target
+/// funded it, and that it is the only one for that channel.
 pub struct ShutdownOracle;
 
 impl Oracle<ShutdownContext<'_>> for ShutdownOracle {
@@ -35,6 +35,14 @@ impl Oracle<ShutdownContext<'_>> for ShutdownOracle {
             return Err(Violation::InvalidShutdown(
                 *channel_id,
                 "unfunded channel: no funding_signed was received for it".to_string(),
+            ));
+        }
+
+        // Check that this is the first `shutdown` the target sent for the channel.
+        if channel.counterparty_shutdown_script.is_some() {
+            return Err(Violation::InvalidShutdown(
+                *channel_id,
+                "second shutdown: one was already received for this channel".to_string(),
             ));
         }
 
@@ -181,6 +189,17 @@ mod tests {
         assert_fail(
             &inputs,
             "unfunded channel: no funding_signed was received for it",
+        );
+    }
+
+    #[test]
+    fn rejects_second_shutdown() {
+        let mut inputs = OracleInputs::default();
+        inputs.channel_mut().counterparty_shutdown_script = Some(p2wpkh());
+
+        assert_fail(
+            &inputs,
+            "second shutdown: one was already received for this channel",
         );
     }
 }

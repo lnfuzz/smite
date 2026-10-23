@@ -1610,9 +1610,9 @@ fn execute_recv_shutdown_other_tracked_channel() {
 }
 
 #[test]
-fn execute_recv_shutdown_keeps_first_reply() {
-    // Two `shutdown`s arrive while `RecvChannelReady` is waiting, so both are
-    // recorded before `RecvShutdown` runs, but only the first is kept.
+fn execute_recv_shutdown_second_reply() {
+    // Both `shutdown`s arrive while `RecvChannelReady` is waiting, so the
+    // second is judged where it is recorded, before `RecvShutdown` runs.
     let channel_id = funding_channel_id();
     let first = ShutdownScriptVariant::P2wpkh([0x11; 20]);
     let second = ShutdownScriptVariant::P2wpkh([0x22; 20]);
@@ -1636,22 +1636,25 @@ fn execute_recv_shutdown_keeps_first_reply() {
         ShutdownScriptVariant::P2wpkh([0xab; 20]),
     );
     b.append(Operation::RecvChannelReady, &[]);
-    let spk = b.append(
+    b.append(
         Operation::RecvShutdown,
         &[shutdown.sent, shutdown.channel_id],
     );
-    // Put the produced script back on the wire so it can be inspected.
-    b.append(Operation::SendShutdown, &[shutdown.channel_id, spk]);
 
-    fx.run(&b.build());
+    let err = fx.run_err(&b.build());
 
+    let ExecuteError::Violation(Violation::InvalidShutdown(id, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*id, channel_id);
+    assert_eq!(
+        reason,
+        "second shutdown: one was already received for this channel"
+    );
     assert_eq!(
         fx.channel_state(&channel_id).counterparty_shutdown_script,
         Some(first.encode())
     );
-    let echoed: Shutdown = fx.sent(fx.sent_len() - 1);
-    assert_eq!(echoed.scriptpubkey, first.encode());
-    assert_eq!(fx.queued_len(), 0);
 }
 
 #[test]

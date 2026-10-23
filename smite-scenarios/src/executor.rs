@@ -751,7 +751,6 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
             Message::Shutdown(sd) => {
                 log::debug!("received shutdown on {}", sd.channel_id);
                 // TODO: `ShutdownOracle` must also reject a `shutdown`:
-                // * for a channel we already received a `shutdown` on
                 // * with a `scriptpubkey` in a form the negotiated features disallow
                 // * with a `scriptpubkey` differing from a non-zero-length upfront shutdown
                 //   script the target sent in `accept_channel`
@@ -1562,8 +1561,6 @@ fn record_recv_shutdown(
     shutdown: &Shutdown,
 ) {
     if let Some(state) = channel_states.get_mut(&shutdown.channel_id) {
-        // TODO: a second `shutdown` on the same channel violates BOLT 2 and is dropped
-        // here unjudged until we have a shutdown oracle
         state
             .counterparty_shutdown_script
             .get_or_insert_with(|| shutdown.scriptpubkey.clone());
