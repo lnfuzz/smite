@@ -20,7 +20,7 @@ use smite::channel_tx::{
 use smite::noise::{ConnectionError, NoiseConnection};
 use smite::oracles::{
     AcceptChannelContext, AcceptChannelOracle, ChannelReadyContext, ChannelReadyOracle,
-    FundingSignedContext, FundingSignedOracle, Oracle,
+    FundingSignedContext, FundingSignedOracle, Oracle, ShutdownContext, ShutdownOracle,
 };
 use smite::pending_channel::{KeyOrigin, PendingChannel};
 use smite::violation::Violation;
@@ -750,8 +750,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
             }
             Message::Shutdown(sd) => {
                 log::debug!("received shutdown on {}", sd.channel_id);
-                // TODO: judge received `shutdown`s with an oracle here. It must reject one:
-                // * for an untracked channel
+                // TODO: `ShutdownOracle` must also reject a `shutdown`:
                 // * for a channel whose `funding_signed` we haven't received yet
                 // * for a channel we already received a `shutdown` on
                 // * with a `scriptpubkey` in a form the negotiated features disallow
@@ -759,6 +758,10 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                 //   script the target sent in `accept_channel`
                 // * sent while updates are pending on our commitment transaction, once HTLCs
                 //   are supported
+                ShutdownOracle.evaluate(&ShutdownContext {
+                    shutdown: sd,
+                    channel: self.channel_states.get(&sd.channel_id),
+                })?;
                 record_recv_shutdown(&mut self.channel_states, sd);
                 Ok(true)
             }

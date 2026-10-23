@@ -1540,6 +1540,27 @@ fn execute_recv_shutdown_reports_own_channel() {
 }
 
 #[test]
+fn execute_recv_shutdown_unknown_channel() {
+    let (fx, _) = recv_channel_ready_fixture();
+    let unknown = ChannelId::new([0x7a; 32]);
+    let script = ShutdownScriptVariant::P2wpkh([0xcd; 20]);
+    // A `shutdown` is judged against its channel, so one for a channel we never
+    // tracked is a violation.
+    let mut fx = fx.queue(&Message::Shutdown(Shutdown::for_channel(
+        unknown,
+        script.encode(),
+    )));
+
+    let err = fx.run_err(&recv_shutdown_program(funding_channel_id(), script));
+
+    let ExecuteError::Violation(Violation::InvalidShutdown(id, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*id, unknown);
+    assert_eq!(reason, "unknown channel_id: no channel is tracked for it");
+}
+
+#[test]
 fn execute_recv_shutdown_other_tracked_channel() {
     let channel_id = funding_channel_id();
     let other = second_funding_channel_id();
