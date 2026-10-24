@@ -308,6 +308,57 @@ fn execute_derive_point() {
 }
 
 #[test]
+fn execute_derive_temporary_channel_id_v2() {
+    let mut b = ProgramBuilder::new();
+    let revocation_basepoint = b.append(Operation::LoadTargetPubkeyFromContext, &[]);
+    let channel_id = b.append(
+        Operation::DeriveTemporaryChannelIdV2,
+        &[revocation_basepoint],
+    );
+    let scriptpubkey = b.append(
+        Operation::LoadShutdownScript(ShutdownScriptVariant::Empty),
+        &[],
+    );
+    b.append(Operation::SendShutdown, &[channel_id, scriptpubkey]);
+
+    let mut fx = Fixture::new();
+    fx.run(&b.build());
+
+    assert_eq!(
+        fx.sent::<Shutdown>(0).channel_id,
+        ChannelId::v2_temporary_from_revocation_basepoint(&sample_context().target_pubkey),
+    );
+}
+
+#[test]
+fn execute_derive_channel_id_v2() {
+    let mut b = ProgramBuilder::new();
+    let our_basepoint = b.append(Operation::LoadTargetPubkeyFromContext, &[]);
+    let their_privkey = b.append(Operation::LoadPrivateKey([0x22; 32]), &[]);
+    let their_basepoint = b.append(Operation::DerivePoint, &[their_privkey]);
+    let channel_id = b.append(
+        Operation::DeriveChannelIdV2,
+        &[our_basepoint, their_basepoint],
+    );
+    let scriptpubkey = b.append(
+        Operation::LoadShutdownScript(ShutdownScriptVariant::Empty),
+        &[],
+    );
+    b.append(Operation::SendShutdown, &[channel_id, scriptpubkey]);
+
+    let mut fx = Fixture::new();
+    fx.run(&b.build());
+
+    let secp = Secp256k1::new();
+    let their_basepoint =
+        PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&[0x22; 32]).unwrap());
+    assert_eq!(
+        fx.sent::<Shutdown>(0).channel_id,
+        ChannelId::v2_from_revocation_basepoints(&sample_context().target_pubkey, &their_basepoint),
+    );
+}
+
+#[test]
 fn execute_recv_and_extract_all_fields() {
     // Receive accept_channel (v0), then extract all 16 fields (v1..v16).
     let fields = [

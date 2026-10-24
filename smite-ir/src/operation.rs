@@ -81,6 +81,18 @@ pub enum Operation {
     ///   2: `funding_satoshis` (`Amount`)
     ///   3: `feerate_per_kw` (`FeeratePerKw`)
     CreateFundingTransaction,
+    /// Derive the v2 `temporary_channel_id` from our revocation basepoint,
+    /// using a zeroed basepoint for the not-yet-known peer (BOLT 2).
+    ///
+    /// Input: `Point` -- our `revocation_basepoint`.
+    DeriveTemporaryChannelIdV2,
+    /// Derive the v2 `channel_id` from both peers' revocation basepoints
+    /// (BOLT 2).
+    ///
+    /// Inputs (2):
+    ///   0: `revocation_basepoint` (`Point`) -- ours
+    ///   1: `revocation_basepoint` (`Point`) -- the peer's
+    DeriveChannelIdV2,
 
     // -- Build: construct a BOLT message from inputs --
     /// Build an `open_channel` message (BOLT 2, type 32).
@@ -537,6 +549,8 @@ impl fmt::Display for Operation {
             Self::DerivePoint => write!(f, "DerivePoint"),
             Self::ExtractAcceptChannel(field) => write!(f, "Extract{field}"),
             Self::CreateFundingTransaction => write!(f, "CreateFundingTransaction"),
+            Self::DeriveTemporaryChannelIdV2 => write!(f, "DeriveTemporaryChannelIdV2"),
+            Self::DeriveChannelIdV2 => write!(f, "DeriveChannelIdV2"),
             Self::BuildOpenChannel => write!(f, "BuildOpenChannel"),
             Self::BuildChannelAnnouncement => write!(f, "BuildChannelAnnouncement"),
             Self::BuildNodeAnnouncement { rgb_color, alias } => write!(
@@ -583,7 +597,10 @@ impl Operation {
             Self::LoadBytes(_) | Self::LoadShutdownScript(_) => Some(VariableType::Bytes),
             Self::LoadFeatures(_) | Self::LoadChannelType(_) => Some(VariableType::Features),
             Self::LoadPrivateKey(_) => Some(VariableType::PrivateKey),
-            Self::LoadChannelId(_) | Self::RecvFundingSigned => Some(VariableType::ChannelId),
+            Self::LoadChannelId(_)
+            | Self::DeriveTemporaryChannelIdV2
+            | Self::DeriveChannelIdV2
+            | Self::RecvFundingSigned => Some(VariableType::ChannelId),
             Self::LoadTargetPubkeyFromContext | Self::DerivePoint => Some(VariableType::Point),
             Self::LoadChainHashFromContext => Some(VariableType::ChainHash),
             Self::ExtractAcceptChannel(field) => Some(field.output_type()),
@@ -636,6 +653,11 @@ impl Operation {
                 VariableType::Point,        // acceptor_funding_pubkey
                 VariableType::Amount,       // funding_satoshis
                 VariableType::FeeratePerKw, // feerate_per_kw
+            ],
+            Self::DeriveTemporaryChannelIdV2 => vec![VariableType::Point], // revocation_basepoint
+            Self::DeriveChannelIdV2 => vec![
+                VariableType::Point, // our revocation_basepoint
+                VariableType::Point, // the peer's revocation_basepoint
             ],
             Self::BuildOpenChannel => vec![
                 VariableType::ChainHash,    // chain_hash
@@ -753,6 +775,8 @@ impl Operation {
             | Self::DerivePoint
             | Self::ExtractAcceptChannel(_)
             | Self::CreateFundingTransaction
+            | Self::DeriveTemporaryChannelIdV2
+            | Self::DeriveChannelIdV2
             | Self::BuildOpenChannel
             | Self::BuildChannelAnnouncement
             | Self::BuildNodeAnnouncement { .. }
@@ -799,6 +823,8 @@ impl Operation {
             | Self::LoadChainHashFromContext
             | Self::DerivePoint
             | Self::ExtractAcceptChannel(_)
+            | Self::DeriveTemporaryChannelIdV2
+            | Self::DeriveChannelIdV2
             | Self::BuildOpenChannel
             | Self::BuildChannelAnnouncement
             | Self::BuildNodeAnnouncement { .. }
@@ -847,6 +873,8 @@ impl Operation {
             | Self::LoadChainHashFromContext
             | Self::DerivePoint
             | Self::ExtractAcceptChannel(_)
+            | Self::DeriveTemporaryChannelIdV2
+            | Self::DeriveChannelIdV2
             | Self::BuildOpenChannel
             | Self::BuildChannelAnnouncement
             | Self::BuildNodeAnnouncement { .. }
@@ -910,6 +938,8 @@ impl Operation {
             | Self::LoadChainHashFromContext
             | Self::DerivePoint
             | Self::CreateFundingTransaction
+            | Self::DeriveTemporaryChannelIdV2
+            | Self::DeriveChannelIdV2
             | Self::BuildOpenChannel
             | Self::BuildChannelAnnouncement
             | Self::BuildChannelUpdate

@@ -735,6 +735,26 @@ fn lookup_short_channel_id_operation() {
     assert_eq!(op.to_string(), "LookupShortChannelId");
 }
 
+#[test]
+fn derive_v2_channel_id_operations() {
+    let op = Operation::DeriveTemporaryChannelIdV2;
+    assert_eq!(op.input_types(), vec![VariableType::Point]);
+    assert_eq!(op.output_type(), Some(VariableType::ChannelId));
+    assert!(!op.is_param_mutable());
+    assert!(op.is_pure());
+    assert_eq!(op.to_string(), "DeriveTemporaryChannelIdV2");
+
+    let op = Operation::DeriveChannelIdV2;
+    assert_eq!(
+        op.input_types(),
+        vec![VariableType::Point, VariableType::Point],
+    );
+    assert_eq!(op.output_type(), Some(VariableType::ChannelId));
+    assert!(!op.is_param_mutable());
+    assert!(op.is_pure());
+    assert_eq!(op.to_string(), "DeriveChannelIdV2");
+}
+
 fn create_and_broadcast_tx_instructions() -> Vec<Instruction> {
     vec![
         Instruction {

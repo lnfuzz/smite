@@ -402,6 +402,21 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     Some(Variable::FundingTransaction(ft))
                 }
 
+                Operation::DeriveTemporaryChannelIdV2 => {
+                    let revocation_basepoint = resolve_pubkey(&variables, instr.inputs[0]);
+                    Some(Variable::ChannelId(
+                        ChannelId::v2_temporary_from_revocation_basepoint(&revocation_basepoint),
+                    ))
+                }
+
+                Operation::DeriveChannelIdV2 => {
+                    let ours = resolve_pubkey(&variables, instr.inputs[0]);
+                    let theirs = resolve_pubkey(&variables, instr.inputs[1]);
+                    Some(Variable::ChannelId(
+                        ChannelId::v2_from_revocation_basepoints(&ours, &theirs),
+                    ))
+                }
+
                 // -- Build operations --
                 Operation::BuildOpenChannel => {
                     let oc = build_open_channel(&variables, &instr.inputs);
