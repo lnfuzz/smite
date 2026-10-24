@@ -8,7 +8,7 @@ use harness::*;
 use programs::*;
 use smite::bolt::{
     AcceptChannelTlvs, ChannelReadyTlvs, GossipTimestampFilter, Init, Ping, QueryShortChannelIds,
-    QueryShortChannelIdsTlvs, ReplyShortChannelIdsEnd,
+    QueryShortChannelIdsTlvs, ReplyShortChannelIdsEnd, Warning,
 };
 use smite_ir::Instruction;
 use smite_ir::builder::ProgramBuilder;
@@ -1275,6 +1275,422 @@ fn execute_send_shutdown_empty_scriptpubkey() {
     let sd: Shutdown = fx.sent(0);
     assert_eq!(sd.channel_id, channel_id);
     assert_eq!(sd.scriptpubkey, b"");
+}
+
+#[test]
+fn execute_send_shutdown_records_our_script() {
+    let (mut fx, _) = recv_channel_ready_fixture();
+    let channel_id = funding_channel_id();
+    let script = ShutdownScriptVariant::P2wpkh([0xab; 20]);
+
+    let mut b = ProgramBuilder::new();
+    establish_channel(&mut b, 6);
+    send_shutdown(&mut b, channel_id, script.clone());
+
+    fx.run(&b.build());
+
+    // Our script is what makes a reply expected on this channel.
+    assert_eq!(
+        fx.channel_state(&channel_id).our_shutdown_script,
+        Some(script.encode())
+    );
+    assert_eq!(
+        fx.channel_state(&channel_id).counterparty_shutdown_script,
+        None
+    );
+}
+
+#[test]
+fn execute_send_shutdown_keeps_first_script() {
+    let (mut fx, _) = recv_channel_ready_fixture();
+    let channel_id = funding_channel_id();
+    let first = ShutdownScriptVariant::P2wpkh([0xab; 20]);
+    let second = ShutdownScriptVariant::P2wpkh([0xcd; 20]);
+
+    let mut b = ProgramBuilder::new();
+    establish_channel(&mut b, 6);
+    send_shutdown(&mut b, channel_id, first.clone());
+    send_shutdown(&mut b, channel_id, second.clone());
+
+    fx.run(&b.build());
+
+    // The target may ignore our second `shutdown`, so the first one is what it
+    // is replying to.
+    assert_eq!(
+        fx.channel_state(&channel_id).our_shutdown_script,
+        Some(first.encode())
+    );
+    // Both were still put on the wire.
+    let sent: Shutdown = fx.sent(fx.sent_len() - 1);
+    assert_eq!(sent.scriptpubkey, second.encode());
+}
+
+#[test]
+fn execute_recv_shutdown() {
+    let (fx, _) = recv_channel_ready_fixture();
+    let channel_id = funding_channel_id();
+    let our_script = ShutdownScriptVariant::P2wpkh([0xab; 20]);
+    let target_script = ShutdownScriptVariant::P2wpkh([0xcd; 20]);
+    let mut fx = fx.queue(&Message::Shutdown(Shutdown::for_channel(
+        channel_id,
+        target_script.encode(),
+    )));
+
+    fx.run(&recv_shutdown_program(channel_id, our_script));
+
+    // TODO: Once we add IR support for building closing transactions, verify
+    // the returned scriptpubkey through the closing transaction's output.
+
+    assert_eq!(
+        fx.channel_state(&channel_id).counterparty_shutdown_script,
+        Some(target_script.encode())
+    );
+    assert_eq!(fx.queued_len(), 0);
+}
+
+#[test]
+fn execute_recv_shutdown_skips_implicit_channel_ready() {
+    // A `channel_ready` arriving while `RecvShutdown` waits is recorded and
+    // skipped, and the target's `shutdown` still completes the receive.
+    let (fx, target_pcp) = recv_channel_ready_fixture();
+    let channel_id = funding_channel_id();
+    let script = ShutdownScriptVariant::P2wpkh([0xab; 20]);
+    // A resend carrying the same point, which the `channel_ready` oracle allows.
+    let mut fx = fx
+        .queue(&channel_ready_reply(target_pcp))
+        .queue(&Message::Shutdown(Shutdown::for_channel(
+            channel_id,
+            script.encode(),
+        )));
+
+    fx.run(&recv_shutdown_program(channel_id, script.clone()));
+
+    // The `channel_ready` was skipped instead of ending the program, so the
+    // `shutdown` behind it still arrived.
+    let state = fx.channel_state(&channel_id);
+    assert_eq!(state.counterparty_shutdown_script, Some(script.encode()));
+    assert_eq!(
+        *state.next_counterparty_per_commitment_point(),
+        Some(target_pcp)
+    );
+    assert_eq!(fx.queued_len(), 0);
+}
+
+#[test]
+fn execute_recv_shutdown_received_early() {
+    // The target's `shutdown` arrives while `RecvChannelReady` is waiting, so
+    // it is recorded before `RecvShutdown` runs, which must still report it.
+    let channel_id = funding_channel_id();
+    let target_script = ShutdownScriptVariant::P2wpkh([0xcd; 20]);
+    let mut fx = recv_funding_signed_fixture()
+        .queue(&Message::Shutdown(Shutdown::for_channel(
+            channel_id,
+            target_script.encode(),
+        )))
+        .queue(&channel_ready_reply(sample_pubkey(7)));
+
+    let mut b = ProgramBuilder::new();
+    fund_channel(&mut b);
+    b.append(Operation::MineBlocks(6), &[]);
+    let shutdown = send_shutdown(
+        &mut b,
+        channel_id,
+        ShutdownScriptVariant::P2wpkh([0xab; 20]),
+    );
+    b.append(Operation::RecvChannelReady, &[]);
+    let spk = b.append(
+        Operation::RecvShutdown,
+        &[shutdown.sent, shutdown.channel_id],
+    );
+    // Put the produced script back on the wire so it can be inspected.
+    b.append(Operation::SendShutdown, &[shutdown.channel_id, spk]);
+
+    fx.run(&b.build());
+
+    assert_eq!(
+        fx.channel_state(&channel_id).counterparty_shutdown_script,
+        Some(target_script.encode())
+    );
+    let echoed: Shutdown = fx.sent(fx.sent_len() - 1);
+    assert_eq!(echoed.scriptpubkey, target_script.encode());
+    assert_eq!(fx.queued_len(), 0);
+}
+
+#[test]
+fn execute_recv_shutdown_reports_own_channel() {
+    let channel_id = funding_channel_id();
+    let other = second_funding_channel_id();
+
+    // Establish both channels.
+    let mut fx = recv_two_accept_channel_fixture()
+        .queue(&channel_ready_reply(sample_pubkey(7)))
+        .queue(&Message::ChannelReady(ChannelReady {
+            channel_id: other,
+            second_per_commitment_point: sample_pubkey(8),
+            tlvs: ChannelReadyTlvs::default(),
+        }));
+    fx.run(&recv_two_channel_ready_program());
+
+    // We sent a `shutdown` on both channels and the other channel is answered
+    // first, so a lookup ignoring the channel would report its script.
+    let other_script = ShutdownScriptVariant::P2wpkh([0x11; 20]);
+    let script = ShutdownScriptVariant::P2wpkh([0xab; 20]);
+    let mut fx = fx
+        .queue(&Message::Shutdown(Shutdown::for_channel(
+            other,
+            other_script.encode(),
+        )))
+        .queue(&Message::Shutdown(Shutdown::for_channel(
+            channel_id,
+            script.encode(),
+        )));
+    let mut b = ProgramBuilder::new();
+    send_shutdown(&mut b, other, other_script.clone());
+    let shutdown = send_shutdown(&mut b, channel_id, script.clone());
+    let spk = b.append(
+        Operation::RecvShutdown,
+        &[shutdown.sent, shutdown.channel_id],
+    );
+    // Put the produced script back on the wire so it can be inspected.
+    b.append(Operation::SendShutdown, &[shutdown.channel_id, spk]);
+
+    fx.run(&b.build());
+
+    assert_eq!(
+        fx.channel_state(&other).counterparty_shutdown_script,
+        Some(other_script.encode())
+    );
+    let echoed: Shutdown = fx.sent(fx.sent_len() - 1);
+    assert_eq!(echoed.scriptpubkey, script.encode());
+    assert_eq!(fx.queued_len(), 0);
+}
+
+#[test]
+fn execute_recv_shutdown_other_tracked_channel() {
+    let channel_id = funding_channel_id();
+    let other = second_funding_channel_id();
+
+    // Establish both channels.
+    let mut fx = recv_two_accept_channel_fixture()
+        .queue(&channel_ready_reply(sample_pubkey(7)))
+        .queue(&Message::ChannelReady(ChannelReady {
+            channel_id: other,
+            second_per_commitment_point: sample_pubkey(8),
+            tlvs: ChannelReadyTlvs::default(),
+        }));
+    fx.run(&recv_two_channel_ready_program());
+
+    // A `shutdown` on a channel we sent none on may answer one sent there
+    // earlier. It is recorded against that channel and skipped, and we keep
+    // waiting for ours.
+    let other_script = ShutdownScriptVariant::P2wpkh([0x11; 20]);
+    let script = ShutdownScriptVariant::P2wpkh([0xab; 20]);
+    let mut fx = fx
+        .queue(&Message::Shutdown(Shutdown::for_channel(
+            other,
+            other_script.encode(),
+        )))
+        .queue(&Message::Shutdown(Shutdown::for_channel(
+            channel_id,
+            script.encode(),
+        )));
+    let mut b = ProgramBuilder::new();
+    let shutdown = send_shutdown(&mut b, channel_id, script.clone());
+    b.append(
+        Operation::RecvShutdown,
+        &[shutdown.sent, shutdown.channel_id],
+    );
+
+    fx.run(&b.build());
+
+    assert_eq!(
+        fx.channel_state(&channel_id).counterparty_shutdown_script,
+        Some(script.encode())
+    );
+    assert_eq!(
+        fx.channel_state(&other).counterparty_shutdown_script,
+        Some(other_script.encode())
+    );
+    assert_eq!(fx.queued_len(), 0);
+}
+
+#[test]
+fn execute_recv_shutdown_keeps_first_reply() {
+    // Two `shutdown`s arrive while `RecvChannelReady` is waiting, so both are
+    // recorded before `RecvShutdown` runs, but only the first is kept.
+    let channel_id = funding_channel_id();
+    let first = ShutdownScriptVariant::P2wpkh([0x11; 20]);
+    let second = ShutdownScriptVariant::P2wpkh([0x22; 20]);
+    let mut fx = recv_funding_signed_fixture()
+        .queue(&Message::Shutdown(Shutdown::for_channel(
+            channel_id,
+            first.encode(),
+        )))
+        .queue(&Message::Shutdown(Shutdown::for_channel(
+            channel_id,
+            second.encode(),
+        )))
+        .queue(&channel_ready_reply(sample_pubkey(7)));
+
+    let mut b = ProgramBuilder::new();
+    fund_channel(&mut b);
+    b.append(Operation::MineBlocks(6), &[]);
+    let shutdown = send_shutdown(
+        &mut b,
+        channel_id,
+        ShutdownScriptVariant::P2wpkh([0xab; 20]),
+    );
+    b.append(Operation::RecvChannelReady, &[]);
+    let spk = b.append(
+        Operation::RecvShutdown,
+        &[shutdown.sent, shutdown.channel_id],
+    );
+    // Put the produced script back on the wire so it can be inspected.
+    b.append(Operation::SendShutdown, &[shutdown.channel_id, spk]);
+
+    fx.run(&b.build());
+
+    assert_eq!(
+        fx.channel_state(&channel_id).counterparty_shutdown_script,
+        Some(first.encode())
+    );
+    let echoed: Shutdown = fx.sent(fx.sent_len() - 1);
+    assert_eq!(echoed.scriptpubkey, first.encode());
+    assert_eq!(fx.queued_len(), 0);
+}
+
+#[test]
+fn execute_recv_shutdown_after_response_is_noop() {
+    let (fx, _) = recv_channel_ready_fixture();
+    let channel_id = funding_channel_id();
+    let script = ShutdownScriptVariant::P2wpkh([0xab; 20]);
+    // Only one reply is queued: once the target has responded, the second
+    // RecvShutdown must be a no-op rather than block on an empty queue.
+    let mut fx = fx.queue(&Message::Shutdown(Shutdown::for_channel(
+        channel_id,
+        script.encode(),
+    )));
+
+    let mut b = ProgramBuilder::new();
+    establish_channel(&mut b, 6);
+    let first = send_shutdown(&mut b, channel_id, script);
+    b.append(Operation::RecvShutdown, &[first.sent, first.channel_id]);
+    let second = b.append(
+        Operation::SendShutdown,
+        &[first.channel_id, first.scriptpubkey],
+    );
+    b.append(Operation::RecvShutdown, &[second, first.channel_id]);
+
+    fx.run(&b.build());
+
+    assert_eq!(fx.queued_len(), 0);
+}
+
+#[test]
+fn execute_recv_shutdown_before_channel_ready_is_noop() {
+    // The target has not sent `channel_ready`, so it may ignore our `shutdown`.
+    // No reply is queued: RecvShutdown must be a no-op rather than block on an
+    // empty queue.
+    let channel_id = funding_channel_id();
+    let mut fx = recv_funding_signed_fixture();
+
+    let mut b = ProgramBuilder::new();
+    fund_channel(&mut b);
+    let shutdown = send_shutdown(
+        &mut b,
+        channel_id,
+        ShutdownScriptVariant::P2wpkh([0xab; 20]),
+    );
+    b.append(
+        Operation::RecvShutdown,
+        &[shutdown.sent, shutdown.channel_id],
+    );
+
+    fx.run(&b.build());
+
+    // We sent one, so a reply would be expected once `channel_ready` arrives.
+    assert!(fx.channel_state(&channel_id).our_shutdown_script.is_some());
+    assert!(
+        fx.channel_state(&channel_id)
+            .counterparty_shutdown_script
+            .is_none()
+    );
+    assert_eq!(fx.queued_len(), 0);
+}
+
+#[test]
+fn execute_recv_shutdown_untracked_channel_is_noop() {
+    let (mut fx, _) = recv_channel_ready_fixture();
+    let untracked = ChannelId::new([0x99; 32]);
+
+    // No shutdown reply is queued: a RecvShutdown for a channel we never
+    // established must be a no-op rather than block on an empty queue.
+    fx.run(&recv_shutdown_program(
+        untracked,
+        ShutdownScriptVariant::P2wpkh([0xab; 20]),
+    ));
+
+    assert_eq!(fx.queued_len(), 0);
+}
+
+fn warning_reply(channel_id: ChannelId) -> Message {
+    Message::Warning(Warning {
+        channel_id,
+        data: b"non-standard scriptpubkey".to_vec(),
+    })
+}
+
+#[test]
+fn execute_recv_shutdown_warning_ends_execution() {
+    // BOLT 2 lets the target warn about our non-standard `scriptpubkey` instead
+    // of replying, but every implementation except LDK disconnects afterwards
+    // and LDK acts as if the `shutdown` never came, so a warning just ends
+    // execution, whichever channel it names.
+    for channel_id in [
+        funding_channel_id(),
+        ChannelId::ALL,
+        ChannelId::new([0x99; 32]),
+    ] {
+        let (fx, _) = recv_channel_ready_fixture();
+        let mut fx = fx.queue(&warning_reply(channel_id));
+
+        let err = fx.run_err(&recv_shutdown_program(
+            funding_channel_id(),
+            ShutdownScriptVariant::Empty,
+        ));
+
+        assert!(matches!(
+            err,
+            ExecuteError::UnexpectedMessage {
+                expected: MessageType::SHUTDOWN,
+                got: MessageType::WARNING,
+            }
+        ));
+    }
+}
+
+#[test]
+fn execute_recv_shutdown_reply_to_non_standard_script() {
+    let (fx, _) = recv_channel_ready_fixture();
+    let channel_id = funding_channel_id();
+    // The target SHOULD warn about our non-standard `scriptpubkey`, but may
+    // reply with a `shutdown` anyway, which must still be valid.
+    let target_script = ShutdownScriptVariant::P2wpkh([0xcd; 20]);
+    let mut fx = fx.queue(&Message::Shutdown(Shutdown::for_channel(
+        channel_id,
+        target_script.encode(),
+    )));
+
+    fx.run(&recv_shutdown_program(
+        channel_id,
+        ShutdownScriptVariant::Empty,
+    ));
+
+    assert_eq!(
+        fx.channel_state(&channel_id).counterparty_shutdown_script,
+        Some(target_script.encode())
+    );
+    assert_eq!(fx.queued_len(), 0);
 }
 
 #[test]
