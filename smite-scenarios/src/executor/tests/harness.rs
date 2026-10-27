@@ -555,21 +555,35 @@ pub fn second_funded_accept_channel() -> AcceptChannel {
     }
 }
 
-/// The channel id the second channel's funding transaction produces, funded
-/// from the second UTXO of [`two_funding_negotiations_fixture`].
-pub fn second_funding_channel_id() -> ChannelId {
-    ChannelId::v1_from_funding_outpoint(OutPoint {
+/// The outpoint of the second channel's funding transaction, funded from the
+/// second UTXO of [`recv_two_funding_signed_fixture`].
+pub fn second_funding_outpoint() -> OutPoint {
+    OutPoint {
         txid: "4babf25e65e63224c937fb3b8a31a813d91936bf5c3c5cd7fd1e83986ddc90ee"
             .parse()
             .expect("valid txid"),
         vout: 0,
-    })
+    }
 }
 
-/// A fixture with the target's `accept_channel` for both
+/// The channel id the second channel's funding transaction produces.
+pub fn second_funding_channel_id() -> ChannelId {
+    ChannelId::v1_from_funding_outpoint(second_funding_outpoint())
+}
+
+/// The acceptor's `funding_signed` for [`second_funded_open_channel`].
+pub fn second_funding_signed_reply() -> Message {
+    Message::FundingSigned(funding_signed_for(
+        &second_funded_open_channel().message,
+        &second_funded_accept_channel(),
+        second_funding_outpoint(),
+    ))
+}
+
+/// A fixture with the target's `accept_channel` and `funding_signed` for both
 /// [`funded_open_channel`] and [`second_funded_open_channel`] queued, and a
 /// UTXO to fund each.
-pub fn recv_two_accept_channel_fixture() -> Fixture {
+pub fn recv_two_funding_signed_fixture() -> Fixture {
     let mut second_utxo = sample_utxo();
     second_utxo.outpoint.vout = 1;
 
@@ -577,4 +591,6 @@ pub fn recv_two_accept_channel_fixture() -> Fixture {
         .with_utxos(vec![sample_utxo(), second_utxo])
         .queue(&Message::AcceptChannel(funded_accept_channel()))
         .queue(&Message::AcceptChannel(second_funded_accept_channel()))
+        .queue(&funding_signed_reply())
+        .queue(&second_funding_signed_reply())
 }

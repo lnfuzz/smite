@@ -43,6 +43,17 @@ impl Oracle<ChannelReadyContext<'_>> for ChannelReadyOracle {
             ));
         };
 
+        // Check that the target countersigned our commitment before declaring
+        // the channel ready. Without a `funding_signed` we hold no valid
+        // commitment transaction, so a channel the target treats as ready
+        // leaves our funding output spendable only with its cooperation.
+        if !channel.funding_signed_received {
+            return Err(Violation::InvalidChannelReady(
+                context.channel_ready.channel_id,
+                "no funding_signed was received for this channel".to_string(),
+            ));
+        }
+
         // Check that the on-chain funding output matches the negotiated funding
         // script and amount.
         if !channel.is_funding_outpoint_valid {
@@ -193,7 +204,9 @@ mod tests {
             htlc_basepoint_privkey: secret_key(1),
         };
 
-        ChannelState::new(config, holder, commitments, true, false, false)
+        let mut state = ChannelState::new(config, holder, commitments, true, false, false);
+        state.funding_signed_received = true;
+        state
     }
 
     /// Oracle inputs for testing. Defaults to a conforming `channel_ready`
@@ -271,6 +284,14 @@ mod tests {
         };
 
         assert_fail(&inputs, "unknown channel_id: no channel is tracked for it");
+    }
+
+    #[test]
+    fn channel_ready_without_funding_signed_fails() {
+        let mut inputs = OracleInputs::default();
+        inputs.channel_mut().funding_signed_received = false;
+
+        assert_fail(&inputs, "no funding_signed was received for this channel");
     }
 
     #[test]

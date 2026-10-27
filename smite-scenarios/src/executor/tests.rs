@@ -1510,7 +1510,7 @@ fn execute_recv_channel_ready_resend_with_new_alias() {
     // Instead of a `channel_ready` for the second channel, the target resends
     // the first channel's with a different alias but otherwise identical
     // contents.
-    let mut fx = recv_two_accept_channel_fixture()
+    let mut fx = recv_two_funding_signed_fixture()
         .queue(&channel_ready_reply(target_pcp))
         .queue(&Message::ChannelReady(ChannelReady {
             channel_id: funding_channel_id(),
@@ -1536,7 +1536,7 @@ fn execute_recv_channel_ready_rejects_alias_reused_by_another_channel() {
     // The second channel's `channel_ready` advertises the alias the first
     // channel already advertised.
     let alias = ShortChannelId::from_u64(42);
-    let err = recv_two_accept_channel_fixture()
+    let err = recv_two_funding_signed_fixture()
         .queue(&Message::ChannelReady(ChannelReady {
             channel_id: funding_channel_id(),
             second_per_commitment_point: sample_pubkey(7),
@@ -1568,7 +1568,7 @@ fn execute_recv_channel_ready_rejects_alias_matching_another_channels_scid() {
     // The second channel advertises an alias matching the first channel's real
     // short channel ID.
     let alias = FUNDING_SCID;
-    let err = recv_two_accept_channel_fixture()
+    let err = recv_two_funding_signed_fixture()
         .queue(&Message::ChannelReady(ChannelReady {
             channel_id: funding_channel_id(),
             second_per_commitment_point: sample_pubkey(7),
@@ -1695,6 +1695,28 @@ fn execute_recv_implicit_channel_ready_unknown_channel() {
     };
     assert_eq!(*id, funding_channel_id());
     assert!(reason.contains("unknown channel_id: no channel is tracked for it"));
+}
+
+#[test]
+fn execute_recv_channel_ready_without_funding_signed() {
+    // The target answers our `funding_created` with a `channel_ready` instead
+    // of the `funding_signed` we need to hold a valid commitment transaction.
+    let mut b = ProgramBuilder::new();
+    negotiate_channel(&mut b, &funded_open_channel());
+    send_funding_created(&mut b);
+    b.append(Operation::MineBlocks(6), &[]);
+    b.append(Operation::RecvChannelReady, &[]);
+
+    let err = Fixture::new()
+        .queue(&Message::AcceptChannel(funded_accept_channel()))
+        .queue(&channel_ready_reply(sample_pubkey(7)))
+        .run_err(&b.build());
+
+    let ExecuteError::Violation(Violation::InvalidChannelReady(id, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*id, funding_channel_id());
+    assert!(reason.contains("no funding_signed was received for this channel"));
 }
 
 #[test]
