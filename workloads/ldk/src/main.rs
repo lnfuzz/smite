@@ -94,6 +94,10 @@ fn main() {
         )
         .set_listening_addresses(vec![listen_addr.into()])
         .expect("valid listening addresses")
+        // ldk-node only accepts announced channels once both an alias and
+        // listening addresses are set, and rejects them otherwise.
+        .set_node_alias("smite-ldk".to_string())
+        .expect("valid node alias")
         .set_storage_dir_path(data_dir)
         .build()
         .expect("node build");
