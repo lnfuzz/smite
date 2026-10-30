@@ -118,13 +118,6 @@ impl StartCommand {
             }
         };
 
-        let Some(runs_dir) = CampaignState::runs_dir() else {
-            log::error!("unable to determine home directory");
-            return false;
-        };
-
-        let state_path = runs_dir.join(&campaign_id).join("state.json");
-
         let Some(git_hash) = smite_git_hash(&config.smite_dir) else {
             log::error!("could not determine smite git hash");
             return false;
@@ -143,21 +136,21 @@ impl StartCommand {
             tmux_session,
         );
 
-        if let Err(e) = state.save(&state_path) {
+        if let Err(e) = state.save_campaign() {
             log::error!("{e}");
             return false;
         }
 
-        if !launch_runners(&config, &seed_dir, &mut state, &state_path) {
+        if !launch_runners(&config, &seed_dir, &mut state) {
             return false;
         }
-        if let Err(e) = state.save(&state_path) {
+        if let Err(e) = state.save_campaign() {
             log::error!("{e}");
             return false;
         }
 
         log::info!("campaign {} is running", state.id);
-        log::info!("state saved to {}", state_path.display());
+        log::info!("state saved to ~/.smitebot/runs/{}/state.json", state.id);
 
         log::info!("attaching to tmux session '{}'", state.tmux_session);
         if let Err(e) = tmux::attach(&state.tmux_session) {
@@ -170,12 +163,7 @@ impl StartCommand {
 
 /// Spawns all runners inside a tmux session, verifies they produce
 /// `fuzzer_stats`, and updates campaign state with PIDs.
-fn launch_runners(
-    config: &CampaignConfig,
-    seed_dir: &Path,
-    state: &mut CampaignState,
-    state_path: &Path,
-) -> bool {
+fn launch_runners(config: &CampaignConfig, seed_dir: &Path, state: &mut CampaignState) -> bool {
     let session = &state.tmux_session;
     log::info!(
         "starting {} runners in tmux session '{session}'",
@@ -198,7 +186,7 @@ fn launch_runners(
         if let Err(e) = result {
             log::error!("failed to create tmux window for runner {id}: {e}");
             state.runners = runners;
-            fail_campaign(state, state_path);
+            fail_campaign(state);
             return false;
         }
 
@@ -207,7 +195,7 @@ fn launch_runners(
 
     state.runners = runners;
 
-    if let Err(e) = state.save(state_path) {
+    if let Err(e) = state.save_campaign() {
         log::warn!("failed to save state: {e}");
     }
 
@@ -221,7 +209,7 @@ fn launch_runners(
         // verify_startup has already logged the specific reason per runner
         // (window died, or ceiling reached).
         log::error!("one or more runners failed to start");
-        fail_campaign(state, state_path);
+        fail_campaign(state);
         return false;
     }
 
@@ -231,7 +219,7 @@ fn launch_runners(
 
 /// Marks the campaign as failed, logs instructions to inspect the tmux session,
 /// and persists the updated state.
-fn fail_campaign(state: &mut CampaignState, state_path: &Path) {
+fn fail_campaign(state: &mut CampaignState) {
     if !state.runners.is_empty() {
         log::info!(
             "inspect tmux session '{}' for error output, \
@@ -241,7 +229,7 @@ fn fail_campaign(state: &mut CampaignState, state_path: &Path) {
         );
     }
     state.status = Status::Failed;
-    if let Err(e) = state.save(state_path) {
+    if let Err(e) = state.save_campaign() {
         log::warn!("failed to save state: {e}");
     }
 }
