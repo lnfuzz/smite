@@ -2,8 +2,8 @@
 FROM eclipse-temurin:21 AS builder
 
 # Build arguments
-ARG ECLAIR_VERSION=v0.14.2
-ARG BITCOIN_VERSION=31.1
+ARG ECLAIR_VERSION=v0.14.6
+ARG BITCOIN_VERSION=31.2
 ARG SCENARIO
 ARG JACOCO_VERSION=0.8.14
 
@@ -44,7 +44,11 @@ RUN sed -i 's/timers\.startSingleTimer(TickNewBlock, 2 seconds)/context.self ! T
     test "$(grep -c 'context.self ! TickNewBlock' eclair-core/src/main/scala/fr/acinq/eclair/blockchain/bitcoind/ZmqWatcher.scala)" -eq 2 && \
     sed -i 's/scheduleOnce(1 second, self, Symbol("checkMsg"))/scheduleOnce(50 milliseconds, self, Symbol("checkMsg"))/' eclair-core/src/main/scala/fr/acinq/eclair/blockchain/bitcoind/zmq/ZMQActor.scala && \
     test "$(grep -c 'scheduleOnce(50 milliseconds, self, Symbol("checkMsg"))' eclair-core/src/main/scala/fr/acinq/eclair/blockchain/bitcoind/zmq/ZMQActor.scala)" -eq 1
-RUN ./mvnw package -DskipTests -pl eclair-node -am
+# Release builds verify eclair-core.jar against a trusted checksum, which can't
+# match since we patch eclair-core above. Skip checksum verification, as
+# Eclair's own Dockerfile does for its dependency-caching build.
+RUN ./mvnw package -DskipTests -pl eclair-node -am \
+    -Daether.artifactResolver.postProcessor.trustedChecksums=false
 
 # Unzip the Eclair distribution to /opt/eclair/.
 # /opt/ is used instead of /usr/local/ because eclair-node.sh uses relative
