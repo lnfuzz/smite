@@ -304,6 +304,10 @@ impl Target for LndTarget {
     ///   a wrapping `uint64` and then tested as an `int64`, so any push above
     ///   roughly 2^63 wraps back into the non-negative range.
     ///   See: <https://github.com/lightningnetwork/lnd/pull/10765>
+    ///
+    /// - LND as fundee sends an `accept_channel` with a shallow `minimum_depth`
+    ///   for fairly large channels, since it scales the depth based on its
+    ///   stake in the channel. A fix is in progress upstream.
     fn known_violations() -> &'static [&'static [&'static str]] {
         &[
             &["accepted invalid open_channel: neither side exceeds channel reserve"],
@@ -311,6 +315,10 @@ impl Target for LndTarget {
             &[
                 "accepted invalid open_channel: push_msat",
                 "exceeds funding amount",
+            ],
+            &[
+                "invalid accept_channel: non-zeroconf channel with capacity",
+                "requires minimum_depth of at least",
             ],
         ]
     }

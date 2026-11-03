@@ -33,6 +33,18 @@ const MAX_DUST_LIMIT_SATOSHIS: u64 = 10_000;
 // close, so values above this (~2 weeks) are considered unreasonably large.
 const MAX_TO_SELF_DELAY: u16 = 2016;
 
+// A shallow depth leaves the funding transaction open to double-spending via
+// a reorg, so non-zeroconf values below this are considered unreasonably small.
+const MIN_MINIMUM_DEPTH: u32 = 3;
+
+// A small channel is unlikely to be worth double-spending via a reorg, so
+// values below this may use a depth below `MIN_MINIMUM_DEPTH`.
+const SMALL_CHANNEL_CAPACITY_SATOSHIS: u64 = 125_000;
+
+// A small non-zeroconf channel must still wait for its funding confirmation,
+// so values below this are only valid with option_zeroconf.
+const MIN_MINIMUM_DEPTH_SMALL_CHANNEL: u32 = 1;
+
 /// Context for `AcceptChannelOracle`
 pub struct AcceptChannelContext<'a> {
     /// The `accept_channel` received from the peer.
@@ -309,12 +321,20 @@ fn verify_accept_channel(
         return Err("accept_channel channel_type does not match open_channel".to_string());
     }
 
-    // Check that option_zeroconf has a minimum depth of 0.
-    if channel_type.supports_feature(Features::OPTION_ZEROCONF) && accept_channel.minimum_depth != 0
-    {
+    // Check that minimum_depth is 0 when `option_zeroconf` is negotiated, and
+    // that it is reasonable for the channel capacity otherwise.
+    let min_depth = min_minimum_depth(open_channel.funding_satoshis);
+    if channel_type.supports_feature(Features::OPTION_ZEROCONF) {
+        if accept_channel.minimum_depth != 0 {
+            return Err(format!(
+                "option_zeroconf requires minimum_depth to be 0, but got {}",
+                accept_channel.minimum_depth,
+            ));
+        }
+    } else if accept_channel.minimum_depth < min_depth {
         return Err(format!(
-            "option_zeroconf requires minimum_depth to be 0, but got {}",
-            accept_channel.minimum_depth,
+            "non-zeroconf channel with capacity {} sat requires minimum_depth of at least {min_depth}, but got {}",
+            open_channel.funding_satoshis, accept_channel.minimum_depth,
         ));
     }
 
@@ -500,6 +520,16 @@ fn max_accepted_htlcs_limit(channel_type: &Features) -> u16 {
         MAX_ACCEPTED_HTLCS_ZERO_FEE_COMMITMENTS
     } else {
         MAX_ACCEPTED_HTLCS_DEFAULT
+    }
+}
+
+/// Returns the minimum depth required for a non-zeroconf channel of the given
+/// capacity.
+fn min_minimum_depth(capacity_satoshis: u64) -> u32 {
+    if capacity_satoshis < SMALL_CHANNEL_CAPACITY_SATOSHIS {
+        MIN_MINIMUM_DEPTH_SMALL_CHANNEL
+    } else {
+        MIN_MINIMUM_DEPTH
     }
 }
 
@@ -1130,6 +1160,56 @@ mod tests {
             &sample_negotiated_features(),
             &HashMap::new(),
             "invalid accept_channel: option_zeroconf requires minimum_depth to be 0",
+        );
+    }
+
+    #[test]
+    fn accept_channel_minimum_depth_below_the_minimum() {
+        let mut oc = open_channel();
+        oc.funding_satoshis = SMALL_CHANNEL_CAPACITY_SATOSHIS;
+        oc.push_msat = 0;
+        let mut ac = accept_channel();
+        ac.minimum_depth = MIN_MINIMUM_DEPTH - 1;
+
+        assert_fail(
+            &ac,
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+            &HashMap::new(),
+            "invalid accept_channel: non-zeroconf channel with capacity 125000 sat requires minimum_depth of at least 3, but got 2",
+        );
+    }
+
+    #[test]
+    fn accept_channel_small_channel_minimum_depth_at_the_minimum() {
+        let mut oc = open_channel();
+        oc.funding_satoshis = SMALL_CHANNEL_CAPACITY_SATOSHIS - 1;
+        oc.push_msat = 10_000_000;
+        let mut ac = accept_channel();
+        ac.minimum_depth = MIN_MINIMUM_DEPTH_SMALL_CHANNEL;
+
+        assert_pass(
+            &ac,
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+            &HashMap::new(),
+        );
+    }
+
+    #[test]
+    fn accept_channel_small_channel_zero_minimum_depth() {
+        let mut oc = open_channel();
+        oc.funding_satoshis = SMALL_CHANNEL_CAPACITY_SATOSHIS - 1;
+        oc.push_msat = 0;
+        let mut ac = accept_channel();
+        ac.minimum_depth = MIN_MINIMUM_DEPTH_SMALL_CHANNEL - 1;
+
+        assert_fail(
+            &ac,
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+            &HashMap::new(),
+            "invalid accept_channel: non-zeroconf channel with capacity 124999 sat requires minimum_depth of at least 1, but got 0",
         );
     }
 
