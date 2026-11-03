@@ -127,6 +127,7 @@ mod tests {
                 to_self_delay: 144,
             },
             minimum_depth: 8,
+            announce_channel: false,
         };
         let commitments = config
             .new_initial_commitments(3_000_000_000, 15_000, pkey1, pkey2)

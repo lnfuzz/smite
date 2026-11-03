@@ -99,6 +99,7 @@ impl TestVectorFile {
                 .acceptor
                 .to_party_config(vector.dust_limit_satoshis, self.to_self_delay),
             minimum_depth: 8,
+            announce_channel: false,
         }
     }
 

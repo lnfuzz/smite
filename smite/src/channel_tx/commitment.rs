@@ -99,6 +99,8 @@ pub struct ChannelConfig {
     /// Minimum funding confirmations required before `channel_ready` messages
     /// are exchanged and the channel becomes active.
     pub minimum_depth: u32,
+    /// Whether the opener requested a public channel in `open_channel`.
+    pub announce_channel: bool,
 }
 
 /// An in-flight HTLC that appears (subject to dust trimming) as an output in
@@ -228,6 +230,7 @@ impl ChannelConfig {
                 to_self_delay: accept_channel.to_self_delay,
             },
             minimum_depth: accept_channel.minimum_depth,
+            announce_channel: open_channel.announce_channel(),
         };
         let commitments = config.new_initial_commitments(
             open_channel.push_msat,

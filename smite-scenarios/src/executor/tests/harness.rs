@@ -57,6 +57,11 @@ const MOCK_TX_INDEX: u32 = 7;
 /// 0.
 pub const FUNDING_SCID: ShortChannelId = ShortChannelId::new(MOCK_BLOCK_HEIGHT, MOCK_TX_INDEX, 0);
 
+/// The real `short_channel_id` of the second broadcast and confirmed channel:
+/// the mock's next block position and the funding output's vout 0.
+pub const SECOND_FUNDING_SCID: ShortChannelId =
+    ShortChannelId::new(MOCK_BLOCK_HEIGHT, MOCK_TX_INDEX + 1, 0);
+
 #[derive(Default)]
 pub struct MockBitcoinCli {
     pub mine_blocks_calls: Vec<u8>,
