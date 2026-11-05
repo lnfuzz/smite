@@ -106,6 +106,14 @@ RUN sed -i '/peer->to_peer/!s/time_from_sec(5)/time_from_sec(0)/' connectd/multi
 # FIXME: tune this value down after further experiments.
 RUN sed -i 's/topo->poll_seconds = 30;/topo->poll_seconds = 2;/' lightningd/chaintopology.c && \
     test "$(grep -c 'topo->poll_seconds = 2;' lightningd/chaintopology.c)" -eq 1
+# Use CLN's mainnet default config on regtest. By default regtest gets CLN's
+# testnet config, which loosens safety-relevant settings (e.g., 1 funding
+# confirmation, 6-block to_self_delay, ignored fee limits). Patching the config
+# selection rather than passing individual options keeps us testing whatever
+# CLN currently ships as its mainnet defaults.
+RUN sed -i 's/ld->config = testnet_config;/ld->config = mainnet_config;/' lightningd/options.c && \
+    test "$(grep -c 'ld->config = mainnet_config;' lightningd/options.c)" -eq 2 && \
+    test "$(grep -c 'ld->config = testnet_config;' lightningd/options.c)" -eq 0
 # Add a `syncblocks` RPC command that forces CLN to poll for new blocks
 # immediately instead of waiting for the polling timer. Scenarios can call it
 # on demand after mining a block. This complements periodic polling: concurrent
