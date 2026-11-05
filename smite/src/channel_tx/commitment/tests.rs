@@ -72,6 +72,19 @@ fn derive_pubkey_from_basepoint() {
 }
 
 #[test]
+fn derive_privkey_from_basepoint_secret() {
+    let basepoint_secret =
+        privkey("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+    let per_commitment_point =
+        pubkey("025f7117a78150fe2ef97db7cfc83bd57b2e2c0d0dd25eaf467a4a1c2a45ce1486");
+    let localprivkey = derive_privkey(&basepoint_secret, &per_commitment_point);
+    assert_eq!(
+        localprivkey,
+        privkey("cbced912d3b21bf196a766651e436aff192362621ce317704ea2f75d87e7be0f"),
+    );
+}
+
+#[test]
 fn derive_revocation_pubkey_from_basepoint() {
     let revocation_basepoint =
         pubkey("036d6caac248af96f6afa7f904f550253a0f3ef3f5aa2fe6838a95b216691468e2");
@@ -174,28 +187,28 @@ fn opener_balance_after_commitment_cost_total_sat_checks() {
     // Comfortably affordable
     let opener_balance_sat: u64 = 20_000;
     assert_eq!(
-        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &legacy, 0).total_sat()),
+        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, 0, &legacy).total_sat()),
         Some(9_140),
     );
 
     // Exact zero opener balance
     let opener_balance_sat: u64 = 10_860;
     assert_eq!(
-        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &legacy, 0).total_sat()),
+        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, 0, &legacy).total_sat()),
         Some(0),
     );
 
     // Balance does not cover the fee
     let opener_balance_sat: u64 = 10_000;
     assert_eq!(
-        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &legacy, 0).total_sat()),
+        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, 0, &legacy).total_sat()),
         None
     );
 
     // Balance covers the fee but not the anchor outputs
     let opener_balance_sat: u64 = 17_500;
     assert_eq!(
-        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &anchor, 0).total_sat()),
+        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, 0, &anchor).total_sat()),
         None,
     );
 }
@@ -237,7 +250,8 @@ fn commitment_dance_adds_and_resolves_htlc() {
     let commitment_signed = |commitments: &mut ChannelCommitments,
                              signer: &HolderIdentity,
                              verifier: &HolderIdentity,
-                             next_per_commitment_point: PublicKey| {
+                             next_per_commitment_point: PublicKey,
+                             expected_htlc_sigs: usize| {
         let commitment_number = commitments.state(verifier.side).commitment_number;
         commitments.update_per_commitment_point(verifier.side, next_per_commitment_point);
         commitments.advance_commitment_number(verifier.side);
@@ -250,7 +264,8 @@ fn commitment_dance_adds_and_resolves_htlc() {
             commitment_number + 1,
         );
         let (commitment_sig, htlc_sigs) = config.sign_counterparty_commitment(commitments, signer);
-        assert!(config.verify_counterparty_signature(
+        assert_eq!(htlc_sigs.len(), expected_htlc_sigs);
+        assert!(config.verify_counterparty_signatures(
             commitments,
             verifier,
             &commitment_sig,
@@ -281,6 +296,7 @@ fn commitment_dance_adds_and_resolves_htlc() {
         &opener_holder,
         &acceptor_holder,
         pubkey1, // Rotate the pubkeys to verify that PCP is updated.
+        2,
     );
 
     // Acceptor replies with `commitment_signed`, committing the same to the
@@ -305,6 +321,7 @@ fn commitment_dance_adds_and_resolves_htlc() {
         &acceptor_holder,
         &opener_holder,
         pubkey2, // Rotate the pubkeys to verify that PCP is updated.
+        2,
     );
 
     // The acceptor received both of the opener's HTLCs: it fulfills HTLC 0
@@ -329,6 +346,7 @@ fn commitment_dance_adds_and_resolves_htlc() {
         &acceptor_holder,
         &opener_holder,
         pubkey1, // Rotate the pubkeys to verify that PCP is updated.
+        0,
     );
 
     // Opener's reply resolves both on the acceptor's commitment #2.
@@ -351,6 +369,7 @@ fn commitment_dance_adds_and_resolves_htlc() {
         &opener_holder,
         &acceptor_holder,
         pubkey2, // Rotate the pubkeys to verify that PCP is updated.
+        0,
     );
 }
 

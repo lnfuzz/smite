@@ -61,7 +61,7 @@ impl Oracle<FundingSignedContext<'_>> for FundingSignedOracle {
         // NOTE: If the colliding channel never received its own
         // `funding_signed`, a channel_id collision (see above) surfaces here as
         // an invalid signature instead.
-        if !channel.config.verify_counterparty_signature(
+        if !channel.config.verify_counterparty_signatures(
             &channel.commitments,
             &channel.holder,
             &context.funding_signed.signature,

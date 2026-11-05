@@ -1036,7 +1036,7 @@ fn execute_send_funding_created_and_recv_funding_signed() {
         htlc_basepoint_privkey: acceptor_funding_sk(),
     };
 
-    assert!(state.config.verify_counterparty_signature(
+    assert!(state.config.verify_counterparty_signatures(
         &state.commitments,
         &holder,
         &fc.signature,

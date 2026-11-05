@@ -58,13 +58,10 @@ struct CommitmentVector {
     /// Fee rate for the commitment transaction.
     feerate_per_kw: u32,
     /// Default dust limit used by both parties unless overridden below.
-    #[serde(default)]
     dust_limit_satoshis: Option<u64>,
     /// Dust limit used for the opener's commitment, overriding the default.
-    #[serde(default)]
     opener_dust_limit_satoshis: Option<u64>,
     /// Dust limit used for the acceptor's commitment, overriding the default.
-    #[serde(default)]
     acceptor_dust_limit_satoshis: Option<u64>,
     /// Opener's balance in millisatoshis, before fees and anchor outputs.
     to_opener_msat: u64,
@@ -259,7 +256,7 @@ impl TestVectorFile {
                 vector.name, vector.remote_htlc_signatures, remote_htlc_signatures,
             ));
         }
-        if !channel_config.verify_counterparty_signature(
+        if !channel_config.verify_counterparty_signatures(
             &commitments,
             &opener_holder,
             &vector.remote_signature,
@@ -280,7 +277,7 @@ impl TestVectorFile {
                 acceptor_htlc_sigs.len(),
             ));
         }
-        if !channel_config.verify_counterparty_signature(
+        if !channel_config.verify_counterparty_signatures(
             &commitments,
             &acceptor_holder,
             &acceptor_commit_sig,
