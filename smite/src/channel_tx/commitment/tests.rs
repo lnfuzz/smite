@@ -2,12 +2,22 @@
 
 mod harness;
 
+use std::str::FromStr;
+
 use super::*;
 use harness::run_commitment_vectors;
 
+/// The opener's secret key used by `sample_chan_config` and signing tests.
+const OPENER_PRIVKEY: &str = "30ff4956bbdd3222d44cc5e8a1261dab1e07957bdac5ae88fe3261ef321f3749";
+/// The acceptor's secret key used by `sample_chan_config` and signing tests.
+const ACCEPTOR_PRIVKEY: &str = "1552dfba4f6cf29a62a0af13c8d6981d36d0ef8d61ba10fb0fe90da7634d7e13";
+
 fn pubkey(hex_str: &str) -> PublicKey {
-    let bytes = hex::decode(hex_str).expect("valid hex");
-    PublicKey::from_slice(&bytes).expect("valid pubkey")
+    PublicKey::from_str(hex_str).expect("valid pubkey")
+}
+
+fn privkey(hex_str: &str) -> SecretKey {
+    SecretKey::from_str(hex_str).expect("valid secret key")
 }
 
 #[test]
@@ -75,8 +85,11 @@ fn derive_revocation_pubkey_from_basepoint() {
 }
 
 fn sample_chan_config(funding_satoshis: u64, channel_type: Features) -> ChannelConfig {
-    let sample_key = pubkey("03b28f7c5a9d1e4f8c6a7b2d3e9f1048576a1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e");
-    let sample_party = || ChannelPartyConfig {
+    let secp = Secp256k1::new();
+    let opener_pubkey = PublicKey::from_secret_key(&secp, &privkey(OPENER_PRIVKEY));
+    let acceptor_pubkey = PublicKey::from_secret_key(&secp, &privkey(ACCEPTOR_PRIVKEY));
+
+    let sample_party = |sample_key: PublicKey| ChannelPartyConfig {
         funding_pubkey: sample_key,
         payment_basepoint: sample_key,
         revocation_basepoint: sample_key,
@@ -95,10 +108,37 @@ fn sample_chan_config(funding_satoshis: u64, channel_type: Features) -> ChannelC
         },
         funding_satoshis,
         channel_type,
-        opener: sample_party(),
-        acceptor: sample_party(),
+        opener: sample_party(opener_pubkey),
+        acceptor: sample_party(acceptor_pubkey),
         minimum_depth: 8,
     }
+}
+
+fn sample_htlc(id: u64, offerer: Side, amount_msat: u64) -> Htlc {
+    Htlc {
+        id,
+        offerer,
+        amount_msat,
+        cltv_expiry: 500,
+        payment_hash: [0; SHA256_HASH_SIZE],
+    }
+}
+
+/// Asserts a side's commitment balances, feerate, and in-flight HTLCs, in order.
+#[track_caller]
+fn assert_commitment_state(
+    commitments: &ChannelCommitments,
+    side: Side,
+    opener_balance_msat: u64,
+    acceptor_balance_msat: u64,
+    feerate_per_kw: u32,
+    htlcs: &[Htlc],
+) {
+    let state = commitments.state(side);
+    assert_eq!(state.opener_balance_msat, opener_balance_msat);
+    assert_eq!(state.acceptor_balance_msat, acceptor_balance_msat);
+    assert_eq!(state.feerate_per_kw, feerate_per_kw);
+    assert_eq!(state.htlcs, htlcs);
 }
 
 #[test]
@@ -157,5 +197,288 @@ fn opener_balance_after_commitment_cost_total_sat_checks() {
     assert_eq!(
         opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &anchor).total_sat()),
         None,
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn commitment_dance_adds_and_resolves_htlc() {
+    let secp = Secp256k1::new();
+    let privkey1 = privkey(OPENER_PRIVKEY);
+    let privkey2 = privkey(ACCEPTOR_PRIVKEY);
+    let pubkey1 = PublicKey::from_secret_key(&secp, &privkey1);
+    let pubkey2 = PublicKey::from_secret_key(&secp, &privkey2);
+
+    // Set up the channel configuration, initial commitments, and holder
+    // identities for the HTLC commitment dance.
+    let config = sample_chan_config(
+        10_000_000,
+        Features::from_bits(&[Features::OPTION_STATIC_REMOTEKEY]),
+    );
+    let mut commitments = config
+        .new_initial_commitments(3_000_000_000, 253, pubkey1, pubkey2)
+        .expect("valid commitment");
+    let opener_holder = HolderIdentity {
+        side: Side::Opener,
+        funding_privkey: privkey1,
+        htlc_basepoint_privkey: privkey1,
+    };
+    let acceptor_holder = HolderIdentity {
+        side: Side::Acceptor,
+        funding_privkey: privkey2,
+        htlc_basepoint_privkey: privkey2,
+    };
+
+    let htlc0 = sample_htlc(0, Side::Opener, 2_000_000_000);
+    let htlc1 = sample_htlc(1, Side::Opener, 1_000_000_000);
+    // A `commitment_signed` creates the counterparty's next commitment: `signer`
+    // advances it (updates number and per-commitment point) and signs it, then
+    // `verifier` (that counterparty) verifies.
+    let commitment_signed = |commitments: &mut ChannelCommitments,
+                             signer: &HolderIdentity,
+                             verifier: &HolderIdentity,
+                             next_per_commitment_point: PublicKey| {
+        let commitment_number = commitments.state(verifier.side).commitment_number;
+        commitments.update_per_commitment_point(verifier.side, next_per_commitment_point);
+        commitments.advance_commitment_number(verifier.side);
+        assert_eq!(
+            commitments.state(verifier.side).per_commitment_point,
+            next_per_commitment_point,
+        );
+        assert_eq!(
+            commitments.state(verifier.side).commitment_number,
+            commitment_number + 1,
+        );
+        // TODO: Once HTLC tx signing is supported, sign and verify those here as
+        // well, and check that the number of htlc_sigs matches what is expected.
+        let commitment_sig = config.sign_counterparty_commitment(commitments, signer);
+        assert!(config.verify_counterparty_signature(commitments, verifier, &commitment_sig));
+    };
+
+    // Opener sends two `update_add_htlc`, an `update_fee`, and
+    // `commitment_signed`, committing the HTLCs and the new feerate to the
+    // acceptor's commitment #1.
+    commitments
+        .add_htlc(Side::Acceptor, htlc0)
+        .expect("balance covers HTLC");
+    commitments
+        .add_htlc(Side::Acceptor, htlc1)
+        .expect("balance covers HTLC");
+    commitments.update_fee(Side::Acceptor, 500);
+    assert_commitment_state(
+        &commitments,
+        Side::Acceptor,
+        4_000_000_000,
+        3_000_000_000,
+        500,
+        &[htlc0, htlc1],
+    );
+    commitment_signed(
+        &mut commitments,
+        &opener_holder,
+        &acceptor_holder,
+        pubkey1, // Rotate the pubkeys to verify that PCP is updated.
+    );
+
+    // Acceptor replies with `commitment_signed`, committing the same to the
+    // opener's commitment #1.
+    commitments
+        .add_htlc(Side::Opener, htlc0)
+        .expect("balance covers HTLC");
+    commitments
+        .add_htlc(Side::Opener, htlc1)
+        .expect("balance covers HTLC");
+    commitments.update_fee(Side::Opener, 500);
+    assert_commitment_state(
+        &commitments,
+        Side::Opener,
+        4_000_000_000,
+        3_000_000_000,
+        500,
+        &[htlc0, htlc1],
+    );
+    commitment_signed(
+        &mut commitments,
+        &acceptor_holder,
+        &opener_holder,
+        pubkey2, // Rotate the pubkeys to verify that PCP is updated.
+    );
+
+    // The acceptor received both of the opener's HTLCs: it fulfills HTLC 0
+    // (crediting itself) and fails HTLC 1 (refunding the opener). Its
+    // `commitment_signed` resolves both on the opener's commitment #2.
+    commitments
+        .fulfill_htlc(Side::Opener, 0, Side::Opener)
+        .expect("HTLC 0 is in-flight");
+    commitments
+        .fail_htlc(Side::Opener, 1, Side::Opener)
+        .expect("HTLC 1 is in-flight");
+    assert_commitment_state(
+        &commitments,
+        Side::Opener,
+        5_000_000_000,
+        5_000_000_000,
+        500,
+        &[],
+    );
+    commitment_signed(
+        &mut commitments,
+        &acceptor_holder,
+        &opener_holder,
+        pubkey1, // Rotate the pubkeys to verify that PCP is updated.
+    );
+
+    // Opener's reply resolves both on the acceptor's commitment #2.
+    commitments
+        .fulfill_htlc(Side::Acceptor, 0, Side::Opener)
+        .expect("HTLC 0 is in-flight");
+    commitments
+        .fail_htlc(Side::Acceptor, 1, Side::Opener)
+        .expect("HTLC 1 is in-flight");
+    assert_commitment_state(
+        &commitments,
+        Side::Acceptor,
+        5_000_000_000,
+        5_000_000_000,
+        500,
+        &[],
+    );
+    commitment_signed(
+        &mut commitments,
+        &opener_holder,
+        &acceptor_holder,
+        pubkey2, // Rotate the pubkeys to verify that PCP is updated.
+    );
+}
+
+#[test]
+fn add_htlc_exceeds_offerer_balance() {
+    let sample_key = pubkey("03b28f7c5a9d1e4f8c6a7b2d3e9f1048576a1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e");
+    let chan_config = sample_chan_config(
+        10_000_000,
+        Features::from_bits(&[Features::OPTION_STATIC_REMOTEKEY]),
+    );
+    let mut commitments = chan_config
+        .new_initial_commitments(3_000_000_000, 253, sample_key, sample_key)
+        .expect("valid commitment");
+    // One commitment is enough: both share the same HTLC logic, and the dance
+    // test covers both commitments.
+
+    // HTLC exceeds the opener's balance by one msat
+    let result = commitments.add_htlc(Side::Opener, sample_htlc(0, Side::Opener, 7_000_000_001));
+    assert!(matches!(result, Err(CommitmentError::HtlcExceedsBalance)));
+    assert_commitment_state(
+        &commitments,
+        Side::Opener,
+        7_000_000_000,
+        3_000_000_000,
+        253,
+        &[],
+    );
+}
+
+#[test]
+fn add_htlc_exactly_offerer_balance() {
+    let sample_key = pubkey("03b28f7c5a9d1e4f8c6a7b2d3e9f1048576a1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e");
+    let chan_config = sample_chan_config(
+        10_000_000,
+        Features::from_bits(&[Features::OPTION_STATIC_REMOTEKEY]),
+    );
+    let mut commitments = chan_config
+        .new_initial_commitments(3_000_000_000, 253, sample_key, sample_key)
+        .expect("valid commitment");
+    // One commitment is enough: both share the same HTLC logic, and the dance
+    // test covers both commitments.
+
+    // HTLC spends the opener's entire balance, leaving it at zero
+    let htlc = sample_htlc(0, Side::Opener, 7_000_000_000);
+    commitments
+        .add_htlc(Side::Opener, htlc)
+        .expect("balance covers HTLC");
+    assert_commitment_state(&commitments, Side::Opener, 0, 3_000_000_000, 253, &[htlc]);
+}
+
+#[test]
+fn resolve_htlc_unknown_id() {
+    let sample_key = pubkey("03b28f7c5a9d1e4f8c6a7b2d3e9f1048576a1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e");
+    let chan_config = sample_chan_config(
+        10_000_000,
+        Features::from_bits(&[Features::OPTION_STATIC_REMOTEKEY]),
+    );
+    let mut commitments = chan_config
+        .new_initial_commitments(3_000_000_000, 253, sample_key, sample_key)
+        .expect("valid commitment");
+    // One commitment is enough: both share the same HTLC logic, and the dance
+    // test covers both commitments.
+
+    let htlc = sample_htlc(0, Side::Opener, 1_000_000_000);
+    commitments
+        .add_htlc(Side::Opener, htlc)
+        .expect("balance covers HTLC");
+
+    // Resolving id 1 while only id 0 is in flight
+    let result = commitments.fulfill_htlc(Side::Opener, 1, Side::Opener);
+    assert!(matches!(result, Err(CommitmentError::HtlcNotFound)));
+    let result = commitments.fail_htlc(Side::Opener, 1, Side::Opener);
+    assert!(matches!(result, Err(CommitmentError::HtlcNotFound)));
+    assert_commitment_state(
+        &commitments,
+        Side::Opener,
+        6_000_000_000,
+        3_000_000_000,
+        253,
+        &[htlc],
+    );
+}
+
+#[test]
+fn resolve_htlc_matches_id_and_offerer() {
+    let sample_key = pubkey("03b28f7c5a9d1e4f8c6a7b2d3e9f1048576a1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e");
+    let chan_config = sample_chan_config(
+        10_000_000,
+        Features::from_bits(&[Features::OPTION_STATIC_REMOTEKEY]),
+    );
+    let mut commitments = chan_config
+        .new_initial_commitments(3_000_000_000, 253, sample_key, sample_key)
+        .expect("valid commitment");
+    // One commitment is enough: both share the same HTLC logic, and the dance
+    // test covers both commitments.
+
+    // Both offerers use ids 0 and 1, each debiting only its own balance. The
+    // opener's HTLCs are added first, so a lookup that ignores the offerer
+    // would find them instead of the acceptor's
+    let opener_htlc0 = sample_htlc(0, Side::Opener, 2_000_000_000);
+    let opener_htlc1 = sample_htlc(1, Side::Opener, 1_000_000_000);
+    let acceptor_htlc0 = sample_htlc(0, Side::Acceptor, 500_000_000);
+    let acceptor_htlc1 = sample_htlc(1, Side::Acceptor, 250_000_000);
+    for htlc in [opener_htlc0, opener_htlc1, acceptor_htlc0, acceptor_htlc1] {
+        commitments
+            .add_htlc(Side::Opener, htlc)
+            .expect("balance covers HTLC");
+    }
+    assert_commitment_state(
+        &commitments,
+        Side::Opener,
+        4_000_000_000,
+        2_250_000_000,
+        253,
+        &[opener_htlc0, opener_htlc1, acceptor_htlc0, acceptor_htlc1],
+    );
+
+    // Fulfilling the acceptor's id 0 credits the opener, and failing its id 1
+    // refunds the acceptor, leaving the opener's ids 0 and 1 in flight
+    commitments
+        .fulfill_htlc(Side::Opener, 0, Side::Acceptor)
+        .expect("acceptor's HTLC 0 is in-flight");
+    commitments
+        .fail_htlc(Side::Opener, 1, Side::Acceptor)
+        .expect("acceptor's HTLC 1 is in-flight");
+    assert_commitment_state(
+        &commitments,
+        Side::Opener,
+        4_500_000_000,
+        2_500_000_000,
+        253,
+        &[opener_htlc0, opener_htlc1],
     );
 }

@@ -111,6 +111,7 @@ impl TestVectorFile {
             per_commitment_point,
             opener_balance_msat: vector.to_opener_msat,
             acceptor_balance_msat: vector.to_acceptor_msat,
+            htlcs: Vec::new(),
         };
 
         ChannelCommitments {
