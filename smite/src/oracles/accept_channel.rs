@@ -29,6 +29,15 @@ const MAX_DUST_LIMIT_SATOSHIS: u64 = 10_000;
 // close, so values above this (~2 weeks) are considered unreasonably large.
 const MAX_TO_SELF_DELAY: u16 = 2016;
 
+// Bitcoin Core's default minimum relay feerate is 100 sat/kvB, i.e. 25 sat/kw.
+// Core computes the required fee from vsize and rounds it up, while BOLT 3
+// rounds the fee down, so exactly 25 sat/kw can fall short. 27 is the smallest
+// feerate that meets the relay floor at every BOLT 3 commitment and HTLC
+// transaction weight, the transactions `feerate_per_kw` pays for. A commitment
+// below this may not propagate, so values below this are considered
+// unreasonably small for non-0FC channels.
+const MIN_FEERATE_PER_KW: u32 = 27;
+
 // A shallow depth leaves the funding transaction open to double-spending via
 // a reorg, so non-zeroconf values below this are considered unreasonably small.
 const MIN_MINIMUM_DEPTH: u32 = 3;
@@ -214,7 +223,7 @@ fn verify_accepted_open_channel(
     }
 
     // Check that feerate_per_kw is 0 when `zero_fee_commitments` is negotiated,
-    // and that it is non-zero otherwise.
+    // and that it is not unreasonably small otherwise.
     if channel_type.supports_feature(Features::ZERO_FEE_COMMITMENTS) {
         if open_channel.feerate_per_kw != 0 {
             return Err(format!(
@@ -222,8 +231,11 @@ fn verify_accepted_open_channel(
                 open_channel.feerate_per_kw,
             ));
         }
-    } else if open_channel.feerate_per_kw == 0 {
-        return Err("feerate_per_kw must be non-zero without zero_fee_commitments".to_string());
+    } else if open_channel.feerate_per_kw < MIN_FEERATE_PER_KW {
+        return Err(format!(
+            "feerate_per_kw {} is below the minimum of {MIN_FEERATE_PER_KW} without zero_fee_commitments",
+            open_channel.feerate_per_kw,
+        ));
     }
 
     // Check that to_self_delay is not unreasonably large.
@@ -922,16 +934,16 @@ mod tests {
     }
 
     #[test]
-    fn open_channel_zero_feerate_without_zero_fee_commitments() {
+    fn open_channel_feerate_below_the_minimum_without_zero_fee_commitments() {
         let mut oc = open_channel();
-        oc.feerate_per_kw = 0;
+        oc.feerate_per_kw = MIN_FEERATE_PER_KW - 1;
 
         assert_fail(
             &accept_channel(),
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
             &HashMap::new(),
-            "invalid open_channel: feerate_per_kw must be non-zero without zero_fee_commitments",
+            "invalid open_channel: feerate_per_kw 26 is below the minimum of 27 without zero_fee_commitments",
         );
     }
 
