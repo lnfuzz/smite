@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     ca-certificates
 RUN mkdir -p /etc/apt/keyrings && \
-    wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | tee /etc/apt/keyrings/llvm.asc > /dev/null && \
+    wget -qO /etc/apt/keyrings/llvm.asc https://apt.llvm.org/llvm-snapshot.gpg.key && \
     echo "deb [signed-by=/etc/apt/keyrings/llvm.asc] http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-${LLVM_V} main" > /etc/apt/sources.list.d/llvm.list
 
 # Install build dependencies
