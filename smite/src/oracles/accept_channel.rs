@@ -38,6 +38,10 @@ const MAX_TO_SELF_DELAY: u16 = 2016;
 // unreasonably small for non-0FC channels.
 const MIN_FEERATE_PER_KW: u32 = 27;
 
+// A short delay leaves too little time to punish a revoked commitment, so
+// values below this (~1 day) are considered unreasonably small.
+const MIN_TO_SELF_DELAY: u16 = 144;
+
 // A shallow depth leaves the funding transaction open to double-spending via
 // a reorg, so non-zeroconf values below this are considered unreasonably small.
 const MIN_MINIMUM_DEPTH: u32 = 3;
@@ -404,8 +408,11 @@ fn verify_accept_channel(
     }
 
     // Check the acceptor gives itself time to punish a revoked commitment.
-    if accept_channel.to_self_delay == 0 {
-        return Err("to_self_delay must be non-zero".to_string());
+    if accept_channel.to_self_delay < MIN_TO_SELF_DELAY {
+        return Err(format!(
+            "to_self_delay {} is below the minimum of {MIN_TO_SELF_DELAY} blocks",
+            accept_channel.to_self_delay,
+        ));
     }
 
     // Check the initial commitment satisfies the channel reserve.
@@ -1361,16 +1368,16 @@ mod tests {
     }
 
     #[test]
-    fn accept_channel_zero_to_self_delay() {
+    fn accept_channel_to_self_delay_below_the_minimum() {
         let mut ac = accept_channel();
-        ac.to_self_delay = 0;
+        ac.to_self_delay = MIN_TO_SELF_DELAY - 1;
 
         assert_fail(
             &ac,
             Some(&pending_negotiation(open_channel())),
             &sample_negotiated_features(),
             &HashMap::new(),
-            "invalid accept_channel: to_self_delay must be non-zero",
+            "invalid accept_channel: to_self_delay 143 is below the minimum of 144 blocks",
         );
     }
 
