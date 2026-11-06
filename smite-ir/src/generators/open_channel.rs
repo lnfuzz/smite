@@ -2,7 +2,7 @@
 
 use rand::seq::IndexedRandom;
 use rand::{Rng, RngExt};
-use smite::bolt::{ANNOUNCE_CHANNEL_FLAG, ChannelTypeVariant};
+use smite::bolt::{ANNOUNCE_CHANNEL_FLAG, ChannelTypeVariant, Features};
 
 use super::Generator;
 use crate::builder::ProgramBuilder;
@@ -46,11 +46,16 @@ impl OpenChannelGenerator {
     /// at a fifth of `max_htlc_value_in_flight_msat`, CLN at the effective
     /// capacity, LDK at the channel value, and Eclair has no fixed ceiling.
     pub const MAX_HTLC_IN_FLIGHT_TO_MINIMUM_DIVISOR: u64 = 5;
-    /// Lowest feerate ceiling allowed by the targets: Eclair caps it at `25_000`
-    /// sat/kW for anchor channels, while CLN caps it at ten times its highest
-    /// bitcoind estimate. LND and LDK set no ceiling and only require the
-    /// funder to cover the resulting commitment fee.
-    pub const MAX_FEERATE_PER_KW: u32 = 25_000;
+    /// Highest feerate floor allowed by the targets: all of them reject
+    /// feerates below the `253` sat/kW relay floor. Zero-fee-commitment
+    /// channels are exempt, since BOLT 2 requires their feerate to be `0`.
+    pub const MIN_FEERATE_PER_KW: u32 = 253;
+    /// Lowest feerate ceiling allowed by the targets: CLN caps it at ten times
+    /// its highest feerate estimate, which on regtest sits at the `253` sat/kW
+    /// floor, while Eclair caps it at `25_000` sat/kW for anchor channels. LND
+    /// and LDK set no ceiling and only require the funder to cover the
+    /// resulting commitment fee.
+    pub const MAX_FEERATE_PER_KW: u32 = 2_530;
     /// Highest `to_self_delay` allowed by all targets: 2016 blocks (~2 weeks),
     /// beyond which they consider their funds locked for too long.
     pub const MAX_TO_SELF_DELAY: u16 = 2016;
@@ -116,6 +121,20 @@ pub fn append_open_channel(
     let dust_limit_sats =
         rng.random_range(Bounds::MIN_DUST_LIMIT_SATOSHIS..=Bounds::MAX_DUST_LIMIT_SATOSHIS);
     let max_htlc_in_flight_msat = rng.random_range(0..=funding_msat);
+    let channel_types = if announce {
+        Bounds::ANNOUNCEABLE_CHANNEL_TYPES
+    } else {
+        ChannelTypeVariant::ALL
+    };
+    let variant = *channel_types
+        .choose(rng)
+        .expect("channel type list is non-empty");
+    // BOLT 2 requires zero-fee-commitment channels to have a zero feerate.
+    let feerate = if variant.bits().contains(&Features::ZERO_FEE_COMMITMENTS) {
+        0
+    } else {
+        rng.random_range(Bounds::MIN_FEERATE_PER_KW..=Bounds::MAX_FEERATE_PER_KW)
+    };
 
     // Channel parameters.
     let chain_hash = builder.pick_variable(VariableType::ChainHash, rng);
@@ -142,10 +161,7 @@ pub fn append_open_channel(
         )),
         &[],
     );
-    let feerate_per_kw = builder.append(
-        Operation::LoadFeeratePerKw(rng.random_range(0..=Bounds::MAX_FEERATE_PER_KW)),
-        &[],
-    );
+    let feerate_per_kw = builder.append(Operation::LoadFeeratePerKw(feerate), &[]);
     let to_self_delay = builder.append(
         Operation::LoadU16(rng.random_range(0..=Bounds::MAX_TO_SELF_DELAY)),
         &[],
@@ -164,14 +180,6 @@ pub fn append_open_channel(
     let shutdown_script_variant = ShutdownScriptVariant::random(rng);
     let upfront_shutdown_script =
         builder.append(Operation::LoadShutdownScript(shutdown_script_variant), &[]);
-    let channel_types = if announce {
-        Bounds::ANNOUNCEABLE_CHANNEL_TYPES
-    } else {
-        ChannelTypeVariant::ALL
-    };
-    let variant = *channel_types
-        .choose(rng)
-        .expect("channel type list is non-empty");
     let channel_type = builder.append(Operation::LoadChannelType(variant), &[]);
 
     // Build and send open_channel.

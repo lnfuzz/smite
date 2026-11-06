@@ -1214,6 +1214,10 @@ fn assert_open_channel_params_are_bounded(program: &Program, announce: bool, see
     let to_self_delay = open_channel_input(9);
     let max_accepted_htlcs = open_channel_input(10);
     let channel_flags = open_channel_input(17);
+    let Operation::LoadChannelType(channel_type) = program.instructions[build.inputs[19]].operation
+    else {
+        panic!("seed {seed}: input 19 should be LoadChannelType");
+    };
 
     assert!(
         (OpenChannelGenerator::MIN_FUNDING_SATOSHIS..=OpenChannelGenerator::MAX_FUNDING_SATOSHIS)
@@ -1253,10 +1257,20 @@ fn assert_open_channel_params_are_bounded(program: &Program, announce: bool, see
         htlc_minimum_msat <= max_htlc_minimum_msat,
         "seed {seed}: htlc_minimum_msat should be in [0, {max_htlc_minimum_msat}] but got {htlc_minimum_msat}",
     );
+    let zero_fee_commitments = channel_type
+        .bits()
+        .contains(&Features::ZERO_FEE_COMMITMENTS);
+    let (min_feerate_per_kw, max_feerate_per_kw) = if zero_fee_commitments {
+        (0, 0)
+    } else {
+        (
+            OpenChannelGenerator::MIN_FEERATE_PER_KW,
+            OpenChannelGenerator::MAX_FEERATE_PER_KW,
+        )
+    };
     assert!(
-        feerate_per_kw <= u64::from(OpenChannelGenerator::MAX_FEERATE_PER_KW),
-        "seed {seed}: feerate_per_kw should be in [0, {}] but got {feerate_per_kw}",
-        OpenChannelGenerator::MAX_FEERATE_PER_KW,
+        (u64::from(min_feerate_per_kw)..=u64::from(max_feerate_per_kw)).contains(&feerate_per_kw),
+        "seed {seed}: feerate_per_kw for {channel_type} should be in [{min_feerate_per_kw}, {max_feerate_per_kw}] but got {feerate_per_kw}",
     );
     assert!(
         to_self_delay <= u64::from(OpenChannelGenerator::MAX_TO_SELF_DELAY),
