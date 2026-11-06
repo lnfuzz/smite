@@ -14,7 +14,8 @@ pub struct ShutdownContext<'a> {
     pub channel: Option<&'a ChannelState>,
 }
 
-/// Checks that a received `shutdown` names a channel we track.
+/// Checks that a received `shutdown` names a channel we track and that the
+/// target funded it.
 pub struct ShutdownOracle;
 
 impl Oracle<ShutdownContext<'_>> for ShutdownOracle {
@@ -22,10 +23,18 @@ impl Oracle<ShutdownContext<'_>> for ShutdownOracle {
         let Shutdown { channel_id, .. } = context.shutdown;
 
         // Check that the `shutdown` names a channel we track.
-        if context.channel.is_none() {
+        let Some(channel) = context.channel else {
             return Err(Violation::InvalidShutdown(
                 *channel_id,
                 "unknown channel_id: no channel is tracked for it".to_string(),
+            ));
+        };
+
+        // Check that the target funded the channel by sending its `funding_signed`.
+        if !channel.funding_signed_received {
+            return Err(Violation::InvalidShutdown(
+                *channel_id,
+                "unfunded channel: no funding_signed was received for it".to_string(),
             ));
         }
 
@@ -61,7 +70,7 @@ mod tests {
         Shutdown::for_channel(ChannelId::new([1u8; 32]), p2wpkh())
     }
 
-    /// Tracked channel state for testing.
+    /// Funded channel state for testing.
     fn channel_state() -> ChannelState {
         let pkey1 = pubkey(1);
         let pkey2 = pubkey(2);
@@ -93,11 +102,14 @@ mod tests {
             htlc_basepoint_privkey: secret_key(1),
         };
 
-        ChannelState::new(config, holder, commitments, true, false, false)
+        let mut state = ChannelState::new(config, holder, commitments, true, false, false);
+        state.funding_signed_received = true;
+
+        state
     }
 
     /// Oracle inputs for testing. Defaults to a conforming `shutdown` for a
-    /// tracked channel.
+    /// funded channel.
     struct OracleInputs {
         shutdown: Shutdown,
         channel: Option<ChannelState>,
@@ -118,6 +130,10 @@ mod tests {
                 shutdown: &self.shutdown,
                 channel: self.channel.as_ref(),
             })
+        }
+
+        fn channel_mut(&mut self) -> &mut ChannelState {
+            self.channel.as_mut().expect("funded channel")
         }
     }
 
@@ -155,5 +171,16 @@ mod tests {
         };
 
         assert_fail(&inputs, "unknown channel_id: no channel is tracked for it");
+    }
+
+    #[test]
+    fn rejects_unfunded_channel() {
+        let mut inputs = OracleInputs::default();
+        inputs.channel_mut().funding_signed_received = false;
+
+        assert_fail(
+            &inputs,
+            "unfunded channel: no funding_signed was received for it",
+        );
     }
 }

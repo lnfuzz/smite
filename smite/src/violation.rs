@@ -66,7 +66,10 @@ pub enum Violation {
 
     /// The target's `shutdown` broke a BOLT 2 requirement, as judged by
     /// [`crate::oracles::ShutdownOracle`]. The reason names the breached
-    /// requirement: it names a `channel_id` we have no channel tracked for.
+    /// requirement, one of:
+    /// - it names a `channel_id` we have no channel tracked for, or
+    /// - it arrives before the target funded the channel with its
+    ///   `funding_signed`.
     #[error("invalid shutdown for channel_id {0}: {1}")]
     InvalidShutdown(ChannelId, String),
 }

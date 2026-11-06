@@ -751,7 +751,6 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
             Message::Shutdown(sd) => {
                 log::debug!("received shutdown on {}", sd.channel_id);
                 // TODO: `ShutdownOracle` must also reject a `shutdown`:
-                // * for a channel whose `funding_signed` we haven't received yet
                 // * for a channel we already received a `shutdown` on
                 // * with a `scriptpubkey` in a form the negotiated features disallow
                 // * with a `scriptpubkey` differing from a non-zero-length upfront shutdown
