@@ -1249,8 +1249,11 @@ fn assert_open_channel_params_are_bounded(program: &Program, seed: u64) {
         "seed {seed}: htlc_minimum_msat should be in [0, {max_htlc_minimum_msat}] but got {htlc_minimum_msat}",
     );
     assert!(
-        feerate_per_kw <= u64::from(OpenChannelGenerator::MAX_FEERATE_PER_KW),
-        "seed {seed}: feerate_per_kw should be in [0, {}] but got {feerate_per_kw}",
+        (u64::from(OpenChannelGenerator::MIN_FEERATE_PER_KW)
+            ..=u64::from(OpenChannelGenerator::MAX_FEERATE_PER_KW))
+            .contains(&feerate_per_kw),
+        "seed {seed}: feerate_per_kw should be in [{}, {}] but got {feerate_per_kw}",
+        OpenChannelGenerator::MIN_FEERATE_PER_KW,
         OpenChannelGenerator::MAX_FEERATE_PER_KW,
     );
     assert!(
