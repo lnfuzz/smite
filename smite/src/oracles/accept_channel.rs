@@ -21,10 +21,6 @@ const MAX_ACCEPTED_HTLCS_ZERO_FEE_COMMITMENTS: u16 = 114;
 const MAX_ACCEPTED_HTLCS_DEFAULT: u16 = 483;
 const MIN_DUST_LIMIT_SATOSHIS: u64 = 354;
 
-// The least-significant bit of `channel_flags` in `open_channel`, indicating
-// whether the initiator wishes to announce the channel publicly.
-const ANNOUNCE_CHANNEL_FLAG: u8 = 1;
-
 // A high dust limit leaves too much of the channel unenforceable on-chain,
 // so values above this are considered unreasonably large.
 const MAX_DUST_LIMIT_SATOSHIS: u64 = 10_000;
@@ -32,6 +28,31 @@ const MAX_DUST_LIMIT_SATOSHIS: u64 = 10_000;
 // A long delay locks the receiver's funds for too long after a unilateral
 // close, so values above this (~2 weeks) are considered unreasonably large.
 const MAX_TO_SELF_DELAY: u16 = 2016;
+
+// Bitcoin Core's default minimum relay feerate is 100 sat/kvB, i.e. 25 sat/kw.
+// Core computes the required fee from vsize and rounds it up, while BOLT 3
+// rounds the fee down, so exactly 25 sat/kw can fall short. 27 is the smallest
+// feerate that meets the relay floor at every BOLT 3 commitment and HTLC
+// transaction weight, the transactions `feerate_per_kw` pays for. A commitment
+// below this may not propagate, so values below this are considered
+// unreasonably small for non-0FC channels.
+const MIN_FEERATE_PER_KW: u32 = 27;
+
+// A short delay leaves too little time to punish a revoked commitment, so
+// values below this (~1 day) are considered unreasonably small.
+const MIN_TO_SELF_DELAY: u16 = 144;
+
+// A shallow depth leaves the funding transaction open to double-spending via
+// a reorg, so non-zeroconf values below this are considered unreasonably small.
+const MIN_MINIMUM_DEPTH: u32 = 3;
+
+// A small channel is unlikely to be worth double-spending via a reorg, so
+// values below this may use a depth below `MIN_MINIMUM_DEPTH`.
+const SMALL_CHANNEL_CAPACITY_SATOSHIS: u64 = 125_000;
+
+// A small non-zeroconf channel must still wait for its funding confirmation,
+// so values below this are only valid with option_zeroconf.
+const MIN_MINIMUM_DEPTH_SMALL_CHANNEL: u32 = 1;
 
 /// Context for `AcceptChannelOracle`
 pub struct AcceptChannelContext<'a> {
@@ -206,7 +227,7 @@ fn verify_accepted_open_channel(
     }
 
     // Check that feerate_per_kw is 0 when `zero_fee_commitments` is negotiated,
-    // and that it is non-zero otherwise.
+    // and that it is not unreasonably small otherwise.
     if channel_type.supports_feature(Features::ZERO_FEE_COMMITMENTS) {
         if open_channel.feerate_per_kw != 0 {
             return Err(format!(
@@ -214,8 +235,11 @@ fn verify_accepted_open_channel(
                 open_channel.feerate_per_kw,
             ));
         }
-    } else if open_channel.feerate_per_kw == 0 {
-        return Err("feerate_per_kw must be non-zero without zero_fee_commitments".to_string());
+    } else if open_channel.feerate_per_kw < MIN_FEERATE_PER_KW {
+        return Err(format!(
+            "feerate_per_kw {} is below the minimum of {MIN_FEERATE_PER_KW} without zero_fee_commitments",
+            open_channel.feerate_per_kw,
+        ));
     }
 
     // Check that to_self_delay is not unreasonably large.
@@ -227,8 +251,8 @@ fn verify_accepted_open_channel(
     }
 
     // Check that option_scid_alias is only negotiated for private channels.
-    let announce_channel = open_channel.channel_flags & ANNOUNCE_CHANNEL_FLAG != 0;
-    if announce_channel && channel_type.supports_feature(Features::OPTION_SCID_ALIAS) {
+    if open_channel.announce_channel() && channel_type.supports_feature(Features::OPTION_SCID_ALIAS)
+    {
         return Err("option_scid_alias requires the channel to be private".to_string());
     }
 
@@ -309,12 +333,20 @@ fn verify_accept_channel(
         return Err("accept_channel channel_type does not match open_channel".to_string());
     }
 
-    // Check that option_zeroconf has a minimum depth of 0.
-    if channel_type.supports_feature(Features::OPTION_ZEROCONF) && accept_channel.minimum_depth != 0
-    {
+    // Check that minimum_depth is 0 when `option_zeroconf` is negotiated, and
+    // that it is reasonable for the channel capacity otherwise.
+    let min_depth = min_minimum_depth(open_channel.funding_satoshis);
+    if channel_type.supports_feature(Features::OPTION_ZEROCONF) {
+        if accept_channel.minimum_depth != 0 {
+            return Err(format!(
+                "option_zeroconf requires minimum_depth to be 0, but got {}",
+                accept_channel.minimum_depth,
+            ));
+        }
+    } else if accept_channel.minimum_depth < min_depth {
         return Err(format!(
-            "option_zeroconf requires minimum_depth to be 0, but got {}",
-            accept_channel.minimum_depth,
+            "non-zeroconf channel with capacity {} sat requires minimum_depth of at least {min_depth}, but got {}",
+            open_channel.funding_satoshis, accept_channel.minimum_depth,
         ));
     }
 
@@ -376,8 +408,11 @@ fn verify_accept_channel(
     }
 
     // Check the acceptor gives itself time to punish a revoked commitment.
-    if accept_channel.to_self_delay == 0 {
-        return Err("to_self_delay must be non-zero".to_string());
+    if accept_channel.to_self_delay < MIN_TO_SELF_DELAY {
+        return Err(format!(
+            "to_self_delay {} is below the minimum of {MIN_TO_SELF_DELAY} blocks",
+            accept_channel.to_self_delay,
+        ));
     }
 
     // Check the initial commitment satisfies the channel reserve.
@@ -503,10 +538,23 @@ fn max_accepted_htlcs_limit(channel_type: &Features) -> u16 {
     }
 }
 
+/// Returns the minimum depth required for a non-zeroconf channel of the given
+/// capacity.
+fn min_minimum_depth(capacity_satoshis: u64) -> u32 {
+    if capacity_satoshis < SMALL_CHANNEL_CAPACITY_SATOSHIS {
+        MIN_MINIMUM_DEPTH_SMALL_CHANNEL
+    } else {
+        MIN_MINIMUM_DEPTH
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bolt::{AcceptChannelTlvs, CHAIN_HASH_SIZE, OpenChannelTlvs, TemporaryChannelId};
+    use crate::bolt::{
+        ANNOUNCE_CHANNEL_FLAG, AcceptChannelTlvs, CHAIN_HASH_SIZE, OpenChannelTlvs,
+        TemporaryChannelId,
+    };
     use bitcoin::hashes::Hash;
     use bitcoin::secp256k1::{Secp256k1, SecretKey};
     use bitcoin::{PubkeyHash, ScriptBuf, WPubkeyHash};
@@ -893,16 +941,16 @@ mod tests {
     }
 
     #[test]
-    fn open_channel_zero_feerate_without_zero_fee_commitments() {
+    fn open_channel_feerate_below_the_minimum_without_zero_fee_commitments() {
         let mut oc = open_channel();
-        oc.feerate_per_kw = 0;
+        oc.feerate_per_kw = MIN_FEERATE_PER_KW - 1;
 
         assert_fail(
             &accept_channel(),
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
             &HashMap::new(),
-            "invalid open_channel: feerate_per_kw must be non-zero without zero_fee_commitments",
+            "invalid open_channel: feerate_per_kw 26 is below the minimum of 27 without zero_fee_commitments",
         );
     }
 
@@ -1134,6 +1182,56 @@ mod tests {
     }
 
     #[test]
+    fn accept_channel_minimum_depth_below_the_minimum() {
+        let mut oc = open_channel();
+        oc.funding_satoshis = SMALL_CHANNEL_CAPACITY_SATOSHIS;
+        oc.push_msat = 0;
+        let mut ac = accept_channel();
+        ac.minimum_depth = MIN_MINIMUM_DEPTH - 1;
+
+        assert_fail(
+            &ac,
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+            &HashMap::new(),
+            "invalid accept_channel: non-zeroconf channel with capacity 125000 sat requires minimum_depth of at least 3, but got 2",
+        );
+    }
+
+    #[test]
+    fn accept_channel_small_channel_minimum_depth_at_the_minimum() {
+        let mut oc = open_channel();
+        oc.funding_satoshis = SMALL_CHANNEL_CAPACITY_SATOSHIS - 1;
+        oc.push_msat = 10_000_000;
+        let mut ac = accept_channel();
+        ac.minimum_depth = MIN_MINIMUM_DEPTH_SMALL_CHANNEL;
+
+        assert_pass(
+            &ac,
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+            &HashMap::new(),
+        );
+    }
+
+    #[test]
+    fn accept_channel_small_channel_zero_minimum_depth() {
+        let mut oc = open_channel();
+        oc.funding_satoshis = SMALL_CHANNEL_CAPACITY_SATOSHIS - 1;
+        oc.push_msat = 0;
+        let mut ac = accept_channel();
+        ac.minimum_depth = MIN_MINIMUM_DEPTH_SMALL_CHANNEL - 1;
+
+        assert_fail(
+            &ac,
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+            &HashMap::new(),
+            "invalid accept_channel: non-zeroconf channel with capacity 124999 sat requires minimum_depth of at least 1, but got 0",
+        );
+    }
+
+    #[test]
     fn accept_channel_reserve_below_the_open_channel_dust_limit() {
         let oc = open_channel();
         let mut ac = accept_channel();
@@ -1270,16 +1368,16 @@ mod tests {
     }
 
     #[test]
-    fn accept_channel_zero_to_self_delay() {
+    fn accept_channel_to_self_delay_below_the_minimum() {
         let mut ac = accept_channel();
-        ac.to_self_delay = 0;
+        ac.to_self_delay = MIN_TO_SELF_DELAY - 1;
 
         assert_fail(
             &ac,
             Some(&pending_negotiation(open_channel())),
             &sample_negotiated_features(),
             &HashMap::new(),
-            "invalid accept_channel: to_self_delay must be non-zero",
+            "invalid accept_channel: to_self_delay 143 is below the minimum of 144 blocks",
         );
     }
 

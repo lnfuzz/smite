@@ -1594,6 +1594,36 @@ fn execute_recv_channel_ready_rejects_alias_matching_another_channels_scid() {
 }
 
 #[test]
+fn execute_recv_channel_ready_rejects_scid_matching_another_channels_alias() {
+    // The first channel advertises an alias matching the second channel's real
+    // short channel ID.
+    let alias = SECOND_FUNDING_SCID;
+    let err = recv_two_funding_signed_fixture()
+        .queue(&Message::ChannelReady(ChannelReady {
+            channel_id: funding_channel_id(),
+            second_per_commitment_point: sample_pubkey(7),
+            tlvs: ChannelReadyTlvs {
+                short_channel_id: Some(alias),
+            },
+        }))
+        .queue(&Message::ChannelReady(ChannelReady {
+            channel_id: second_funding_channel_id(),
+            second_per_commitment_point: sample_pubkey(8),
+            tlvs: ChannelReadyTlvs::default(),
+        }))
+        .run_err(&recv_two_channel_ready_program());
+
+    let ExecuteError::Violation(Violation::InvalidChannelReady(id, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*id, second_funding_channel_id());
+    assert!(reason.contains(&format!(
+        "real short_channel_id {alias} collides with the alias of channel {}",
+        funding_channel_id(),
+    )));
+}
+
+#[test]
 fn execute_recv_channel_ready_already_recorded_is_noop() {
     let (fx, target_pcp) = recv_channel_ready_fixture();
     let mut fx = fx.queue(&Message::AcceptChannel(sample_accept_channel()));

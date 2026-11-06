@@ -111,6 +111,7 @@ fn sample_chan_config(funding_satoshis: u64, channel_type: Features) -> ChannelC
         opener: sample_party(opener_pubkey),
         acceptor: sample_party(acceptor_pubkey),
         minimum_depth: 8,
+        announce_channel: true,
     }
 }
 

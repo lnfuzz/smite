@@ -709,6 +709,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     revealed_pubkeys: &self.revealed_pubkeys,
                     funding_confirmations,
                     revealed_scids: &self.revealed_scids,
+                    funding_scid,
                 })?;
                 record_recv_channel_ready(
                     &mut self.channel_states,

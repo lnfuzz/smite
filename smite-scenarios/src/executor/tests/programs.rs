@@ -361,6 +361,7 @@ pub fn recv_two_channel_ready_program() -> Program {
         second.message.funding_satoshis,
         FUNDING_FEERATE_PER_KW,
     );
+    b.append(Operation::BroadcastTransaction, &[tx.tx]);
     let temporary_channel_id = b.append(
         Operation::LoadChannelId(second.message.temporary_channel_id.0),
         &[],

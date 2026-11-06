@@ -24,6 +24,9 @@ pub struct ChannelReadyContext<'a> {
     /// Every `short_channel_id` revealed on the wire, both advertised aliases
     /// and derived real ones, mapped to the channel that owns it.
     pub revealed_scids: &'a HashMap<ShortChannelId, ChannelId>,
+    /// Real `short_channel_id` of the channel's funding output, or `None` if
+    /// its funding transaction is unconfirmed or unknown.
+    pub funding_scid: Option<ShortChannelId>,
     /// Number of confirmations the funding transaction had when the
     /// `channel_ready` was received, or `0` if it is unconfirmed or unknown.
     pub funding_confirmations: u32,
@@ -103,6 +106,33 @@ impl Oracle<ChannelReadyContext<'_>> for ChannelReadyOracle {
             ));
         }
 
+        // Check that a private channel's alias is not its real `short_channel_id`.
+        if !channel.config.announce_channel
+            && let Some(alias) = context.channel_ready.tlvs.short_channel_id
+            && context.funding_scid == Some(alias)
+        {
+            return Err(Violation::InvalidChannelReady(
+                context.channel_ready.channel_id,
+                format!(
+                    "short_channel_id alias {alias} is this private channel's real short_channel_id"
+                ),
+            ));
+        }
+
+        // Check that the real `short_channel_id` is not an alias already
+        // advertised by another channel.
+        if let Some(real_scid) = context.funding_scid
+            && let Some(origin) = context.revealed_scids.get(&real_scid)
+            && *origin != context.channel_ready.channel_id
+        {
+            return Err(Violation::InvalidChannelReady(
+                context.channel_ready.channel_id,
+                format!(
+                    "real short_channel_id {real_scid} collides with the alias of channel {origin}"
+                ),
+            ));
+        }
+
         // Check that a resent `channel_ready` repeats the first one's
         // `second_per_commitment_point`.
         if let Some(first) = channel.received_channel_ready_point
@@ -156,6 +186,10 @@ mod tests {
     /// a `channel_ready` message from the target.
     const CONFIRMED_DEPTH: u32 = 6;
 
+    /// Real `short_channel_id` of the confirmed funding output, distinct from
+    /// the aliases the tests advertise.
+    const FUNDING_SCID: ShortChannelId = ShortChannelId::new(800_000, 2, 0);
+
     fn secret_key(seed: u8) -> SecretKey {
         SecretKey::from_slice(&[seed; 32]).expect("valid secret key")
     }
@@ -194,6 +228,7 @@ mod tests {
             opener: party(pkey1),
             acceptor: party(pkey2),
             minimum_depth: CONFIRMED_DEPTH,
+            announce_channel: false,
         };
         let commitments = config
             .new_initial_commitments(3_000_000_000, 15_000, pkey1, pkey2)
@@ -217,6 +252,7 @@ mod tests {
         negotiated_features: Features,
         revealed_pubkeys: HashMap<PublicKey, KeyOrigin>,
         revealed_scids: HashMap<ShortChannelId, ChannelId>,
+        funding_scid: Option<ShortChannelId>,
         funding_confirmations: u32,
     }
 
@@ -228,6 +264,7 @@ mod tests {
                 negotiated_features: Features::new(),
                 revealed_pubkeys: HashMap::new(),
                 revealed_scids: HashMap::new(),
+                funding_scid: Some(FUNDING_SCID),
                 funding_confirmations: CONFIRMED_DEPTH,
             }
         }
@@ -241,6 +278,7 @@ mod tests {
                 negotiated_features: &self.negotiated_features,
                 revealed_pubkeys: &self.revealed_pubkeys,
                 revealed_scids: &self.revealed_scids,
+                funding_scid: self.funding_scid,
                 funding_confirmations: self.funding_confirmations,
             })
         }
@@ -386,6 +424,54 @@ mod tests {
         inputs
             .revealed_scids
             .insert(alias, inputs.channel_ready.channel_id);
+
+        assert_pass(&inputs);
+    }
+
+    #[test]
+    fn channel_ready_private_alias_matches_real_scid_fails() {
+        let mut inputs = OracleInputs::default();
+        inputs.channel_ready.tlvs.short_channel_id = Some(FUNDING_SCID);
+
+        assert_fail(
+            &inputs,
+            &format!(
+                "short_channel_id alias {FUNDING_SCID} is this private channel's real short_channel_id"
+            ),
+        );
+    }
+
+    #[test]
+    fn channel_ready_public_alias_matches_real_scid_passes() {
+        let mut inputs = OracleInputs::default();
+        inputs.channel_ready.tlvs.short_channel_id = Some(FUNDING_SCID);
+        inputs.channel_mut().config.announce_channel = true;
+
+        assert_pass(&inputs);
+    }
+
+    #[test]
+    fn channel_ready_real_scid_collides_another_channels_alias_fails() {
+        let origin = ChannelId::new([2u8; 32]);
+        let inputs = OracleInputs {
+            revealed_scids: HashMap::from([(FUNDING_SCID, origin)]),
+            ..OracleInputs::default()
+        };
+
+        assert_fail(
+            &inputs,
+            &format!(
+                "real short_channel_id {FUNDING_SCID} collides with the alias of channel {origin}"
+            ),
+        );
+    }
+
+    #[test]
+    fn channel_ready_real_scid_resend_for_same_channel_passes() {
+        let mut inputs = OracleInputs::default();
+        inputs
+            .revealed_scids
+            .insert(FUNDING_SCID, inputs.channel_ready.channel_id);
 
         assert_pass(&inputs);
     }
