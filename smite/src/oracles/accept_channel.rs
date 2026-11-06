@@ -21,10 +21,6 @@ const MAX_ACCEPTED_HTLCS_ZERO_FEE_COMMITMENTS: u16 = 114;
 const MAX_ACCEPTED_HTLCS_DEFAULT: u16 = 483;
 const MIN_DUST_LIMIT_SATOSHIS: u64 = 354;
 
-// The least-significant bit of `channel_flags` in `open_channel`, indicating
-// whether the initiator wishes to announce the channel publicly.
-const ANNOUNCE_CHANNEL_FLAG: u8 = 1;
-
 // A high dust limit leaves too much of the channel unenforceable on-chain,
 // so values above this are considered unreasonably large.
 const MAX_DUST_LIMIT_SATOSHIS: u64 = 10_000;
@@ -239,8 +235,8 @@ fn verify_accepted_open_channel(
     }
 
     // Check that option_scid_alias is only negotiated for private channels.
-    let announce_channel = open_channel.channel_flags & ANNOUNCE_CHANNEL_FLAG != 0;
-    if announce_channel && channel_type.supports_feature(Features::OPTION_SCID_ALIAS) {
+    if open_channel.announce_channel() && channel_type.supports_feature(Features::OPTION_SCID_ALIAS)
+    {
         return Err("option_scid_alias requires the channel to be private".to_string());
     }
 
@@ -536,7 +532,10 @@ fn min_minimum_depth(capacity_satoshis: u64) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bolt::{AcceptChannelTlvs, CHAIN_HASH_SIZE, OpenChannelTlvs, TemporaryChannelId};
+    use crate::bolt::{
+        ANNOUNCE_CHANNEL_FLAG, AcceptChannelTlvs, CHAIN_HASH_SIZE, OpenChannelTlvs,
+        TemporaryChannelId,
+    };
     use bitcoin::hashes::Hash;
     use bitcoin::secp256k1::{Secp256k1, SecretKey};
     use bitcoin::{PubkeyHash, ScriptBuf, WPubkeyHash};

@@ -12,6 +12,9 @@ const TLV_UPFRONT_SHUTDOWN_SCRIPT: u64 = 0;
 /// TLV type for channel type.
 const TLV_CHANNEL_TYPE: u64 = 1;
 
+/// Channel flag requesting that the channel be announced to the network.
+pub const ANNOUNCE_CHANNEL_FLAG: u8 = 1;
+
 /// BOLT 2 `open_channel` message (type 32).
 ///
 /// Sent by the channel initiator to begin the v1 channel establishment flow.
@@ -78,6 +81,12 @@ impl OpenChannel {
             self.htlc_basepoint,
             self.first_per_commitment_point,
         ]
+    }
+
+    /// Returns whether the initiator wishes to announce the channel publicly.
+    #[must_use]
+    pub fn announce_channel(&self) -> bool {
+        self.channel_flags & ANNOUNCE_CHANNEL_FLAG != 0
     }
 
     /// Encodes to wire format (without message type prefix).

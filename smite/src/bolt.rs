@@ -68,7 +68,7 @@ pub use funding_signed::FundingSigned;
 pub use gossip_timestamp_filter::GossipTimestampFilter;
 pub use init::{Init, InitTlvs};
 pub use node_announcement::NodeAnnouncement;
-pub use open_channel::{OpenChannel, OpenChannelTlvs};
+pub use open_channel::{ANNOUNCE_CHANNEL_FLAG, OpenChannel, OpenChannelTlvs};
 pub use open_channel2::{OpenChannel2, OpenChannel2Tlvs};
 pub use ping::Ping;
 pub use pong::Pong;
