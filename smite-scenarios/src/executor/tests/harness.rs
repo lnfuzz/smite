@@ -461,7 +461,9 @@ pub fn funding_signed_for(
 
     FundingSigned {
         channel_id: ChannelId::v1_from_funding_outpoint(funding_outpoint),
-        signature: config.sign_counterparty_commitment(&commitments, &acceptor),
+        signature: config
+            .sign_counterparty_commitment(&commitments, &acceptor)
+            .0,
     }
 }
 
