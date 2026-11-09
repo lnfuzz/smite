@@ -14,76 +14,71 @@ Smite is a coverage-guided fuzzing framework for Lightning Network implementatio
 - x86_64 architecture
 - Modern Linux operating system
 - Docker
+- Rust toolchain
+- tmux
 - [AFL++](https://github.com/AFLplusplus/AFLplusplus) built from source with Nyx mode
 
 ## Quick Start
 
-Choose a target (`lnd`, `ldk`, `cln`, or `eclair`) and a scenario (`encrypted_bytes`, `noise`, or `init`) and follow the steps below:
+Fuzzing campaigns are managed with [`smitebot`](smitebot/README.md). Run the commands below from the root of the smite repository.
 
 ```bash
-# Choose target and scenario
-TARGET=lnd
-SCENARIO=encrypted_bytes
-
-# Build the Docker image
-docker build -t smite-$TARGET-$SCENARIO -f workloads/$TARGET/Dockerfile --build-arg SCENARIO=$SCENARIO .
+# Install smitebot
+cargo install --path smitebot
 
 # Enable the KVM VMware backdoor (required for Nyx)
 ./scripts/enable-vmware-backdoor.sh
+```
 
-# Create the Nyx sharedir
-./scripts/setup-nyx.sh /tmp/smite-nyx smite-$TARGET-$SCENARIO ~/AFLplusplus
+Create a campaign config, choosing a target (`lnd`, `ldk`, `cln`, or `eclair`) and a scenario (`encrypted_bytes`, `noise`, `init`, or `ir`):
 
-# Create seed corpus
-mkdir -p /tmp/smite-seeds
-echo 'AAAA' > /tmp/smite-seeds/seed1
+```toml
+# campaign.toml
+target = "lnd"
+scenario = "encrypted_bytes"
+aflpp_path = "/home/user/AFLplusplus"
+smite_dir = "."
+runners = 8
+output_dir = "/tmp/smite-out"
+sharedir = "/tmp/smite-nyx"
+```
 
-# Start fuzzing
-~/AFLplusplus/afl-fuzz -X -i /tmp/smite-seeds -o /tmp/smite-out -- /tmp/smite-nyx
+See [`smitebot/sample-campaign.toml`](smitebot/sample-campaign.toml) for all config options.
+
+```bash
+# Check host prerequisites
+smitebot doctor campaign.toml
+
+# Build the Docker image, create the Nyx sharedir, and start fuzzing
+smitebot start campaign.toml
+```
+
+`smitebot start` launches one AFL++ instance per runner in a tmux session and prints the campaign ID (e.g., `lnd-encrypted_bytes-1767225600`) used by the other commands:
+
+```bash
+# Show the campaign's live dashboard
+smitebot status <campaign-id>
+
+# Stop the campaign
+smitebot stop <campaign-id>
 ```
 
 ### IR Scenario
 
-The `ir` scenario uses structured IR programs instead of raw bytes. It requires
-a custom mutator library and different AFL++ flags:
+The `ir` scenario uses structured IR programs instead of raw byte inputs, with a custom AFL++ mutator. `smitebot` automatically sets the needed flags and environment variables for this scenario.
+
+To print an IR input in readable form:
 
 ```bash
-TARGET=ldk
-SCENARIO=ir
-
-# Build the Docker image and Nyx sharedir as above
-docker build -t smite-$TARGET-$SCENARIO -f workloads/$TARGET/Dockerfile --build-arg SCENARIO=$SCENARIO .
-./scripts/setup-nyx.sh /tmp/smite-nyx smite-$TARGET-$SCENARIO ~/AFLplusplus
-
-# Build the custom mutator
-cargo build --release -p smite-ir-mutator
-
-# Create seed corpus (an empty file works -- the mutator generates fresh programs)
-mkdir -p /tmp/smite-seeds
-printf '\x00' > /tmp/smite-seeds/empty
-
-# Start fuzzing with the custom mutator
-AFL_CUSTOM_MUTATOR_LIBRARY=target/release/libsmite_ir_mutator.so \
-AFL_CUSTOM_MUTATOR_ONLY=1 \
-AFL_FRAMESHIFT_DISABLE=1 \
-~/AFLplusplus/afl-fuzz -X -i /tmp/smite-seeds -o /tmp/smite-out -- /tmp/smite-nyx
+smitebot print-ir <input>
 ```
-
-`AFL_CUSTOM_MUTATOR_ONLY=1` disables AFL++'s built-in mutators (which would
-corrupt the postcard encoding).
 
 ## Running Modes
 
 ### Nyx Mode
 
 Uses the [Nyx hypervisor](https://nyx-fuzz.com/) for fast snapshot-based fuzzing.
-AFL++ manages the fuzzing loop and coverage feedback.
-
-The `-X` flag enables standalone Nyx mode:
-
-```bash
-afl-fuzz -X -i <seeds> -o <output> -- <sharedir>
-```
+AFL++ manages the fuzzing loop and coverage feedback. This is the mode `smitebot start` runs.
 
 ### Local Mode
 
@@ -91,35 +86,34 @@ This mode runs without Nyx and is used to reproduce and debug crashes.
 
 #### Reproducing Crashes
 
-When AFL++ finds a crash:
+When AFL++ finds a crash, replay it against the campaign's Docker image:
 
 ```bash
-# Get the crash input
-cp /tmp/smite-out/default/crashes/<crashing-input> ./crash
-
-# Reproduce in local mode (use the matching image and scenario binary)
-docker run --rm --tmpfs /tmp:rw,exec,size=1g -v $PWD/crash:/input.bin -e SMITE_INPUT=/input.bin smite-$TARGET-$SCENARIO /$TARGET-scenario
+smitebot reproduce <campaign-id> -i /tmp/smite-out/<runner>/crashes/<crashing-input>
 ```
-
-The `--tmpfs /tmp:rw,exec,size=1g` option provides a temporary in-memory filesystem for `/tmp`, matching the `tmpfs` environment available inside the Nyx VM. This halves startup time.
 
 ### Coverage Report Mode
 
 Generate an HTML coverage report showing which parts of the target were exercised by a fuzzing corpus:
 
 ```bash
+# Merge and minimize the corpora of all runners
+smitebot corpus minimize <campaign-id> -o /tmp/smite-corpus
+
 # Generate coverage report
-./scripts/coverage-report.sh $TARGET $SCENARIO /tmp/smite-out/default/queue/
+./scripts/coverage-report.sh lnd encrypted_bytes /tmp/smite-corpus
 
 # View the report
-firefox ./$TARGET-$SCENARIO-coverage-report/html/index.html
+firefox ./lnd-encrypted_bytes-coverage-report/html/index.html
 ```
+
+Minimizing keeps only inputs that add AFL++ edge coverage, which makes the report much faster to generate. To report on the full corpus instead, use `smitebot corpus merge <campaign-id> -o /tmp/smite-corpus`.
 
 ## Project Structure
 
 ```
 smite/              # Core Rust library (runners, scenarios, noise protocol, BOLT messages)
-smitebot/           # Automation CLI for fuzzing campaign orchestration 
+smitebot/           # Automation CLI for fuzzing campaign orchestration
 smite-ir/           # IR types, generators, and mutators for structured fuzzing programs
 smite-ir-mutator/   # AFL++ custom mutator cdylib for IR programs
 smite-nyx-sys/      # Nyx FFI bindings
