@@ -2,7 +2,7 @@
 
 use rand::seq::IndexedRandom;
 use rand::{Rng, RngExt};
-use smite::bolt::ChannelTypeVariant;
+use smite::bolt::{ANNOUNCE_CHANNEL_FLAG, ChannelTypeVariant};
 
 use super::Generator;
 use crate::builder::ProgramBuilder;
@@ -62,10 +62,16 @@ impl OpenChannelGenerator {
     /// and CLN allow up to 483, while LDK and Eclair cap 0FC channels at 114
     /// due to the v3 package size limit.
     pub const MAX_MAX_ACCEPTED_HTLCS: u16 = 114;
-    /// Keep channels unannounced: clearing `announce_channel` keeps
-    /// `option_scid_alias` valid, while LDK and LND reject announced channels
-    /// that negotiate it.
-    pub const CHANNEL_FLAGS: u8 = 0;
+
+    /// Channel types an announced channel may negotiate. LDK and LND reject an
+    /// announced channel whose type includes `option_scid_alias` (bit 46),
+    /// since it has no announceable `short_channel_id`. Only types we can fund
+    /// are listed, since no other type can progress far enough to be announced.
+    // TODO: Add channel types here as funding support is added for them.
+    pub const ANNOUNCEABLE_CHANNEL_TYPES: &[ChannelTypeVariant] = &[
+        ChannelTypeVariant::StaticRemoteKey,
+        ChannelTypeVariant::Anchors,
+    ];
 }
 
 /// Instruction indices produced by [`append_open_channel`], for later
@@ -84,11 +90,15 @@ pub struct OpenChannelVars {
 
 /// Appends the instructions that generate bounded channel parameters, then
 /// build and send `open_channel` using `funding_pubkey` and `htlc_basepoint`.
+///
+/// When `announce` is set the channel is opened as an announced one, which the
+/// gossip flows need and which restricts the channel types it may negotiate.
 pub fn append_open_channel(
     builder: &mut ProgramBuilder,
     rng: &mut impl Rng,
     funding_pubkey: usize,
     htlc_basepoint: usize,
+    announce: bool,
 ) -> OpenChannelVars {
     type Bounds = OpenChannelGenerator;
 
@@ -146,13 +156,22 @@ pub fn append_open_channel(
         ),
         &[],
     );
-    let channel_flags = builder.append(Operation::LoadU8(Bounds::CHANNEL_FLAGS), &[]);
+    // Every target requires an announced channel before it acts on
+    // `announcement_signatures`. All other `channel_flags` bits are undefined
+    // and stay zero.
+    let flags = if announce { ANNOUNCE_CHANNEL_FLAG } else { 0 };
+    let channel_flags = builder.append(Operation::LoadU8(flags), &[]);
     let shutdown_script_variant = ShutdownScriptVariant::random(rng);
     let upfront_shutdown_script =
         builder.append(Operation::LoadShutdownScript(shutdown_script_variant), &[]);
-    let variant = *ChannelTypeVariant::ALL
+    let channel_types = if announce {
+        Bounds::ANNOUNCEABLE_CHANNEL_TYPES
+    } else {
+        ChannelTypeVariant::ALL
+    };
+    let variant = *channel_types
         .choose(rng)
-        .expect("ChannelTypeVariant::ALL is non-empty");
+        .expect("channel type list is non-empty");
     let channel_type = builder.append(Operation::LoadChannelType(variant), &[]);
 
     // Build and send open_channel.
@@ -199,7 +218,7 @@ impl Generator for OpenChannelGenerator {
         let htlc_basepoint = builder.generate_fresh(VariableType::Point, rng);
 
         // Build and send open_channel.
-        let open_channel = append_open_channel(builder, rng, funding_pubkey, htlc_basepoint);
+        let open_channel = append_open_channel(builder, rng, funding_pubkey, htlc_basepoint, false);
 
         // Receive accept_channel.
         builder.append(

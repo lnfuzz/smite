@@ -59,6 +59,11 @@ const EPHEMERAL_KEY: [u8; 32] = [
     0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12,
 ];
 
+/// Our node's identity key: the Noise static key the target knows us by.
+fn static_key() -> SecretKey {
+    SecretKey::from_slice(&STATIC_KEY).expect("valid static key")
+}
+
 /// Perform a Noise handshake with a target and receive its `Init` message.
 ///
 /// Returns the encrypted connection and the target's `Init`. The caller is
@@ -72,7 +77,7 @@ pub fn handshake_with_target<T: Target>(
     target: &T,
     timeout: Duration,
 ) -> Result<(NoiseConnection, Init), ScenarioError> {
-    let local_static = SecretKey::from_slice(&STATIC_KEY).expect("valid static key");
+    let local_static = static_key();
     let local_ephemeral = SecretKey::from_slice(&EPHEMERAL_KEY).expect("valid ephemeral key");
 
     let mut conn = NoiseConnection::connect(
