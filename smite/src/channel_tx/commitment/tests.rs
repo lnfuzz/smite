@@ -72,6 +72,19 @@ fn derive_pubkey_from_basepoint() {
 }
 
 #[test]
+fn derive_privkey_from_basepoint_secret() {
+    let basepoint_secret =
+        privkey("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+    let per_commitment_point =
+        pubkey("025f7117a78150fe2ef97db7cfc83bd57b2e2c0d0dd25eaf467a4a1c2a45ce1486");
+    let localprivkey = derive_privkey(&basepoint_secret, &per_commitment_point);
+    assert_eq!(
+        localprivkey,
+        privkey("cbced912d3b21bf196a766651e436aff192362621ce317704ea2f75d87e7be0f"),
+    );
+}
+
+#[test]
 fn derive_revocation_pubkey_from_basepoint() {
     let revocation_basepoint =
         pubkey("036d6caac248af96f6afa7f904f550253a0f3ef3f5aa2fe6838a95b216691468e2");
@@ -175,28 +188,28 @@ fn opener_balance_after_commitment_cost_total_sat_checks() {
     // Comfortably affordable
     let opener_balance_sat: u64 = 20_000;
     assert_eq!(
-        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &legacy).total_sat()),
+        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, 0, &legacy).total_sat()),
         Some(9_140),
     );
 
     // Exact zero opener balance
     let opener_balance_sat: u64 = 10_860;
     assert_eq!(
-        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &legacy).total_sat()),
+        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, 0, &legacy).total_sat()),
         Some(0),
     );
 
     // Balance does not cover the fee
     let opener_balance_sat: u64 = 10_000;
     assert_eq!(
-        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &legacy).total_sat()),
+        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, 0, &legacy).total_sat()),
         None
     );
 
     // Balance covers the fee but not the anchor outputs
     let opener_balance_sat: u64 = 17_500;
     assert_eq!(
-        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &anchor).total_sat()),
+        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, 0, &anchor).total_sat()),
         None,
     );
 }
@@ -238,7 +251,8 @@ fn commitment_dance_adds_and_resolves_htlc() {
     let commitment_signed = |commitments: &mut ChannelCommitments,
                              signer: &HolderIdentity,
                              verifier: &HolderIdentity,
-                             next_per_commitment_point: PublicKey| {
+                             next_per_commitment_point: PublicKey,
+                             expected_htlc_sigs: usize| {
         let commitment_number = commitments.state(verifier.side).commitment_number;
         commitments.update_per_commitment_point(verifier.side, next_per_commitment_point);
         commitments.advance_commitment_number(verifier.side);
@@ -250,10 +264,14 @@ fn commitment_dance_adds_and_resolves_htlc() {
             commitments.state(verifier.side).commitment_number,
             commitment_number + 1,
         );
-        // TODO: Once HTLC tx signing is supported, sign and verify those here as
-        // well, and check that the number of htlc_sigs matches what is expected.
-        let commitment_sig = config.sign_counterparty_commitment(commitments, signer);
-        assert!(config.verify_counterparty_signature(commitments, verifier, &commitment_sig));
+        let (commitment_sig, htlc_sigs) = config.sign_counterparty_commitment(commitments, signer);
+        assert_eq!(htlc_sigs.len(), expected_htlc_sigs);
+        assert!(config.verify_counterparty_signatures(
+            commitments,
+            verifier,
+            &commitment_sig,
+            &htlc_sigs,
+        ));
     };
 
     // Opener sends two `update_add_htlc`, an `update_fee`, and
@@ -279,6 +297,7 @@ fn commitment_dance_adds_and_resolves_htlc() {
         &opener_holder,
         &acceptor_holder,
         pubkey1, // Rotate the pubkeys to verify that PCP is updated.
+        2,
     );
 
     // Acceptor replies with `commitment_signed`, committing the same to the
@@ -303,6 +322,7 @@ fn commitment_dance_adds_and_resolves_htlc() {
         &acceptor_holder,
         &opener_holder,
         pubkey2, // Rotate the pubkeys to verify that PCP is updated.
+        2,
     );
 
     // The acceptor received both of the opener's HTLCs: it fulfills HTLC 0
@@ -327,6 +347,7 @@ fn commitment_dance_adds_and_resolves_htlc() {
         &acceptor_holder,
         &opener_holder,
         pubkey1, // Rotate the pubkeys to verify that PCP is updated.
+        0,
     );
 
     // Opener's reply resolves both on the acceptor's commitment #2.
@@ -349,6 +370,7 @@ fn commitment_dance_adds_and_resolves_htlc() {
         &opener_holder,
         &acceptor_holder,
         pubkey2, // Rotate the pubkeys to verify that PCP is updated.
+        0,
     );
 }
 
@@ -481,5 +503,75 @@ fn resolve_htlc_matches_id_and_offerer() {
         2_500_000_000,
         253,
         &[opener_htlc0, opener_htlc1],
+    );
+}
+
+#[test]
+fn verify_rejects_invalid_htlc_signatures() {
+    let secp = Secp256k1::new();
+    let opener_privkey = privkey(OPENER_PRIVKEY);
+    let acceptor_privkey = privkey(ACCEPTOR_PRIVKEY);
+    let opener_pubkey = PublicKey::from_secret_key(&secp, &opener_privkey);
+    let acceptor_pubkey = PublicKey::from_secret_key(&secp, &acceptor_privkey);
+
+    // Set up the channel configuration, initial commitments, and holder
+    // identities for the signature verification checks.
+    let config = sample_chan_config(
+        10_000_000,
+        Features::from_bits(&[Features::OPTION_STATIC_REMOTEKEY]),
+    );
+    let mut commitments = config
+        .new_initial_commitments(3_000_000_000, 253, opener_pubkey, acceptor_pubkey)
+        .expect("valid commitment");
+    commitments
+        .add_htlc(Side::Opener, sample_htlc(0, Side::Opener, 2_000_000_000))
+        .expect("balance covers HTLC");
+    commitments
+        .add_htlc(Side::Opener, sample_htlc(1, Side::Opener, 1_000_000_000))
+        .expect("balance covers HTLC");
+    let opener_holder = HolderIdentity {
+        side: Side::Opener,
+        funding_privkey: opener_privkey,
+        htlc_basepoint_privkey: opener_privkey,
+    };
+    let acceptor_holder = HolderIdentity {
+        side: Side::Acceptor,
+        funding_privkey: acceptor_privkey,
+        htlc_basepoint_privkey: acceptor_privkey,
+    };
+
+    // The acceptor signs the opener's commitment, and the opener verifies the
+    // commitment and its HTLC signatures.
+    let (commitment_sig, htlc_sigs) =
+        config.sign_counterparty_commitment(&commitments, &acceptor_holder);
+    let verify = |htlc_sigs: &[Signature]| {
+        config.verify_counterparty_signatures(
+            &commitments,
+            &opener_holder,
+            &commitment_sig,
+            htlc_sigs,
+        )
+    };
+    assert_eq!(htlc_sigs.len(), 2);
+    assert!(verify(&htlc_sigs), "valid HTLC signatures rejected");
+    assert!(!verify(&[htlc_sigs[0]]), "missing HTLC signature accepted");
+    assert!(
+        !verify(&[htlc_sigs[0], htlc_sigs[1], htlc_sigs[1]]),
+        "extra HTLC signature accepted"
+    );
+    assert!(
+        !verify(&[htlc_sigs[1], htlc_sigs[0]]),
+        "out-of-order HTLC signatures accepted"
+    );
+
+    let wrong_htlc_key_holder = HolderIdentity {
+        htlc_basepoint_privkey: opener_privkey,
+        ..acceptor_holder
+    };
+    let (_, wrong_htlc_sigs) =
+        config.sign_counterparty_commitment(&commitments, &wrong_htlc_key_holder);
+    assert!(
+        !verify(&wrong_htlc_sigs),
+        "HTLC signatures from the wrong key accepted"
     );
 }
