@@ -14,6 +14,7 @@ use super::harness::{
 use crate::executor::*;
 use smite_ir::Instruction;
 use smite_ir::builder::ProgramBuilder;
+use smite_ir::operation::ShutdownScriptVariant;
 
 // -- open_channel --
 
@@ -334,13 +335,63 @@ pub fn fund_channel_program() -> Program {
     b.build()
 }
 
-/// A program that funds a channel, mines `confirmations` blocks, and receives
-/// the target's `channel_ready`.
-pub fn recv_channel_ready_program(confirmations: u8) -> Program {
-    let mut b = ProgramBuilder::new();
-    fund_channel(&mut b);
+/// Funds a channel, mines `confirmations` blocks, and receives the target's
+/// `channel_ready`.
+pub fn establish_channel(b: &mut ProgramBuilder, confirmations: u8) -> FundedChannel {
+    let funded = fund_channel(b);
     b.append(Operation::MineBlocks(confirmations), &[]);
     b.append(Operation::RecvChannelReady, &[]);
+
+    funded
+}
+
+/// A program that runs [`establish_channel`].
+pub fn recv_channel_ready_program(confirmations: u8) -> Program {
+    let mut b = ProgramBuilder::new();
+    establish_channel(&mut b, confirmations);
+
+    b.build()
+}
+
+// -- shutdown --
+
+/// The variables a sent `shutdown` produces.
+#[derive(Clone, Copy)]
+pub struct SentShutdown {
+    pub channel_id: usize,
+    pub scriptpubkey: usize,
+    /// The `SendShutdown` result, an affine variable a single `RecvShutdown`
+    /// may consume.
+    pub sent: usize,
+}
+
+/// Sends a `shutdown` for `channel_id` carrying `script`.
+pub fn send_shutdown(
+    b: &mut ProgramBuilder,
+    channel_id: ChannelId,
+    script: ShutdownScriptVariant,
+) -> SentShutdown {
+    let channel_id = b.append(Operation::LoadChannelId(channel_id.0), &[]);
+    let scriptpubkey = b.append(Operation::LoadShutdownScript(script), &[]);
+    let sent = b.append(Operation::SendShutdown, &[channel_id, scriptpubkey]);
+
+    SentShutdown {
+        channel_id,
+        scriptpubkey,
+        sent,
+    }
+}
+
+/// A program that establishes the funding flow's channel, sends a `shutdown`
+/// for `channel_id` carrying `script`, and receives the target's `shutdown`.
+pub fn recv_shutdown_program(channel_id: ChannelId, script: ShutdownScriptVariant) -> Program {
+    let mut b = ProgramBuilder::new();
+    establish_channel(&mut b, 6);
+    let shutdown = send_shutdown(&mut b, channel_id, script);
+    b.append(
+        Operation::RecvShutdown,
+        &[shutdown.sent, shutdown.channel_id],
+    );
 
     b.build()
 }
