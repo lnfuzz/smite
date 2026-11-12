@@ -36,21 +36,10 @@ impl ReproduceCommand {
     /// `false` only on an operational failure: unknown campaign, missing input,
     /// missing image, or a Docker spawn error.
     pub fn execute(args: &ReproduceArgs) -> bool {
-        let Some(runs_dir) = CampaignState::runs_dir() else {
-            log::error!("unable to determine home directory");
-            return false;
-        };
-
-        let state_path = runs_dir.join(&args.campaign_id).join("state.json");
-        let state = match CampaignState::load(&state_path) {
+        let state = match CampaignState::load_campaign(&args.campaign_id) {
             Ok(s) => s,
             Err(e) => {
                 log::error!("{e}");
-                log::error!(
-                    "campaign '{}' not found; list campaigns with: ls {}",
-                    args.campaign_id,
-                    runs_dir.display()
-                );
                 return false;
             }
         };

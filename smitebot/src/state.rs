@@ -102,6 +102,8 @@ pub enum StateError {
         path: PathBuf,
         source: serde_json::Error,
     },
+    #[error("unable to determine home directory")]
+    HomeDir,
 }
 
 impl CampaignState {
@@ -141,7 +143,7 @@ impl CampaignState {
 
     /// Saves the campaign state as JSON, using an atomic write to prevent
     /// corruption if the process is interrupted.
-    pub fn save(&self, path: &Path) -> Result<(), StateError> {
+    fn save(&self, path: &Path) -> Result<(), StateError> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|source| StateError::CreateDir {
                 path: parent.to_path_buf(),
@@ -163,8 +165,26 @@ impl CampaignState {
         Ok(())
     }
 
+    /// Path to campaign `id`'s state file: `~/.smitebot/runs/<id>/state.json`.
+    ///
+    /// Returns `None` if the home directory cannot be determined.
+    fn campaign_state_path(id: &str) -> Option<PathBuf> {
+        Some(Self::runs_dir()?.join(id).join("state.json"))
+    }
+
+    /// Saves the campaign state to `~/.smitebot/runs/<id>/state.json`, returning
+    /// the path written.
+    ///
+    /// Takes `id` explicitly, mirroring [`load_campaign`](Self::load_campaign),
+    /// so a load/save round trip always targets the same directory.
+    pub fn save_campaign(&self, id: &str) -> Result<PathBuf, StateError> {
+        let path = Self::campaign_state_path(id).ok_or(StateError::HomeDir)?;
+        self.save(&path)?;
+        Ok(path)
+    }
+
     /// Loads campaign state from a JSON file written by `save`.
-    pub fn load(path: &Path) -> Result<Self, StateError> {
+    fn load(path: &Path) -> Result<Self, StateError> {
         let contents = fs::read_to_string(path).map_err(|source| StateError::Read {
             path: path.to_path_buf(),
             source,
@@ -173,6 +193,11 @@ impl CampaignState {
             path: path.to_path_buf(),
             source,
         })
+    }
+
+    /// Loads state for campaign `id` from `~/.smitebot/runs/<id>/state.json`.
+    pub fn load_campaign(id: &str) -> Result<Self, StateError> {
+        Self::load(&Self::campaign_state_path(id).ok_or(StateError::HomeDir)?)
     }
 }
 
@@ -323,6 +348,11 @@ sharedir = "/tmp/nyx"
         assert_eq!(loaded.id, state.id);
         assert_eq!(loaded.status, Status::Stopped);
         assert_eq!(loaded.stop_time, Some(1_749_469_200));
+    }
+
+    #[test]
+    fn load_campaign_returns_err_for_missing_campaign() {
+        assert!(CampaignState::load_campaign("nonexistent-campaign-xkcd-abc123").is_err());
     }
 
     #[test]
