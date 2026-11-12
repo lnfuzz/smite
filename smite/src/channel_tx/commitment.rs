@@ -230,7 +230,8 @@ struct BuiltHtlcTx {
 
 impl Side {
     /// Returns the counterparty side.
-    fn other(self) -> Self {
+    #[must_use]
+    pub fn other(self) -> Self {
         match self {
             Self::Opener => Self::Acceptor,
             Self::Acceptor => Self::Opener,
