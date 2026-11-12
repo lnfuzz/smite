@@ -165,10 +165,22 @@ impl CampaignState {
         Ok(())
     }
 
-    /// Saves the campaign state to `~/.smitebot/runs/<id>/state.json`.
-    pub fn save_campaign(&self) -> Result<(), StateError> {
-        let runs_dir = Self::runs_dir().ok_or(StateError::HomeDir)?;
-        self.save(&runs_dir.join(&self.id).join("state.json"))
+    /// Path to campaign `id`'s state file: `~/.smitebot/runs/<id>/state.json`.
+    ///
+    /// Returns `None` if the home directory cannot be determined.
+    fn campaign_state_path(id: &str) -> Option<PathBuf> {
+        Some(Self::runs_dir()?.join(id).join("state.json"))
+    }
+
+    /// Saves the campaign state to `~/.smitebot/runs/<id>/state.json`, returning
+    /// the path written.
+    ///
+    /// Takes `id` explicitly, mirroring [`load_campaign`](Self::load_campaign),
+    /// so a load/save round trip always targets the same directory.
+    pub fn save_campaign(&self, id: &str) -> Result<PathBuf, StateError> {
+        let path = Self::campaign_state_path(id).ok_or(StateError::HomeDir)?;
+        self.save(&path)?;
+        Ok(path)
     }
 
     /// Loads campaign state from a JSON file written by `save`.
@@ -185,8 +197,7 @@ impl CampaignState {
 
     /// Loads state for campaign `id` from `~/.smitebot/runs/<id>/state.json`.
     pub fn load_campaign(id: &str) -> Result<Self, StateError> {
-        let runs_dir = Self::runs_dir().ok_or(StateError::HomeDir)?;
-        Self::load(&runs_dir.join(id).join("state.json"))
+        Self::load(&Self::campaign_state_path(id).ok_or(StateError::HomeDir)?)
     }
 }
 

@@ -136,7 +136,7 @@ impl StartCommand {
             tmux_session,
         );
 
-        if let Err(e) = state.save_campaign() {
+        if let Err(e) = state.save_campaign(&state.id) {
             log::error!("{e}");
             return false;
         }
@@ -144,13 +144,16 @@ impl StartCommand {
         if !launch_runners(&config, &seed_dir, &mut state) {
             return false;
         }
-        if let Err(e) = state.save_campaign() {
-            log::error!("{e}");
-            return false;
-        }
+        let state_path = match state.save_campaign(&state.id) {
+            Ok(path) => path,
+            Err(e) => {
+                log::error!("{e}");
+                return false;
+            }
+        };
 
         log::info!("campaign {} is running", state.id);
-        log::info!("state saved to ~/.smitebot/runs/{}/state.json", state.id);
+        log::info!("state saved to {}", state_path.display());
 
         log::info!("attaching to tmux session '{}'", state.tmux_session);
         if let Err(e) = tmux::attach(&state.tmux_session) {
@@ -195,7 +198,7 @@ fn launch_runners(config: &CampaignConfig, seed_dir: &Path, state: &mut Campaign
 
     state.runners = runners;
 
-    if let Err(e) = state.save_campaign() {
+    if let Err(e) = state.save_campaign(&state.id) {
         log::warn!("failed to save state: {e}");
     }
 
@@ -229,7 +232,7 @@ fn fail_campaign(state: &mut CampaignState) {
         );
     }
     state.status = Status::Failed;
-    if let Err(e) = state.save_campaign() {
+    if let Err(e) = state.save_campaign(&state.id) {
         log::warn!("failed to save state: {e}");
     }
 }

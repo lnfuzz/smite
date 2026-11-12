@@ -63,7 +63,7 @@ impl StopCommand {
 
         state.status = Status::Stopped;
         state.stop_time = Some(utils::epoch_secs());
-        if let Err(e) = state.save_campaign() {
+        if let Err(e) = state.save_campaign(&args.campaign_id) {
             log::error!(
                 "runners were reaped but recording the stop failed: {e}; \
                  campaign {} will still show as running in state.json",
