@@ -265,12 +265,14 @@ pub const TEMPORARY_CHANNEL_ID: TemporaryChannelId = TemporaryChannelId::new([0x
 /// The `temporary_channel_id` of a second negotiation, for tests that run two.
 pub const SECOND_TEMPORARY_CHANNEL_ID: TemporaryChannelId = TemporaryChannelId::new([0xcc; 32]);
 
-pub fn sample_pubkey(byte: u8) -> PublicKey {
-    let secp = Secp256k1::new();
+pub fn sample_secret_key(byte: u8) -> SecretKey {
     let mut key_bytes = [0u8; 32];
     key_bytes[31] = byte;
-    let sk = SecretKey::from_slice(&key_bytes).expect("valid secret key");
-    PublicKey::from_secret_key(&secp, &sk)
+    SecretKey::from_slice(&key_bytes).expect("valid secret key")
+}
+
+pub fn sample_pubkey(byte: u8) -> PublicKey {
+    PublicKey::from_secret_key(&Secp256k1::new(), &sample_secret_key(byte))
 }
 
 pub fn sample_context() -> ProgramContext {
@@ -408,6 +410,57 @@ impl SampleOpenChannel {
 /// carrying the target's pubkey in every pubkey field.
 pub fn announced_open_channel() -> SampleOpenChannel {
     SampleOpenChannel::new(PointSource::TargetContext)
+}
+
+// -- Sample update_add_htlc --
+
+/// An `update_add_htlc` a test sends, plus the onion inputs the program loads
+/// to build its `onion_routing_packet` for the target.
+///
+/// `channel_id` and `onion_routing_packet` are not part of the sample because
+/// the program derives them, so tests supply them to [`Self::message`].
+pub struct SampleUpdateAddHtlc {
+    pub id: u64,
+    pub amount_msat: u64,
+    pub payment_hash: [u8; 32],
+    pub cltv_expiry: u32,
+    /// The session key of the onion routing packet.
+    pub session_key: [u8; 32],
+    /// The payment secret in the target's final-hop payload.
+    pub payment_secret: [u8; 32],
+}
+
+impl SampleUpdateAddHtlc {
+    /// The message the executor must send on `channel_id` with
+    /// `onion_routing_packet`.
+    pub fn message(
+        &self,
+        channel_id: ChannelId,
+        onion_routing_packet: &[u8; PAYMENT_ONION_PACKET_SIZE],
+    ) -> UpdateAddHtlc {
+        UpdateAddHtlc {
+            channel_id,
+            id: self.id,
+            amount_msat: self.amount_msat,
+            payment_hash: self.payment_hash,
+            cltv_expiry: self.cltv_expiry,
+            onion_routing_packet: *onion_routing_packet,
+            tlvs: UpdateAddHtlcTlvs::default(),
+        }
+    }
+}
+
+/// The `update_add_htlc` the HTLC tests send: the first HTLC of the channel,
+/// expiring 144 blocks after the context's block height.
+pub fn sample_update_add_htlc() -> SampleUpdateAddHtlc {
+    SampleUpdateAddHtlc {
+        id: 0,
+        amount_msat: 50_000_000,
+        payment_hash: [0x11; 32],
+        cltv_expiry: sample_context().block_height + 144,
+        session_key: [0x33; 32],
+        payment_secret: [0x22; 32],
+    }
 }
 
 // -- Funding fixture --

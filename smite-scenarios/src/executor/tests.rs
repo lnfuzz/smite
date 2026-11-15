@@ -3,6 +3,7 @@ mod programs;
 
 use super::*;
 use bitcoin::Amount;
+use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::{Secp256k1, SecretKey};
 use harness::*;
 use programs::*;
@@ -10,6 +11,7 @@ use smite::bolt::{
     AcceptChannelTlvs, ChannelReadyTlvs, GossipTimestampFilter, Init, Ping, QueryShortChannelIds,
     QueryShortChannelIdsTlvs, ReplyShortChannelIdsEnd,
 };
+use smite::onion::{OnionPacket, Peeled, peel};
 use smite_ir::Instruction;
 use smite_ir::builder::ProgramBuilder;
 use smite_ir::operation::ShutdownScriptVariant;
@@ -1339,6 +1341,97 @@ fn execute_send_channel_ready() {
         *state.next_holder_per_commitment_point(),
         Some(expected_pcp1)
     );
+}
+
+#[test]
+fn execute_send_update_add_htlc() {
+    let channel_id = funding_channel_id();
+    let htlc_vars = sample_update_add_htlc();
+    let mut b = ProgramBuilder::new();
+    let funded = fund_channel(&mut b);
+    send_update_add_htlc(&mut b, funded.channel_id, &htlc_vars);
+
+    let mut fx = recv_funding_signed_fixture();
+    fx.run(&b.build());
+
+    // The instructions send 1 `open_channel`, 1 `funding_created` and 1
+    // `update_add_htlc` message.
+    assert_eq!(fx.sent_len(), 3);
+    let add: UpdateAddHtlc = fx.sent(2);
+    assert_eq!(
+        add,
+        htlc_vars.message(channel_id, &add.onion_routing_packet)
+    );
+
+    // The target peels the onion as the final hop and finds the HTLC's amount
+    // and expiry with the loaded payment secret.
+    let target_key = sample_secret_key(1);
+    let packet = OnionPacket::decode(&add.onion_routing_packet).expect("valid onion packet");
+    let Peeled::Final {
+        payload,
+        shared_secret,
+    } = peel(&packet, &target_key, &add.payment_hash, None).expect("target peels")
+    else {
+        panic!("target should be the final hop");
+    };
+    assert_eq!(
+        HopPayload::decode(&payload).expect("valid hop payload"),
+        HopPayload::receive(
+            add.amount_msat,
+            add.cltv_expiry,
+            htlc_vars.payment_secret,
+            add.amount_msat
+        )
+    );
+
+    // The target derives the same shared secret as the loaded session key.
+    let session_key = SecretKey::from_slice(&htlc_vars.session_key).expect("valid secret key");
+    assert_eq!(
+        shared_secret,
+        SharedSecret::new(&sample_context().target_pubkey, &session_key)
+    );
+
+    // The offered HTLC must be queued for the counterparty's next commitment,
+    // not the holder's.
+    let state = fx.channel_state(&channel_id);
+    let pending = &state.counterparty_commitment_updates().pending_commit;
+    assert_eq!(pending.len(), 1);
+    let CommitmentUpdate::AddHtlc(htlc) = pending[0] else {
+        panic!("expected a queued HTLC add");
+    };
+    assert_eq!(
+        htlc,
+        Htlc {
+            id: add.id,
+            offerer: Side::Opener,
+            amount_msat: add.amount_msat,
+            cltv_expiry: add.cltv_expiry,
+            payment_hash: add.payment_hash,
+        }
+    );
+    assert!(state.holder_commitment_updates().pending_commit.is_empty());
+}
+
+#[test]
+fn execute_send_update_add_htlc_unknown_channel() {
+    let channel_id = ChannelId::new([0x7a; 32]);
+    // No channel exists for this channel_id, but still send the
+    // `update_add_htlc` to exercise the target's handling of unknown channels.
+    let mut b = ProgramBuilder::new();
+    let channel_id_var = b.append(Operation::LoadChannelId(channel_id.0), &[]);
+    let htlc_vars = sample_update_add_htlc();
+    send_update_add_htlc(&mut b, channel_id_var, &htlc_vars);
+
+    let mut fx = Fixture::new();
+    fx.run(&b.build());
+
+    assert_eq!(fx.sent_len(), 1);
+    let add: UpdateAddHtlc = fx.sent(0);
+    assert_eq!(
+        add,
+        htlc_vars.message(channel_id, &add.onion_routing_packet)
+    );
+    assert!(fx.channel_states().is_empty());
 }
 
 #[test]

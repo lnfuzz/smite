@@ -573,6 +573,73 @@ fn display_send_and_recv_channel_ready_program() {
 }
 
 #[test]
+fn display_send_update_add_htlc_program() {
+    let instructions = vec![
+        Instruction {
+            operation: Operation::LoadChannelId([0xcd; 32]),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadHtlcId(7),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadAmount(50_000_000),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadPaymentField([0x11; 32]),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadBlockHeight(800_144),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadPrivateKey(key(1)),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadTargetPubkeyFromContext,
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadPaymentField([0x22; 32]),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::SendUpdateAddHtlc,
+            inputs: vec![0, 1, 2, 3, 4, 5, 6, 7],
+        },
+    ];
+
+    let program = Program { instructions };
+    assert_well_formed(&program);
+    let text = program.to_string();
+    let lines: Vec<&str> = text.lines().collect();
+
+    let cid_hex = "cd".repeat(32);
+    let hash_hex = "11".repeat(32);
+    let secret_hex = "22".repeat(32);
+    let z31 = "00".repeat(31);
+    let expected: Vec<String> = vec![
+        format!("v0 = LoadChannelId(0x{cid_hex})"),
+        "v1 = LoadHtlcId(7)".into(),
+        "v2 = LoadAmount(50000000)".into(),
+        format!("v3 = LoadPaymentField(0x{hash_hex})"),
+        "v4 = LoadBlockHeight(800144)".into(),
+        format!("v5 = LoadPrivateKey(0x{z31}01)"),
+        "v6 = LoadTargetPubkeyFromContext()".into(),
+        format!("v7 = LoadPaymentField(0x{secret_hex})"),
+        "SendUpdateAddHtlc(v0, v1, v2, v3, v4, v5, v6, v7)".into(),
+    ];
+    assert_eq!(lines.len(), expected.len(), "line count mismatch");
+    for (i, (got, want)) in lines.iter().zip(expected.iter()).enumerate() {
+        assert_eq!(got, want, "line {i} mismatch");
+    }
+}
+
+#[test]
 fn display_send_shutdown_program() {
     let instructions = vec![
         Instruction {

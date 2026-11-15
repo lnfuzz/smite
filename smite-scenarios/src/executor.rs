@@ -10,14 +10,15 @@ use smite::bitcoin::{BitcoinCli, TxBlockPosition, Utxo};
 use smite::bolt::{
     AcceptChannel, AnnouncementSignatures, ChannelAnnouncement, ChannelId, ChannelReady,
     ChannelReadyTlvs, ChannelUpdate, Features, FromMessage, FundingCreated, FundingSigned, Message,
-    MessageType, NodeAnnouncement, OpenChannel, OpenChannelTlvs, Pong, ShortChannelId, Shutdown,
-    TemporaryChannelId,
+    MessageType, NodeAnnouncement, OpenChannel, OpenChannelTlvs, PAYMENT_ONION_PACKET_SIZE, Pong,
+    ShortChannelId, Shutdown, TemporaryChannelId, UpdateAddHtlc, UpdateAddHtlcTlvs,
 };
-use smite::channel_state::ChannelState;
+use smite::channel_state::{ChannelState, CommitmentUpdate};
 use smite::channel_tx::{
-    ChannelConfig, FundingTransaction, HolderIdentity, Side, build_funding_transaction,
+    ChannelConfig, FundingTransaction, HolderIdentity, Htlc, Side, build_funding_transaction,
 };
 use smite::noise::{ConnectionError, NoiseConnection};
+use smite::onion::{HopPayload, OnionBuilder};
 use smite::oracles::{
     AcceptChannelContext, AcceptChannelOracle, ChannelReadyContext, ChannelReadyOracle,
     FundingSignedContext, FundingSignedOracle, Oracle,
@@ -527,6 +528,19 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     None
                 }
 
+                Operation::SendUpdateAddHtlc => {
+                    let add =
+                        build_update_add_htlc(&variables, &instr.inputs, &mut self.channel_states);
+                    let encoded = Message::UpdateAddHtlc(add).encode();
+                    log::debug!(
+                        "[{:?}] SendUpdateAddHtlc: {} bytes",
+                        start.elapsed(),
+                        encoded.len(),
+                    );
+                    self.conn.send_message(&encoded)?;
+                    None
+                }
+
                 Operation::SendShutdown => {
                     let sd = build_shutdown(&variables, &instr.inputs);
                     let encoded = Message::Shutdown(sd).encode();
@@ -778,6 +792,7 @@ macro_rules! define_resolver {
 
 define_resolver!(resolve_amount, Amount, u64);
 define_resolver!(resolve_feerate, FeeratePerKw, u32);
+define_resolver!(resolve_block_height, BlockHeight, u32);
 define_resolver!(resolve_forwarding_fee, ForwardingFee, u32);
 define_resolver!(resolve_timestamp, Timestamp, u32);
 define_resolver!(resolve_u16, U16, u16);
@@ -786,6 +801,8 @@ define_resolver!(resolve_bytes, Bytes, &[u8]);
 define_resolver!(resolve_features, Features, &[u8]);
 define_resolver!(resolve_chain_hash, ChainHash, [u8; 32]);
 define_resolver!(resolve_channel_id, ChannelId, ChannelId);
+define_resolver!(resolve_htlc_id, HtlcId, u64);
+define_resolver!(resolve_payment_field, PaymentField, [u8; 32]);
 define_resolver!(resolve_pubkey, Point, PublicKey);
 define_resolver!(resolve_short_channel_id, ShortChannelId, ShortChannelId);
 define_resolver!(resolve_private_key, PrivateKey, [u8; 32]);
@@ -1065,6 +1082,63 @@ fn build_channel_ready(
         channel_id,
         second_per_commitment_point,
         tlvs: ChannelReadyTlvs { short_channel_id },
+    }
+}
+
+/// Builds an `UpdateAddHtlc` from 8 input variables (wire order).
+///
+/// If the channel identified by `channel_id` is tracked, the HTLC offered by
+/// the holder is queued for the counterparty's next commitment, otherwise the
+/// message is built without updating any state.
+fn build_update_add_htlc(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+) -> UpdateAddHtlc {
+    let channel_id = resolve_channel_id(variables, inputs[0]);
+    let id = resolve_htlc_id(variables, inputs[1]);
+    let amount_msat = resolve_amount(variables, inputs[2]);
+    let payment_hash = resolve_payment_field(variables, inputs[3]);
+    let cltv_expiry = resolve_block_height(variables, inputs[4]);
+    let session_key_bytes = resolve_private_key(variables, inputs[5]);
+    let node_id = resolve_pubkey(variables, inputs[6]);
+    let payment_secret = resolve_payment_field(variables, inputs[7]);
+
+    // Build a single-hop onion routing packet with `node_id` as the final hop.
+    let session_key = SecretKey::from_slice(&session_key_bytes).expect("valid private key");
+    let payload = HopPayload::receive(amount_msat, cltv_expiry, payment_secret, amount_msat);
+    let onion = OnionBuilder::new(session_key)
+        .associated_data(payment_hash)
+        .hop(node_id, &payload)
+        .build()
+        .expect("valid single-hop onion");
+    let onion_routing_packet: [u8; PAYMENT_ONION_PACKET_SIZE] = onion
+        .packet
+        .encode()
+        .try_into()
+        .expect("valid 1366-byte onion routing packet");
+
+    // Queue the HTLC on the channel state if the channel is tracked. Otherwise,
+    // the HTLC is still sent without updating any state.
+    if let Some(state) = channel_states.get_mut(&channel_id) {
+        let offerer = state.holder.side;
+        state.queue_update(CommitmentUpdate::AddHtlc(Htlc {
+            id,
+            offerer,
+            amount_msat,
+            cltv_expiry,
+            payment_hash,
+        }));
+    }
+
+    UpdateAddHtlc {
+        channel_id,
+        id,
+        amount_msat,
+        payment_hash,
+        cltv_expiry,
+        onion_routing_packet,
+        tlvs: UpdateAddHtlcTlvs::default(),
     }
 }
 

@@ -121,6 +121,7 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         | Operation::SendMessage
         | Operation::SendOpenChannel
         | Operation::SendFundingCreated
+        | Operation::SendUpdateAddHtlc
         | Operation::SendShutdown
         | Operation::RecvAcceptChannel
         | Operation::RecvFundingSigned
