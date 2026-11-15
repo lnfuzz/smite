@@ -117,6 +117,9 @@ impl LndTarget {
             .arg(format!("--rpclisten=127.0.0.1:{}", config.lnd_rpc_port))
             .arg("--restlisten=127.0.0.1:8080")
             .arg("--tlsextradomain=127.0.0.1")
+            // LND only advertises `option_scid_alias` when asked to. Without
+            // it LND ignores the aliases we send in `channel_ready`.
+            .arg("--protocol.option-scid-alias")
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 
