@@ -44,6 +44,7 @@ mod types;
 mod update_add_htlc;
 mod update_fail_htlc;
 mod update_fail_malformed_htlc;
+mod update_fee;
 mod update_fulfill_htlc;
 mod warning;
 mod wire;
@@ -96,6 +97,7 @@ pub use types::{
 pub use update_add_htlc::{UpdateAddHtlc, UpdateAddHtlcTlvs};
 pub use update_fail_htlc::{UpdateFailHtlc, UpdateFailHtlcTlvs};
 pub use update_fail_malformed_htlc::UpdateFailMalformedHtlc;
+pub use update_fee::UpdateFee;
 pub use update_fulfill_htlc::{UpdateFulfillHtlc, UpdateFulfillHtlcTlvs};
 pub use warning::Warning;
 pub use wire::{EmptyTlv, WireFormat};
@@ -218,6 +220,8 @@ impl MessageType {
     pub const COMMITMENT_SIGNED: MessageType = MessageType(132);
     /// `revoke_and_ack` message (BOLT 2).
     pub const REVOKE_AND_ACK: MessageType = MessageType(133);
+    /// `update_fee` message (BOLT 2).
+    pub const UPDATE_FEE: MessageType = MessageType(134);
     /// `update_fail_malformed_htlc` message (BOLT 2).
     pub const UPDATE_FAIL_MALFORMED_HTLC: MessageType = MessageType(135);
     /// `channel_reestablish` message (BOLT 2).
@@ -284,6 +288,7 @@ impl MessageType {
             Self::UPDATE_FAIL_HTLC => "update_fail_htlc",
             Self::COMMITMENT_SIGNED => "commitment_signed",
             Self::REVOKE_AND_ACK => "revoke_and_ack",
+            Self::UPDATE_FEE => "update_fee",
             Self::UPDATE_FAIL_MALFORMED_HTLC => "update_fail_malformed_htlc",
             Self::CHANNEL_REESTABLISH => "channel_reestablish",
             Self::CHANNEL_ANNOUNCEMENT => "channel_announcement",
@@ -368,6 +373,8 @@ pub enum Message {
     CommitmentSigned(CommitmentSigned),
     /// `revoke_and_ack` message (type 133).
     RevokeAndAck(RevokeAndAck),
+    /// `update_fee` message (type 134).
+    UpdateFee(UpdateFee),
     /// `update_fail_malformed_htlc` message (type 135).
     UpdateFailMalformedHtlc(UpdateFailMalformedHtlc),
     /// `channel_reestablish` message (type 136).
@@ -439,6 +446,7 @@ impl Message {
             Self::UpdateFailHtlc(_) => MessageType::UPDATE_FAIL_HTLC,
             Self::CommitmentSigned(_) => MessageType::COMMITMENT_SIGNED,
             Self::RevokeAndAck(_) => MessageType::REVOKE_AND_ACK,
+            Self::UpdateFee(_) => MessageType::UPDATE_FEE,
             Self::UpdateFailMalformedHtlc(_) => MessageType::UPDATE_FAIL_MALFORMED_HTLC,
             Self::ChannelReestablish(_) => MessageType::CHANNEL_REESTABLISH,
             Self::ChannelAnnouncement(_) => MessageType::CHANNEL_ANNOUNCEMENT,
@@ -488,6 +496,7 @@ impl Message {
             Self::UpdateFailHtlc(m) => out.extend(m.encode()),
             Self::CommitmentSigned(m) => out.extend(m.encode()),
             Self::RevokeAndAck(m) => out.extend(m.encode()),
+            Self::UpdateFee(m) => out.extend(m.encode()),
             Self::UpdateFailMalformedHtlc(m) => out.extend(m.encode()),
             Self::ChannelReestablish(m) => out.extend(m.encode()),
             Self::ChannelAnnouncement(m) => out.extend(m.encode()),
@@ -558,6 +567,7 @@ impl Message {
                 Ok(Self::CommitmentSigned(CommitmentSigned::decode(cursor)?))
             }
             MessageType::REVOKE_AND_ACK => Ok(Self::RevokeAndAck(RevokeAndAck::decode(cursor)?)),
+            MessageType::UPDATE_FEE => Ok(Self::UpdateFee(UpdateFee::decode(cursor)?)),
             MessageType::UPDATE_FAIL_MALFORMED_HTLC => Ok(Self::UpdateFailMalformedHtlc(
                 UpdateFailMalformedHtlc::decode(cursor)?,
             )),
@@ -658,6 +668,7 @@ impl_from_message! {
     UpdateFailHtlc => UPDATE_FAIL_HTLC,
     CommitmentSigned => COMMITMENT_SIGNED,
     RevokeAndAck => REVOKE_AND_ACK,
+    UpdateFee => UPDATE_FEE,
     UpdateFailMalformedHtlc => UPDATE_FAIL_MALFORMED_HTLC,
     ChannelReestablish => CHANNEL_REESTABLISH,
     ChannelAnnouncement => CHANNEL_ANNOUNCEMENT,
@@ -1255,6 +1266,22 @@ mod tests {
         assert_eq!(decoded, Message::RevokeAndAck(msg));
     }
 
+    /// Valid `UpdateFee` message for testing.
+    fn sample_update_fee() -> UpdateFee {
+        UpdateFee {
+            channel_id: ChannelId::new([0x42; CHANNEL_ID_SIZE]),
+            feerate_per_kw: 2500,
+        }
+    }
+
+    #[test]
+    fn message_update_fee_roundtrip() {
+        let msg = sample_update_fee();
+        let encoded = Message::UpdateFee(msg.clone()).encode();
+        let decoded = Message::decode(&encoded).unwrap();
+        assert_eq!(decoded, Message::UpdateFee(msg));
+    }
+
     #[test]
     fn message_update_fail_malformed_htlc_roundtrip() {
         let msg = UpdateFailMalformedHtlc {
@@ -1642,6 +1669,11 @@ mod tests {
                 Message::RevokeAndAck(sample_revoke_and_ack()),
                 "revoke_and_ack",
                 MessageType::REVOKE_AND_ACK,
+            ),
+            (
+                Message::UpdateFee(sample_update_fee()),
+                "update_fee",
+                MessageType::UPDATE_FEE,
             ),
             (
                 Message::UpdateFailMalformedHtlc(UpdateFailMalformedHtlc {
