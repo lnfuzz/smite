@@ -105,7 +105,6 @@ fn init_logging() {
 /// # Panics
 ///
 /// Panics if the logger fails to initialize.
-#[must_use]
 pub fn smite_run<S: Scenario>() -> std::process::ExitCode {
     use std::process::ExitCode;
 
