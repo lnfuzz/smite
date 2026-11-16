@@ -3008,9 +3008,13 @@ fn generator_insertion_shifts_correctly() {
     // The length of the generated program.
     let offset = program.instructions.len() - original.instructions.len();
 
-    for mut_idx in (insert_point + offset)..program.instructions.len() {
+    for (mut_idx, mut_instr) in program
+        .instructions
+        .iter()
+        .enumerate()
+        .skip(insert_point + offset)
+    {
         let orig_idx = mut_idx - offset;
-        let mut_instr = &program.instructions[mut_idx];
         let orig_instr = &original.instructions[orig_idx];
 
         // Ensure the operations align perfectly.
