@@ -7,6 +7,7 @@
 mod commitment;
 mod funding;
 mod interactive_tx;
+mod tx_exchange;
 
 pub use commitment::{
     ChannelCommitments, ChannelConfig, ChannelPartyConfig, CommitmentCost, CommitmentError,
@@ -17,3 +18,4 @@ pub use interactive_tx::{
     Contributor, DuplicateSerialId, MAX_INPUTS, MAX_OUTPUTS, MAX_SEQUENCE, SharedInput,
     SharedOutput, SharedTransaction,
 };
+pub use tx_exchange::{Step, TxExchange};
