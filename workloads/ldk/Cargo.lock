@@ -972,7 +972,8 @@ name = "ldk-node-wrapper"
 version = "0.0.0"
 dependencies = [
  "ldk-node",
- "libc",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
