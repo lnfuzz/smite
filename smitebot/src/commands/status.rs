@@ -44,21 +44,10 @@ impl StatusCommand {
     /// Reports the status of a campaign, either as a one-shot summary or by
     /// attaching to its live tmux dashboard.
     pub fn execute(args: &StatusArgs) -> bool {
-        let Some(runs_dir) = CampaignState::runs_dir() else {
-            log::error!("unable to determine home directory");
-            return false;
-        };
-        let state_path = runs_dir.join(&args.campaign_id).join("state.json");
-
-        let state = match CampaignState::load(&state_path) {
-            Ok(state) => state,
+        let state = match CampaignState::load_campaign(&args.campaign_id) {
+            Ok(s) => s,
             Err(e) => {
                 log::error!("{e}");
-                log::error!(
-                    "campaign '{}' not found; list campaigns with: ls {}",
-                    args.campaign_id,
-                    runs_dir.display()
-                );
                 return false;
             }
         };
