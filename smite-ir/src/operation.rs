@@ -225,7 +225,6 @@ pub enum Operation {
         include_alias: bool,
     },
     /// Build and send a `shutdown` message (BOLT 2, type 38).
-    /// Produces a `SentShutdown` variable.
     ///
     /// Inputs (2):
     ///   0: `channel_id`   (`ChannelId`)
@@ -245,6 +244,15 @@ pub enum Operation {
     /// point unknown) and its funding transaction has enough confirmations for
     /// the target to have sent `channel_ready`.
     RecvChannelReady,
+    /// Receive and parse a `shutdown` from the target.
+    /// Produces the received `scriptpubkey` (`Bytes`), or empty `Bytes` if no
+    /// `shutdown` was received.
+    ///
+    /// This is a no-op unless some tracked channel is awaiting a reply to our
+    /// `shutdown`: we sent one there, the target has sent its `channel_ready`,
+    /// and it has not replied yet. A target that has not sent `channel_ready`
+    /// may ignore our `shutdown`, so no reply is awaited before then.
+    RecvShutdown,
     /// Mines the given number of blocks on the Bitcoin network.
     MineBlocks(u8),
     /// Sign wallet inputs of the transaction and broadcast it via `bitcoin-cli`.
@@ -578,6 +586,7 @@ impl fmt::Display for Operation {
             Self::RecvAcceptChannel => write!(f, "RecvAcceptChannel"),
             Self::RecvFundingSigned => write!(f, "RecvFundingSigned"),
             Self::RecvChannelReady => write!(f, "RecvChannelReady()"),
+            Self::RecvShutdown => write!(f, "RecvShutdown()"),
             Self::MineBlocks(v) => write!(f, "MineBlocks({v})"),
             Self::BroadcastTransaction => write!(f, "BroadcastTransaction"),
             Self::LookupShortChannelId => write!(f, "LookupShortChannelId"),
@@ -601,7 +610,9 @@ impl Operation {
             Self::LoadForwardingFee(_) => Some(VariableType::ForwardingFee),
             Self::LoadU16(_) => Some(VariableType::U16),
             Self::LoadU8(_) => Some(VariableType::U8),
-            Self::LoadBytes(_) | Self::LoadShutdownScript(_) => Some(VariableType::Bytes),
+            Self::LoadBytes(_) | Self::LoadShutdownScript(_) | Self::RecvShutdown => {
+                Some(VariableType::Bytes)
+            }
             Self::LoadFeatures(_) | Self::LoadChannelType(_) => Some(VariableType::Features),
             Self::LoadPrivateKey(_) | Self::LoadLocalNodeSecretFromContext => {
                 Some(VariableType::PrivateKey)
@@ -621,12 +632,12 @@ impl Operation {
             | Self::BuildAnnouncementSignatures => Some(VariableType::Message),
             Self::SendMessage
             | Self::SendChannelReady { .. }
+            | Self::SendShutdown
             | Self::RecvChannelReady
             | Self::MineBlocks(_)
             | Self::BroadcastTransaction => None,
             Self::SendOpenChannel => Some(VariableType::SentOpenChannel),
             Self::SendFundingCreated => Some(VariableType::SentFundingCreated),
-            Self::SendShutdown => Some(VariableType::SentShutdown),
             Self::RecvAcceptChannel => Some(VariableType::AcceptChannel),
         }
     }
@@ -654,6 +665,7 @@ impl Operation {
             | Self::LoadChainHashFromContext
             | Self::LoadLocalNodeSecretFromContext
             | Self::RecvChannelReady
+            | Self::RecvShutdown
             | Self::MineBlocks(_) => vec![],
 
             Self::DerivePoint => vec![VariableType::PrivateKey],
@@ -800,6 +812,7 @@ impl Operation {
             | Self::SendShutdown
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
+            | Self::RecvShutdown
             | Self::MineBlocks(_)
             | Self::BroadcastTransaction
             | Self::LookupShortChannelId => vec![],
@@ -852,6 +865,7 @@ impl Operation {
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
+            | Self::RecvShutdown
             | Self::MineBlocks(_)
             | Self::BroadcastTransaction => true,
         }
@@ -909,6 +923,7 @@ impl Operation {
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
+            | Self::RecvShutdown
             | Self::MineBlocks(_)
             | Self::BroadcastTransaction
             | Self::LookupShortChannelId => false,
@@ -965,6 +980,7 @@ impl Operation {
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
+            | Self::RecvShutdown
             | Self::BroadcastTransaction
             | Self::LookupShortChannelId => false,
         }

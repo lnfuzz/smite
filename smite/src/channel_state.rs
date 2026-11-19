@@ -104,6 +104,13 @@ pub struct ChannelState {
     /// Whether a `funding_signed` has already been accepted for this channel.
     /// Any later one means the target re-signed a channel it already funded.
     pub funding_signed_received: bool,
+    /// The `scriptpubkey` of the `shutdown` we sent, once we have sent one.
+    /// Its presence is what makes a reply expected on this channel.
+    pub our_shutdown_script: Option<Vec<u8>>,
+    /// The `scriptpubkey` of the peer's `shutdown`, once it has sent one. A
+    /// target may ignore any `shutdown` after the first, so its presence means
+    /// no further reply is expected on this channel.
+    pub counterparty_shutdown_script: Option<Vec<u8>>,
 }
 
 impl CommitmentUpdate {
@@ -161,6 +168,8 @@ impl ChannelState {
             was_funding_mined_prematurely,
             sent_invalid_signature,
             funding_signed_received: false,
+            our_shutdown_script: None,
+            counterparty_shutdown_script: None,
         }
     }
 

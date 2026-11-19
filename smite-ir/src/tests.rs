@@ -573,7 +573,7 @@ fn display_send_and_recv_channel_ready_program() {
 }
 
 #[test]
-fn display_send_shutdown_program() {
+fn display_send_and_recv_shutdown_program() {
     let instructions = vec![
         Instruction {
             operation: Operation::LoadChannelId([0xcd; 32]),
@@ -587,6 +587,10 @@ fn display_send_shutdown_program() {
             operation: Operation::SendShutdown,
             inputs: vec![0, 1],
         },
+        Instruction {
+            operation: Operation::RecvShutdown,
+            inputs: vec![],
+        },
     ];
 
     let program = Program { instructions };
@@ -598,7 +602,8 @@ fn display_send_shutdown_program() {
     let expected: Vec<String> = vec![
         format!("v0 = LoadChannelId(0x{cid_hex})"),
         format!("v1 = LoadShutdownScript(P2wpkh(0x{spk_hex}))"),
-        "v2 = SendShutdown(v0, v1)".into(),
+        "SendShutdown(v0, v1)".into(),
+        "v3 = RecvShutdown()".into(),
     ];
     assert_eq!(lines.len(), expected.len(), "line count mismatch");
     for (i, (got, want)) in lines.iter().zip(expected.iter()).enumerate() {
