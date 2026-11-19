@@ -225,7 +225,6 @@ pub enum Operation {
         include_alias: bool,
     },
     /// Build and send a `shutdown` message (BOLT 2, type 38).
-    /// Produces a `SentShutdown` variable.
     ///
     /// Inputs (2):
     ///   0: `channel_id`   (`ChannelId`)
@@ -621,12 +620,12 @@ impl Operation {
             | Self::BuildAnnouncementSignatures => Some(VariableType::Message),
             Self::SendMessage
             | Self::SendChannelReady { .. }
+            | Self::SendShutdown
             | Self::RecvChannelReady
             | Self::MineBlocks(_)
             | Self::BroadcastTransaction => None,
             Self::SendOpenChannel => Some(VariableType::SentOpenChannel),
             Self::SendFundingCreated => Some(VariableType::SentFundingCreated),
-            Self::SendShutdown => Some(VariableType::SentShutdown),
             Self::RecvAcceptChannel => Some(VariableType::AcceptChannel),
         }
     }

@@ -598,7 +598,7 @@ fn display_send_shutdown_program() {
     let expected: Vec<String> = vec![
         format!("v0 = LoadChannelId(0x{cid_hex})"),
         format!("v1 = LoadShutdownScript(P2wpkh(0x{spk_hex}))"),
-        "v2 = SendShutdown(v0, v1)".into(),
+        "SendShutdown(v0, v1)".into(),
     ];
     assert_eq!(lines.len(), expected.len(), "line count mismatch");
     for (i, (got, want)) in lines.iter().zip(expected.iter()).enumerate() {

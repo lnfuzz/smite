@@ -58,9 +58,6 @@ pub enum Variable {
     SentOpenChannel,
     /// `funding_created` has been sent, so `funding_signed` may now be received.
     SentFundingCreated,
-    /// `shutdown` has been sent, so the counterparty's `shutdown` may now be
-    /// received.
-    SentShutdown,
 }
 
 impl Variable {
@@ -88,7 +85,6 @@ impl Variable {
             Self::FundingTransaction(_) => VariableType::FundingTransaction,
             Self::SentOpenChannel => VariableType::SentOpenChannel,
             Self::SentFundingCreated => VariableType::SentFundingCreated,
-            Self::SentShutdown => VariableType::SentShutdown,
         }
     }
 }
@@ -117,14 +113,13 @@ pub enum VariableType {
     FundingTransaction,
     SentOpenChannel,
     SentFundingCreated,
-    SentShutdown,
 }
 
 impl VariableType {
     #[must_use]
     pub fn is_affine(&self) -> bool {
         match self {
-            Self::SentOpenChannel | Self::SentFundingCreated | Self::SentShutdown => true,
+            Self::SentOpenChannel | Self::SentFundingCreated => true,
 
             Self::Bytes
             | Self::ChainHash
