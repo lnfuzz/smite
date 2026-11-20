@@ -973,6 +973,7 @@ version = "0.0.0"
 dependencies = [
  "ldk-node",
  "libc",
+ "serde_json",
 ]
 
 [[package]]

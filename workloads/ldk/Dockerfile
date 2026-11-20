@@ -91,7 +91,6 @@ ARG SCENARIO
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libstdc++6 \
     libgcc-s1 \
-    procps \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy ldk-node-wrapper binary and crash handlers
