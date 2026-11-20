@@ -1,0 +1,89 @@
+[
+  {
+    "description": "Any-amount regtest invoice",
+    "valid": true,
+    "invoice": "lnbcrt1p4sxgp6dqqpp5stgpvzv5nhf33wugs0nk06ft20a4zw7h8lddr4jzgs8rmgjkfmeqsp5pqa7cfdsru444xk2w2qq0c5swd0geqs50vj9lkuslsdrmx3a592s9qrsgqcqpjmm69pcemajx03wllsxtqu26cqeny63h6ehsn4gteaey54qg203jhge0w0klmyl99slhpf496aqv4apsxl9msuth2u75ax2hlxut7ceqpjj2upg",
+    "payment_hash": "82d01609949dd318bb8883e767e92b53fb513bd73fdad1d642440e3da2564ef2",
+    "payment_secret": "083bec25b01f2b5a9aca728007e290735e8c82147b245fdb90fc1a3d9a3da155"
+  },
+  {
+    "description": "Any-amount regtest invoice, but all upper case",
+    "valid": true,
+    "invoice": "LNBCRT1P4SXGP6DQQPP5STGPVZV5NHF33WUGS0NK06FT20A4ZW7H8LDDR4JZGS8RMGJKFMEQSP5PQA7CFDSRU444XK2W2QQ0C5SWD0GEQS50VJ9LKUSLSDRMX3A592S9QRSGQCQPJMM69PCEMAJX03WLLSXTQU26CQENY63H6EHSN4GTEAEY54QG203JHGE0W0KLMYL99SLHPF496AQV4APSXL9MSUTH2U75AX2HLXUT7CEQPJJ2UPG",
+    "payment_hash": "82d01609949dd318bb8883e767e92b53fb513bd73fdad1d642440e3da2564ef2",
+    "payment_secret": "083bec25b01f2b5a9aca728007e290735e8c82147b245fdb90fc1a3d9a3da155"
+  },
+  {
+    "description": "Any-amount regtest invoice with route hints, longer than the default bech32 limit of 1023 characters",
+    "valid": true,
+    "invoice": "lnbcrt1p4sxgp6dqqpp5stgpvzv5nhf33wugs0nk06ft20a4zw7h8lddr4jzgs8rmgjkfmeqsp5pqa7cfdsru444xk2w2qq0c5swd0geqs50vj9lkuslsdrmx3a592s9qrsgqcqpjrzjqd47dlgy3vqy3ma2m2dtv6zepjxl8trm5cnjyajlyffr7x9qcc6jjqqqqqqqqqqqqqqqqqqqqqqqqqqqjqrzjqd47dlgy3vqy3ma2m2dtv6zepjxl8trm5cnjyajlyffr7x9qcc6jjqqqqqqqqqqqqyqqqqqqqqqqqqqqjqrzjqd47dlgy3vqy3ma2m2dtv6zepjxl8trm5cnjyajlyffr7x9qcc6jjqqqqqqqqqqqqgqqqqqqqqqqqqqqjqrzjqd47dlgy3vqy3ma2m2dtv6zepjxl8trm5cnjyajlyffr7x9qcc6jjqqqqqqqqqqqqvqqqqqqqqqqqqqqjqrzjqd47dlgy3vqy3ma2m2dtv6zepjxl8trm5cnjyajlyffr7x9qcc6jjqqqqqqqqqqqqsqqqqqqqqqqqqqqjqrzjqd47dlgy3vqy3ma2m2dtv6zepjxl8trm5cnjyajlyffr7x9qcc6jjqqqqqqqqqqqq5qqqqqqqqqqqqqqjqrzjqd47dlgy3vqy3ma2m2dtv6zepjxl8trm5cnjyajlyffr7x9qcc6jjqqqqqqqqqqqqcqqqqqqqqqqqqqqjqrzjqd47dlgy3vqy3ma2m2dtv6zepjxl8trm5cnjyajlyffr7x9qcc6jjqqqqqqqqqqqquqqqqqqqqqqqqqqjqrzjqd47dlgy3vqy3ma2m2dtv6zepjxl8trm5cnjyajlyffr7x9qcc6jjqqqqqqqqqqqpqqqqqqqqqqqqqqqjqrzjqd47dlgy3vqy3ma2m2dtv6zepjxl8trm5cnjyajlyffr7x9qcc6jjqqqqqqqqqqqpyqqqqqqqqqqqqqqjqrzjqd47dlgy3vqy3ma2m2dtv6zepjxl8trm5cnjyajlyffr7x9qcc6jjqqqqqqqqqqqpgqqqqqqqqqqqqqqjqrzjqd47dlgy3vqy3ma2m2dtv6zepjxl8trm5cnjyajlyffr7x9qcc6jjqqqqqqqqqqqpvqqqqqqqqqqqqqqjq09fu6677taa2wxssvksxmaqvphnxykz3a5g8htxzal0speyeshe3xftsdq5yqzyn4lccwy8znctfxgvjlvrahzcxfflcrn39fgszhnqq8qhzd7",
+    "payment_hash": "82d01609949dd318bb8883e767e92b53fb513bd73fdad1d642440e3da2564ef2",
+    "payment_secret": "083bec25b01f2b5a9aca728007e290735e8c82147b245fdb90fc1a3d9a3da155"
+  },
+  {
+    "description": "Regtest invoice with an amount",
+    "valid": false,
+    "invoice": "lnbcrt10n1p4sxgp6dqqpp5stgpvzv5nhf33wugs0nk06ft20a4zw7h8lddr4jzgs8rmgjkfmeqsp5pqa7cfdsru444xk2w2qq0c5swd0geqs50vj9lkuslsdrmx3a592s9qrsgqcqpjnr4rqnvjfylcjyaklhzls93pcekre06mc3e0fthg2tslymx5fceqsrcy9gupmztlgk9yncl8gk0a8qcxlzerwyq48ddn9jrcxlpd4qgq4c934z",
+    "error": "UNEXPECTED_HRP lnbcrt10n"
+  },
+  {
+    "description": "Any-amount mainnet invoice",
+    "valid": false,
+    "invoice": "lnbc1p4sxgp6dqqpp5stgpvzv5nhf33wugs0nk06ft20a4zw7h8lddr4jzgs8rmgjkfmeqsp5pqa7cfdsru444xk2w2qq0c5swd0geqs50vj9lkuslsdrmx3a592s9qrsgqcqpjugcnxj56626acpkjfvj7xhcxp0gx4kwedz2nz7c2dftpd8s0mkahaqhaag9h207muuyzmqmye7gqcwhyz7yph2yttn2zardm6z8vs8gp7nlnmz",
+    "error": "UNEXPECTED_HRP lnbc"
+  },
+  {
+    "description": "Data part one element shorter than the timestamp and signature",
+    "valid": false,
+    "invoice": "lnbcrt1p4sxgp6qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqzas7pv",
+    "error": "DATA_TOO_SHORT 110"
+  },
+  {
+    "description": "Data part with only the timestamp and signature",
+    "valid": false,
+    "invoice": "lnbcrt1p4sxgp6qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqw4lz7v",
+    "error": "MISSING_FIELD p"
+  },
+  {
+    "description": "Tagged field header truncated by the signature",
+    "valid": false,
+    "invoice": "lnbcrt1p4sxgp6pp5stgpvzv5nhf33wugs0nk06ft20a4zw7h8lddr4jzgs8rmgjkfmeqsp5pqa7cfdsru444xk2w2qq0c5swd0geqs50vj9lkuslsdrmx3a592sdqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqz2pqy4",
+    "error": "FIELD_TRUNCATED d"
+  },
+  {
+    "description": "Tagged field data truncated by the signature",
+    "valid": false,
+    "invoice": "lnbcrt1p4sxgp6pp5stgpvzv5nhf33wugs0nk06ft20a4zw7h8lddr4jzgs8rmgjkfmeqsp5pqa7cfdsru444xk2w2qq0c5swd0geqs50vj9lkuslsdrmx3a592sdq9qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqndpnrp",
+    "error": "FIELD_TRUNCATED d"
+  },
+  {
+    "description": "Empty last tagged field parsed before the missing `s` field",
+    "valid": false,
+    "invoice": "lnbcrt1p4sxgp6pp5stgpvzv5nhf33wugs0nk06ft20a4zw7h8lddr4jzgs8rmgjkfmeqdqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsv4uc0",
+    "error": "MISSING_FIELD s"
+  },
+  {
+    "description": "`p` field one element too short",
+    "valid": false,
+    "invoice": "lnbcrt1p4sxgp6ppnstgpvzv5nhf33wugs0nk06ft20a4zw7h8lddr4jzgs8rmgjkfmesp5pqa7cfdsru444xk2w2qq0c5swd0geqs50vj9lkuslsdrmx3a592sqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq4qjrf4",
+    "error": "INVALID_FIELD_LENGTH p expected 52 got 51"
+  },
+  {
+    "description": "`p` field one element too long",
+    "valid": false,
+    "invoice": "lnbcrt1p4sxgp6pp4stgpvzv5nhf33wugs0nk06ft20a4zw7h8lddr4jzgs8rmgjkfmeqqsp5pqa7cfdsru444xk2w2qq0c5swd0geqs50vj9lkuslsdrmx3a592sqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqgwypkx",
+    "error": "INVALID_FIELD_LENGTH p expected 52 got 53"
+  },
+  {
+    "description": "`s` field one element too short",
+    "valid": false,
+    "invoice": "lnbcrt1p4sxgp6pp5stgpvzv5nhf33wugs0nk06ft20a4zw7h8lddr4jzgs8rmgjkfmeqspnpqa7cfdsru444xk2w2qq0c5swd0geqs50vj9lkuslsdrmx3a592qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq5s3m09",
+    "error": "INVALID_FIELD_LENGTH s expected 52 got 51"
+  },
+  {
+    "description": "`s` field one element too long",
+    "valid": false,
+    "invoice": "lnbcrt1p4sxgp6pp5stgpvzv5nhf33wugs0nk06ft20a4zw7h8lddr4jzgs8rmgjkfmeqsp4pqa7cfdsru444xk2w2qq0c5swd0geqs50vj9lkuslsdrmx3a592sqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqhnmnjc",
+    "error": "INVALID_FIELD_LENGTH s expected 52 got 53"
+  }
+]
