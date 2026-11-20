@@ -22,8 +22,8 @@
 //! Logging is opt-in: [`afl_custom_init`] installs a logger only when
 //! `RUST_LOG` is set. With `RUST_LOG` unset, every `log::*!` callsite is a
 //! no-op and AFL's stderr stays clean. Useful filters:
-//! - `RUST_LOG=smite_ir_mutator::trim=debug` -- print the decoded `Program`
-//!   before and after each successful trim.
+//! - `RUST_LOG=smite_ir_mutator::trim=debug` -- show the simplification
+//!   candidate and the result of each truncation attempt.
 //! - `RUST_LOG=debug` -- everything this crate emits.
 //!
 //! # Buffer ownership
@@ -40,7 +40,9 @@ use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
 
 use smite_ir::generators::AnyGenerator;
-use smite_ir::minimizers::{CommonSubexpressionEliminator, DeadCodeEliminator, Minimizer};
+use smite_ir::minimizers::{
+    CommonSubexpressionEliminator, DeadCodeEliminator, MinimizeSession, Minimizer, Truncator,
+};
 use smite_ir::mutators::{
     GeneratorInsertionMutator, InputSwapMutator, InstructionDeleteMutator,
     InstructionReorderMutator, OperationParamMutator,
@@ -54,6 +56,8 @@ struct MutatorState {
     /// Reusable buffer for serialized mutated programs. The pointer to its
     /// contents is what we hand back to AFL++ when it requests an input.
     out_buf: Vec<u8>,
+    /// Active truncation session and the final cleanup candidate awaiting AFL++ feedback.
+    trim: Option<TrimSession>,
     /// Reusable null-terminated description string returned by
     /// [`afl_custom_describe`].
     description: Vec<u8>,
@@ -67,6 +71,7 @@ impl MutatorState {
         Self {
             rng: SmallRng::seed_from_u64(u64::from(seed)),
             out_buf: Vec::new(),
+            trim: None,
             description: Vec::new(),
             last_sequence: vec!["init"],
         }
@@ -136,6 +141,14 @@ impl MutatorState {
     }
 }
 
+/// Tracks the truncation phase followed by one DCE/CSE cleanup attempt.
+struct TrimSession {
+    /// Engine-independent prefix search, driven by AFL++ coverage feedback.
+    truncator: Truncator,
+    /// Final cleanup candidate, populated only after truncation finishes.
+    cleanup: Option<Program>,
+}
+
 // -- AFL++ custom mutator ABI -------------------------------------------------
 
 /// Warns about any missing AFL++ environment variables required by this
@@ -169,7 +182,7 @@ fn warn_on_unset_afl_env() {
 /// Also installs `simple_logger` if `RUST_LOG` is set, so `log::*!` callsites
 /// in this crate become live. Without `RUST_LOG` no logger is installed and
 /// every callsite is a no-op. Set
-/// `RUST_LOG=smite_ir_mutator::trim=debug` to see trim before/after dumps.
+/// `RUST_LOG=smite_ir_mutator::trim=debug` to see trim decisions.
 ///
 /// # Safety
 ///
@@ -254,15 +267,8 @@ pub unsafe extern "C" fn afl_custom_fuzz(
     len
 }
 
-/// Runs the full minimizer pipeline (`DeadCodeEliminator` then
-/// `CommonSubexpressionEliminator`) on the corpus entry and stages the
-/// resulting candidate for [`afl_custom_trim`] to hand back.
-///
-/// Both minimizers are deterministic in-process transforms safe in IR
-/// semantics, so we don't need iterative AFL feedback. We compose them
-/// once and offer a single candidate. AFL still gets to verify it (its
-/// coverage cksum is the source of truth); on rejection AFL silently
-/// discards the candidate and keeps the original corpus entry.
+/// Starts a trim session for a corpus entry. Truncation runs first, then
+/// the dead-code and common-subexpression passes get one cleanup attempt.
 ///
 /// AFL drives the trim loop with `while (stage_cur < stage_max)`, where
 /// `stage_max` is this function's return value and `stage_cur` is updated
@@ -270,16 +276,14 @@ pub unsafe extern "C" fn afl_custom_fuzz(
 ///
 /// # Returns
 ///
-/// - `1` if there's a candidate to offer (decode succeeded and the trim
-///   actually shrank the program). AFL enters the trim loop for one iteration.
-/// - `0` if there's nothing to do (decode failed, or the trim was a no-op). AFL
-///   skips trim entirely.
-/// - Negative would signal a fatal error to AFL; we never produce one.
+/// - `1` to start the adaptive search. [`afl_custom_post_trim`] returns `0`
+///   while candidates remain, then `1` to terminate the loop.
+/// - `0` to skip trimming if decoding fails or the program is empty.
 ///
 /// # Safety
 ///
 /// - `data` must be a pointer returned by [`afl_custom_init`].
-/// - `buf` must point to `buf_size` readable bytes.
+/// - If `buf_size` is nonzero, `buf` must point to `buf_size` readable bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn afl_custom_init_trim(
     data: *mut c_void,
@@ -287,47 +291,37 @@ pub unsafe extern "C" fn afl_custom_init_trim(
     buf_size: usize,
 ) -> i32 {
     let state = unsafe { &mut *data.cast::<MutatorState>() };
+    state.trim = None;
+
+    if buf_size == 0 {
+        return 0;
+    }
 
     let input = unsafe { slice::from_raw_parts(buf, buf_size) };
     let Ok(program) = postcard::from_bytes::<Program>(input) else {
         return 0;
     };
-
-    let before = log::log_enabled!(target: "smite_ir_mutator::trim", log::Level::Debug)
-        .then(|| program.clone());
-
-    let mut trimmed = program;
-    let dce_changed = DeadCodeEliminator.minimize(&mut trimmed);
-    let cse_changed = CommonSubexpressionEliminator.minimize(&mut trimmed);
-    if (!dce_changed && !cse_changed) || !state.serialize(&trimmed, buf_size) {
+    if program.instructions.is_empty() {
         return 0;
     }
 
-    if let Some(before) = before {
-        log::debug!(
-            target: "smite_ir_mutator::trim",
-            "dce={dce_changed} cse={cse_changed}\n--- before ---\n{before}--- after ---\n{trimmed}---"
-        );
-    }
-
+    state.trim = Some(TrimSession {
+        truncator: Truncator::new(program),
+        cleanup: None,
+    });
+    state.out_buf.resize(buf_size - 1, 0);
     1
 }
 
-/// Hands the pre-serialized trimmed candidate back to AFL.
+/// Encodes the current candidate and hands it back to AFL++.
 ///
 /// The pointer written into `*out_buf` borrows from `MutatorState::out_buf`
-/// and is valid until the next call into this library; AFL copies the
-/// bytes before re-entering us. We always write a non-null pointer (even
-/// on the zero-length path) to satisfy AFL's `if (unlikely(!retbuf))
-/// FATAL(...)` check.
+/// and remains valid until the next call into this library. It is always
+/// non-null, including when the returned length is zero.
 ///
-/// # Returns
-///
-/// - `> 0` on the first call after [`afl_custom_init_trim`]: the byte
-///   length of the candidate at `*out_buf`.
-/// - `0` afterwards. AFL treats this as "skip this iteration" rather than
-///   a stop signal; the loop terminates via [`afl_custom_post_trim`]'s
-///   return.
+/// Returns 0 if there is no candidate or encoding failed. AFL++ treats a
+/// zero-length result as a rejected attempt and advances through
+/// [`afl_custom_post_trim`], which controls termination.
 ///
 /// # Safety
 ///
@@ -336,30 +330,68 @@ pub unsafe extern "C" fn afl_custom_init_trim(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn afl_custom_trim(data: *mut c_void, out_buf: *mut *const u8) -> usize {
     let state = unsafe { &mut *data.cast::<MutatorState>() };
+    let candidate = state
+        .trim
+        .as_ref()
+        .and_then(|trim| trim.truncator.candidate().or(trim.cleanup.as_ref()));
+    let len = candidate.map_or(0, |program| {
+        postcard::to_slice(program, &mut state.out_buf).map_or(0, |bytes| bytes.len())
+    });
     unsafe { *out_buf = state.out_buf.as_ptr() };
-    state.out_buf.len()
+    len
 }
 
-/// Always returns `1` to terminate AFL's trim loop after a single
-/// iteration.
+/// Passes AFL++'s coverage result to the minimization session. Rejected
+/// prefixes leave the last accepted program intact.
 ///
-/// AFL drives trim with `while (stage_cur < stage_max)` and assigns
-/// `stage_cur` from this function's return value. With `stage_max = 1`
-/// (set by [`afl_custom_init_trim`]), returning `1` makes the condition
-/// `1 < 1` false and breaks the loop.
+/// When truncation finishes, stages one DCE/CSE candidate from the last
+/// accepted prefix. AFL++ also checks that candidate before retaining it.
 ///
-/// `success` indicates whether the candidate's coverage cksum matched the
-/// original. We don't need to act on it: AFL itself either persists the
-/// trimmed buffer (on success) or keeps the original corpus entry (on
-/// failure), and we don't track partial state across iterations because
-/// there's only one.
+/// AFL assigns this return value to `stage_cur` and continues while
+/// `stage_cur < stage_max`. Returns `0` for another attempt, or `1` to end
+/// the session. AFL++ retains the last buffer whose coverage matched.
 ///
 /// # Safety
 ///
 /// - `data` must be a pointer returned by [`afl_custom_init`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn afl_custom_post_trim(_data: *mut c_void, _success: u8) -> i32 {
-    1
+pub unsafe extern "C" fn afl_custom_post_trim(data: *mut c_void, success: u8) -> i32 {
+    let state = unsafe { &mut *data.cast::<MutatorState>() };
+    let Some(mut trim) = state.trim.take() else {
+        return 1;
+    };
+    let Some(candidate) = trim.truncator.candidate() else {
+        // The cleanup attempt has finished. AFL++ owns the accepted output.
+        return 1;
+    };
+
+    log::debug!(
+        target: "smite_ir_mutator::trim",
+        "prefix_len={} accepted={}",
+        candidate.instructions.len(),
+        success != 0,
+    );
+    trim.truncator.feedback(success != 0);
+    if trim.truncator.candidate().is_some() {
+        state.trim = Some(trim);
+        return 0;
+    }
+
+    let mut cleanup = trim.truncator.program().clone();
+    let dce_changed = DeadCodeEliminator.minimize(&mut cleanup);
+    let cse_changed = CommonSubexpressionEliminator.minimize(&mut cleanup);
+    if !dce_changed && !cse_changed {
+        return 1;
+    }
+
+    log::debug!(
+        target: "smite_ir_mutator::trim",
+        "dce={dce_changed} cse={cse_changed}\n--- before ---\n{}--- after ---\n{cleanup}---",
+        trim.truncator.program(),
+    );
+    trim.cleanup = Some(cleanup);
+    state.trim = Some(trim);
+    0
 }
 
 /// Marker symbol that tells AFL++ not to populate `add_buf` for
@@ -409,6 +441,7 @@ pub unsafe extern "C" fn afl_custom_describe(
 
 #[cfg(test)]
 mod tests {
+    use smite_ir::Operation;
     use smite_ir::generators::OpenChannelGenerator;
     use std::ffi::CStr;
     use std::ptr;
@@ -472,8 +505,7 @@ mod tests {
     }
 
     /// `seed_program_bytes()` plus an unreferenced `LoadAmount`, so the
-    /// pipeline has something for DCE to drop (and thus `init_trim`
-    /// returns `1`).
+    /// cleanup pass has something to remove when all prefixes are rejected.
     fn reducible_seed_bytes() -> Vec<u8> {
         let bytes = seed_program_bytes();
         let mut program: Program = postcard::from_bytes(&bytes).expect("decode");
@@ -610,19 +642,22 @@ mod tests {
     }
 
     #[test]
-    fn trim_init_returns_0_when_no_reduction_possible() {
-        // Generator output has no dead code or duplicate loads; the
-        // pipeline is a no-op, so we tell AFL to skip trim entirely.
+    fn trim_init_returns_0_for_empty_program() {
         let state = State::new(0);
-        let rv = init_trim_via_ffi(&state, seed_program_bytes());
+        let empty_program = ProgramBuilder::new().build();
+        let bytes = postcard::to_allocvec(&empty_program).expect("encode");
+        let rv = init_trim_via_ffi(&state, bytes);
         assert_eq!(rv, 0);
     }
 
     #[test]
-    fn trim_init_returns_0_for_garbage() {
+    fn trim_init_clears_pending_candidate_for_garbage() {
         let state = State::new(0);
-        let rv = init_trim_via_ffi(&state, vec![0xFF; 16]);
-        assert_eq!(rv, 0);
+        assert_eq!(init_trim_via_ffi(&state, reducible_seed_bytes()), 1);
+        assert_eq!(init_trim_via_ffi(&state, vec![0xFF; 16]), 0);
+        let (out, len) = trim_via_ffi(&state);
+        assert!(!out.is_null());
+        assert_eq!(len, 0);
     }
 
     #[test]
@@ -635,14 +670,107 @@ mod tests {
     }
 
     #[test]
-    fn trim_post_trim_returns_1_to_terminate_loop() {
+    fn trim_search_uses_acceptance_and_rejection_to_choose_the_next_prefix() {
+        let mut builder = ProgramBuilder::new();
+        for blocks in 1..=8 {
+            builder.append(Operation::MineBlocks(blocks), &[]);
+        }
+        let program = builder.build();
+        let input = postcard::to_allocvec(&program).expect("encode");
+        let input_len = input.len();
         let state = State::new(0);
-        init_trim_via_ffi(&state, reducible_seed_bytes());
-        let _ = trim_via_ffi(&state);
-        // post_trim returns 1 unconditionally — it's the load-bearing
-        // termination signal that pushes AFL's `stage_cur` to `stage_max`.
+        let stop = init_trim_via_ffi(&state, input);
+        assert_eq!(stop, 1);
+
+        // Simulate coverage from only the first three instructions.
+        for (prefix_len, next_index) in [(4, 0), (2, 0), (3, stop)] {
+            let (out, len) = trim_via_ffi(&state);
+            assert!(len > 0 && len < input_len);
+            assert_eq!(
+                decode(out, len).instructions,
+                program.instructions[..prefix_len]
+            );
+            assert_eq!(post_trim_via_ffi(&state, prefix_len >= 3), next_index);
+        }
+        assert_eq!(trim_via_ffi(&state).1, 0);
+    }
+
+    #[test]
+    fn trim_runs_cleanup_on_the_last_accepted_prefix() {
+        let mut builder = ProgramBuilder::new();
+        let channel_id = builder.append(Operation::LoadChannelId([0; 32]), &[]);
+        let script = builder.append(Operation::LoadBytes(vec![0x51]), &[]);
+        for blocks in 1..=6 {
+            builder.append(Operation::MineBlocks(blocks), &[]);
+        }
+        builder.append(Operation::SendShutdown, &[channel_id, script]);
+        let program = builder.build();
+        assert!(!DeadCodeEliminator.minimize(&mut program.clone()));
+        let input = postcard::to_allocvec(&program).expect("encode");
+
+        for cleanup_accepted in [false, true] {
+            let state = State::new(0);
+            assert_eq!(init_trim_via_ffi(&state, input.clone()), 1);
+
+            // First accept a four-instruction prefix, then reject shorter cuts.
+            for (prefix_len, accepted) in [(4, true), (2, false), (3, false)] {
+                let (out, len) = trim_via_ffi(&state);
+                assert_eq!(
+                    decode(out, len).instructions,
+                    program.instructions[..prefix_len]
+                );
+                assert_eq!(post_trim_via_ffi(&state, accepted), 0);
+            }
+
+            // Removing SendShutdown makes both loads dead in the accepted prefix.
+            let (out, len) = trim_via_ffi(&state);
+            assert_eq!(decode(out, len).instructions, program.instructions[2..4]);
+            assert_eq!(post_trim_via_ffi(&state, cleanup_accepted), 1);
+            assert_eq!(trim_via_ffi(&state).1, 0);
+        }
+    }
+
+    #[test]
+    fn trim_runs_cleanup_even_when_every_prefix_is_rejected() {
+        let mut builder = ProgramBuilder::new();
+        builder.append(Operation::LoadAmount(100), &[]);
+        for blocks in 1..=7 {
+            builder.append(Operation::MineBlocks(blocks), &[]);
+        }
+        let program = builder.build();
+        let input = postcard::to_allocvec(&program).expect("encode");
+        let state = State::new(0);
+        assert_eq!(init_trim_via_ffi(&state, input), 1);
+
+        for prefix_len in [4, 6, 7] {
+            let (out, len) = trim_via_ffi(&state);
+            assert_eq!(
+                decode(out, len).instructions,
+                program.instructions[..prefix_len]
+            );
+            assert_eq!(post_trim_via_ffi(&state, false), 0);
+        }
+
+        let (out, len) = trim_via_ffi(&state);
+        assert_eq!(decode(out, len).instructions, program.instructions[1..]);
         assert_eq!(post_trim_via_ffi(&state, true), 1);
-        assert_eq!(post_trim_via_ffi(&state, false), 1);
+    }
+
+    #[test]
+    fn trim_search_can_offer_a_serialized_empty_prefix() {
+        let mut builder = ProgramBuilder::new();
+        builder.append(Operation::MineBlocks(1), &[]);
+        let input = postcard::to_allocvec(&builder.build()).expect("encode");
+
+        for accepted in [false, true] {
+            let state = State::new(0);
+            let stop = init_trim_via_ffi(&state, input.clone());
+            assert_eq!(stop, 1);
+            let (out, len) = trim_via_ffi(&state);
+            assert!(len > 0);
+            assert_eq!(decode(out, len), ProgramBuilder::new().build());
+            assert_eq!(post_trim_via_ffi(&state, accepted), stop);
+        }
     }
 
     #[test]
@@ -651,8 +779,8 @@ mod tests {
         // name queue entries from fuzz) must survive both the no-op and
         // successful trim paths.
         for (label, input, expected_rv) in [
-            ("no-op", seed_program_bytes(), 0),
-            ("success", reducible_seed_bytes(), 1),
+            ("skipped", vec![], 0),
+            ("started", reducible_seed_bytes(), 1),
         ] {
             let state = State::new(0);
             // Run a fuzz call so last_sequence has known contents.
