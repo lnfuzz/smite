@@ -34,7 +34,7 @@ impl Mutator for OperationParamMutator {
 /// Returns `true` if the operation was changed.
 fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
     match op {
-        Operation::LoadAmount(v) => {
+        Operation::LoadAmount(v) | Operation::LoadHtlcId(v) => {
             *v = tweak_u64(*v, rng);
             true
         }
@@ -65,7 +65,7 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
             mutate_private_key(bytes, rng);
             true
         }
-        Operation::LoadChannelId(bytes) => {
+        Operation::LoadChannelId(bytes) | Operation::LoadPaymentField(bytes) => {
             mutate_fixed_bytes(bytes, rng);
             true
         }
@@ -121,6 +121,7 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         | Operation::SendMessage
         | Operation::SendOpenChannel
         | Operation::SendFundingCreated
+        | Operation::SendUpdateAddHtlc
         | Operation::SendShutdown
         | Operation::RecvAcceptChannel
         | Operation::RecvFundingSigned

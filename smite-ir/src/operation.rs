@@ -49,6 +49,10 @@ pub enum Operation {
     LoadPrivateKey([u8; 32]),
     /// Load a 32-byte channel identifier.
     LoadChannelId([u8; 32]),
+    /// Load a BOLT 2 HTLC `id`.
+    LoadHtlcId(u64),
+    /// Load a 32-byte payment field (`payment_hash` or `payment_secret`).
+    LoadPaymentField([u8; 32]),
     /// Load a BOLT 2 compliant `upfront_shutdown_script`.
     ///
     /// Produces a [`VariableType::Bytes`] value whose contents match one of the
@@ -224,6 +228,18 @@ pub enum Operation {
         /// If `false`, the TLV is omitted and input 2 is ignored.
         include_alias: bool,
     },
+    /// Build and send an `update_add_htlc` message (BOLT 2, type 128).
+    ///
+    /// Inputs (8):
+    ///   0: `channel_id` (`ChannelId`)
+    ///   1: `htlc_id` (`HtlcId`)
+    ///   2: `amount_msat` (`Amount`)
+    ///   3: `payment_hash` (`PaymentField`)
+    ///   4: `cltv_expiry` (`BlockHeight`)
+    ///   5: `session_key` (`PrivateKey`) -- the onion's session key
+    ///   6: `node_id` (`Point`) -- the onion's final hop
+    ///   7: `payment_secret` (`PaymentField`) -- the onion's payment secret
+    SendUpdateAddHtlc,
     /// Build and send a `shutdown` message (BOLT 2, type 38).
     /// Produces a `SentShutdown` variable.
     ///
@@ -545,6 +561,8 @@ impl fmt::Display for Operation {
             Self::LoadFeatures(b) => write!(f, "LoadFeatures({})", format_hex(b)),
             Self::LoadPrivateKey(b) => write!(f, "LoadPrivateKey({})", format_hex(b)),
             Self::LoadChannelId(b) => write!(f, "LoadChannelId({})", format_hex(b)),
+            Self::LoadHtlcId(v) => write!(f, "LoadHtlcId({v})"),
+            Self::LoadPaymentField(b) => write!(f, "LoadPaymentField({})", format_hex(b)),
             Self::LoadShutdownScript(v) => write!(f, "LoadShutdownScript({v})"),
             Self::LoadChannelType(v) => write!(f, "LoadChannelType({v})"),
             Self::LoadTargetPubkeyFromContext => write!(f, "LoadTargetPubkeyFromContext()"),
@@ -574,6 +592,7 @@ impl fmt::Display for Operation {
             Self::SendChannelReady { include_alias } => {
                 write!(f, "SendChannelReady{{include_alias={include_alias}}}")
             }
+            Self::SendUpdateAddHtlc => write!(f, "SendUpdateAddHtlc"),
             Self::SendShutdown => write!(f, "SendShutdown"),
             Self::RecvAcceptChannel => write!(f, "RecvAcceptChannel"),
             Self::RecvFundingSigned => write!(f, "RecvFundingSigned"),
@@ -610,6 +629,8 @@ impl Operation {
             | Self::DeriveTemporaryChannelIdV2
             | Self::DeriveChannelIdV2
             | Self::RecvFundingSigned => Some(VariableType::ChannelId),
+            Self::LoadHtlcId(_) => Some(VariableType::HtlcId),
+            Self::LoadPaymentField(_) => Some(VariableType::PaymentField),
             Self::LoadTargetPubkeyFromContext | Self::DerivePoint => Some(VariableType::Point),
             Self::LoadChainHashFromContext => Some(VariableType::ChainHash),
             Self::ExtractAcceptChannel(field) => Some(field.output_type()),
@@ -621,6 +642,7 @@ impl Operation {
             | Self::BuildAnnouncementSignatures => Some(VariableType::Message),
             Self::SendMessage
             | Self::SendChannelReady { .. }
+            | Self::SendUpdateAddHtlc
             | Self::RecvChannelReady
             | Self::MineBlocks(_)
             | Self::BroadcastTransaction => None,
@@ -648,6 +670,8 @@ impl Operation {
             | Self::LoadFeatures(_)
             | Self::LoadPrivateKey(_)
             | Self::LoadChannelId(_)
+            | Self::LoadHtlcId(_)
+            | Self::LoadPaymentField(_)
             | Self::LoadShutdownScript(_)
             | Self::LoadChannelType(_)
             | Self::LoadTargetPubkeyFromContext
@@ -746,6 +770,16 @@ impl Operation {
                 VariableType::Point,          // second_per_commitment_point
                 VariableType::ShortChannelId, // short_channel_id (alias)
             ],
+            Self::SendUpdateAddHtlc => vec![
+                VariableType::ChannelId,    // channel_id
+                VariableType::HtlcId,       // htlc_id
+                VariableType::Amount,       // amount_msat
+                VariableType::PaymentField, // payment_hash
+                VariableType::BlockHeight,  // cltv_expiry
+                VariableType::PrivateKey,   // session_key
+                VariableType::Point,        // node_id
+                VariableType::PaymentField, // payment_secret
+            ],
             Self::SendShutdown => vec![
                 VariableType::ChannelId, // channel_id
                 VariableType::Bytes,     // scriptpubkey
@@ -778,6 +812,8 @@ impl Operation {
             | Self::LoadFeatures(_)
             | Self::LoadPrivateKey(_)
             | Self::LoadChannelId(_)
+            | Self::LoadHtlcId(_)
+            | Self::LoadPaymentField(_)
             | Self::LoadShutdownScript(_)
             | Self::LoadChannelType(_)
             | Self::LoadTargetPubkeyFromContext
@@ -797,6 +833,7 @@ impl Operation {
             | Self::SendOpenChannel
             | Self::SendFundingCreated
             | Self::SendChannelReady { .. }
+            | Self::SendUpdateAddHtlc
             | Self::SendShutdown
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
@@ -828,6 +865,8 @@ impl Operation {
             | Self::LoadFeatures(_)
             | Self::LoadPrivateKey(_)
             | Self::LoadChannelId(_)
+            | Self::LoadHtlcId(_)
+            | Self::LoadPaymentField(_)
             | Self::LoadShutdownScript(_)
             | Self::LoadChannelType(_)
             | Self::LoadTargetPubkeyFromContext
@@ -848,6 +887,7 @@ impl Operation {
             | Self::SendOpenChannel
             | Self::SendFundingCreated
             | Self::SendChannelReady { .. }
+            | Self::SendUpdateAddHtlc
             | Self::SendShutdown
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
@@ -879,6 +919,8 @@ impl Operation {
             | Self::LoadFeatures(_)
             | Self::LoadPrivateKey(_)
             | Self::LoadChannelId(_)
+            | Self::LoadHtlcId(_)
+            | Self::LoadPaymentField(_)
             | Self::LoadShutdownScript(_)
             | Self::LoadChannelType(_)
             | Self::LoadTargetPubkeyFromContext
@@ -896,6 +938,7 @@ impl Operation {
             | Self::SendMessage
             | Self::SendOpenChannel
             | Self::SendChannelReady { .. }
+            | Self::SendUpdateAddHtlc
             | Self::SendShutdown => true,
             // `CreateFundingTransaction` selects coins from the wallet, whose
             // contents change as transactions are created and broadcast.
@@ -940,6 +983,8 @@ impl Operation {
             | Self::LoadFeatures(_)
             | Self::LoadPrivateKey(_)
             | Self::LoadChannelId(_)
+            | Self::LoadHtlcId(_)
+            | Self::LoadPaymentField(_)
             | Self::LoadShutdownScript(_)
             | Self::LoadChannelType(_)
             | Self::ExtractAcceptChannel(_)
@@ -961,6 +1006,7 @@ impl Operation {
             | Self::SendMessage
             | Self::SendOpenChannel
             | Self::SendFundingCreated
+            | Self::SendUpdateAddHtlc
             | Self::SendShutdown
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned

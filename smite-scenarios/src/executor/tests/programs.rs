@@ -8,8 +8,8 @@
 //! purpose is to create malformed program.
 
 use super::harness::{
-    PointSource, SampleOpenChannel, TEMPORARY_CHANNEL_ID, acceptor_funding_sk, funded_open_channel,
-    opener_funding_sk, second_funded_open_channel,
+    PointSource, SampleOpenChannel, SampleUpdateAddHtlc, TEMPORARY_CHANNEL_ID, acceptor_funding_sk,
+    funded_open_channel, opener_funding_sk, second_funded_open_channel,
 };
 use crate::executor::*;
 use smite_ir::Instruction;
@@ -381,6 +381,33 @@ pub fn recv_two_channel_ready_program() -> Program {
     b.append(Operation::RecvChannelReady, &[]);
 
     b.build()
+}
+
+// -- update_add_htlc --
+
+/// Sends `update_add_htlc` on the `ChannelId` variable `channel_id`, with the
+/// HTLC fields of `add` and an onion that pays the target directly.
+pub fn send_update_add_htlc(b: &mut ProgramBuilder, channel_id: usize, add: &SampleUpdateAddHtlc) {
+    let htlc_id = b.append(Operation::LoadHtlcId(add.id), &[]);
+    let amount_msat = b.append(Operation::LoadAmount(add.amount_msat), &[]);
+    let payment_hash = b.append(Operation::LoadPaymentField(add.payment_hash), &[]);
+    let cltv_expiry = b.append(Operation::LoadBlockHeight(add.cltv_expiry), &[]);
+    let session_key = b.append(Operation::LoadPrivateKey(add.session_key), &[]);
+    let node_id = b.append(Operation::LoadTargetPubkeyFromContext, &[]);
+    let payment_secret = b.append(Operation::LoadPaymentField(add.payment_secret), &[]);
+    b.append(
+        Operation::SendUpdateAddHtlc,
+        &[
+            channel_id,
+            htlc_id,
+            amount_msat,
+            payment_hash,
+            cltv_expiry,
+            session_key,
+            node_id,
+            payment_secret,
+        ],
+    );
 }
 
 // -- Gossip --
