@@ -7,13 +7,17 @@ use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::{Secp256k1, SecretKey};
 use harness::*;
 use programs::*;
+use rand::SeedableRng;
+use rand::rngs::SmallRng;
 use smite::bolt::{
     AcceptChannelTlvs, ChannelReadyTlvs, GossipTimestampFilter, Init, Ping, QueryShortChannelIds,
     QueryShortChannelIdsTlvs, ReplyShortChannelIdsEnd,
 };
 use smite::onion::{OnionPacket, Peeled, peel};
+use smite_ir::Generator;
 use smite_ir::Instruction;
 use smite_ir::builder::ProgramBuilder;
+use smite_ir::generators::ChannelAnnouncementGenerator;
 use smite_ir::operation::ShutdownScriptVariant;
 
 // -- execute() tests --
@@ -78,6 +82,40 @@ fn execute_build_channel_announcement() {
     assert_eq!(ca.bitcoin_key_2, pk(&bitcoin_sk_2_bytes));
     assert_eq!(ca.extra, b"");
     assert!(ca.verify());
+}
+
+#[test]
+fn generated_channel_announcement_is_sorted_but_mutated_order_is_preserved() {
+    for seed in 0..32 {
+        let mut builder = ProgramBuilder::new();
+        ChannelAnnouncementGenerator.generate(&mut builder, &mut SmallRng::seed_from_u64(seed));
+        let original = builder.build();
+        for swapped in [false, true] {
+            let mut program = original.clone();
+            if swapped {
+                let build = program
+                    .instructions
+                    .iter_mut()
+                    .find(|instr| matches!(instr.operation, Operation::BuildChannelAnnouncement))
+                    .expect("generated channel announcement");
+                build.inputs.swap(3, 4);
+            }
+            let utxo = Utxo {
+                amount: Amount::from_sat(100_000_000),
+                ..sample_utxo()
+            };
+            let mut fx = Fixture::new().with_utxos(vec![utxo]);
+            fx.run(&program);
+            assert_eq!(fx.sent_len(), 1);
+            let announcement: ChannelAnnouncement = fx.sent(0);
+            assert!(announcement.verify(), "seed {seed}: signatures must verify");
+            assert_eq!(
+                announcement.node_id_1.serialize() < announcement.node_id_2.serialize(),
+                !swapped,
+                "seed {seed}: the executor must preserve the generator or mutator's key order",
+            );
+        }
+    }
 }
 
 #[test]
