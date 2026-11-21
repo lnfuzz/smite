@@ -1,5 +1,6 @@
 //! Generator for `channel_announcement` gossip message.
 
+use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use rand::{Rng, RngExt};
 
 use super::Generator;
@@ -17,6 +18,10 @@ use crate::{Operation, VariableType};
 /// The announced bitcoin keys are the ones committed to by the funding
 /// output's witness script, so the message can pass the on-chain UTXO
 /// validation that lightning implementations perform.
+///
+/// The announcement's node keys are ordered by their serialized public keys,
+/// keeping each bitcoin key paired with its node key. Mutators can still
+/// produce unsorted announcements by changing the emitted inputs.
 #[derive(Clone, Copy)]
 pub struct ChannelAnnouncementGenerator;
 
@@ -36,10 +41,28 @@ impl Generator for ChannelAnnouncementGenerator {
 
         // Use fresh private keys since channel_announcement validation
         // generally requires distinct keys.
-        let node_sk_1 = builder.generate_fresh(VariableType::PrivateKey, rng);
-        let node_sk_2 = builder.generate_fresh(VariableType::PrivateKey, rng);
-        let bitcoin_sk_1 = builder.generate_fresh(VariableType::PrivateKey, rng);
-        let bitcoin_sk_2 = builder.generate_fresh(VariableType::PrivateKey, rng);
+        let node_sk_1_bytes: [u8; 32] = rng.random();
+        let node_sk_2_bytes: [u8; 32] = rng.random();
+        let mut node_sk_1 = builder.append(Operation::LoadPrivateKey(node_sk_1_bytes), &[]);
+        let mut node_sk_2 = builder.append(Operation::LoadPrivateKey(node_sk_2_bytes), &[]);
+        let mut bitcoin_sk_1 = builder.generate_fresh(VariableType::PrivateKey, rng);
+        let mut bitcoin_sk_2 = builder.generate_fresh(VariableType::PrivateKey, rng);
+
+        // BOLT 7 orders the node ids lexicographically in compressed form.
+        // Move the bitcoin keys with their node keys when reversing the order.
+        let secp = Secp256k1::signing_only();
+        let node_id_1 = PublicKey::from_secret_key(
+            &secp,
+            &SecretKey::from_slice(&node_sk_1_bytes).expect("valid private key"),
+        );
+        let node_id_2 = PublicKey::from_secret_key(
+            &secp,
+            &SecretKey::from_slice(&node_sk_2_bytes).expect("valid private key"),
+        );
+        if node_id_1.serialize() > node_id_2.serialize() {
+            std::mem::swap(&mut node_sk_1, &mut node_sk_2);
+            std::mem::swap(&mut bitcoin_sk_1, &mut bitcoin_sk_2);
+        }
 
         // The funding output must pay to the same bitcoin keys the message
         // announces, so derive the funding pubkeys instead of picking them.

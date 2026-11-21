@@ -25,3 +25,6 @@ hex = "0.4"
 serde.workspace = true
 serde_json.workspace = true
 tempfile = "3"
+
+[dev-dependencies]
+rand.workspace = true
