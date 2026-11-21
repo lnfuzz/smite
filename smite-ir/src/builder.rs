@@ -261,6 +261,34 @@ impl ProgramBuilder {
         }
     }
 
+    /// Returns the chain hash, short channel ID, and node signing-key
+    /// instruction indices from the most recent sent `BuildChannelAnnouncement`.
+    /// The node keys are in the order used for `node_id_1` and `node_id_2`.
+    ///
+    /// This keeps dependent gossip messages associated with the same channel
+    /// and prevents update generators from selecting Bitcoin signing keys.
+    /// The returned indices are `[chain_hash, short_channel_id, node_sk_1, node_sk_2]`.
+    pub(crate) fn latest_sent_channel_announcement_inputs(&self) -> Option<[usize; 4]> {
+        self.instructions.iter().rev().find_map(|instruction| {
+            if !matches!(&instruction.operation, Operation::SendMessage) {
+                return None;
+            }
+
+            let message_idx = *instruction.inputs.first()?;
+            let message = self.instructions.get(message_idx)?;
+            if !matches!(&message.operation, Operation::BuildChannelAnnouncement) {
+                return None;
+            }
+
+            Some([
+                *message.inputs.get(1)?,
+                *message.inputs.get(2)?,
+                *message.inputs.get(3)?,
+                *message.inputs.get(4)?,
+            ])
+        })
+    }
+
     /// Returns the current number of instructions.
     #[must_use]
     pub fn instructions_len(&self) -> usize {

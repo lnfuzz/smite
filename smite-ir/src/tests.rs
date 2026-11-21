@@ -1762,6 +1762,181 @@ fn generated_channel_update_program_structure() {
     assert_eq!(build_count, 1, "expected exactly one BuildChannelUpdate");
 }
 
+#[test]
+fn generated_channel_update_uses_announcement_node_key_and_direction() {
+    let mut observed_directions = [false; 2];
+
+    for seed in 0..100 {
+        let mut rng = SmallRng::seed_from_u64(seed);
+        let mut builder = ProgramBuilder::new();
+        ChannelAnnouncementGenerator.generate(&mut builder, &mut rng);
+
+        // These unrelated keys are deliberately newer than the announcement's
+        // keys. The update must still use one of the announcement's node keys.
+        let unrelated_keys = [
+            builder.generate_fresh(VariableType::PrivateKey, &mut rng),
+            builder.generate_fresh(VariableType::PrivateKey, &mut rng),
+        ];
+        let unrelated_chain_hash = builder.generate_fresh(VariableType::ChainHash, &mut rng);
+        let unrelated_short_channel_id =
+            builder.generate_fresh(VariableType::ShortChannelId, &mut rng);
+
+        ChannelUpdateGenerator.generate(&mut builder, &mut rng);
+        let program = builder.build();
+
+        let announcement_idx = find_operation!(program, Operation::BuildChannelAnnouncement);
+        let update_idx = find_operation!(program, Operation::BuildChannelUpdate);
+        let announcement = &program.instructions[announcement_idx];
+        let update = &program.instructions[update_idx];
+
+        let signer_idx = update.inputs[0];
+        let direction = match &program.instructions[update.inputs[5]].operation {
+            Operation::LoadU8(flags) => *flags & 1,
+            op => panic!("seed {seed}: expected channel_flags LoadU8, got {op:?}"),
+        };
+
+        let expected_direction = if signer_idx == announcement.inputs[3] {
+            0
+        } else if signer_idx == announcement.inputs[4] {
+            1
+        } else {
+            panic!("seed {seed}: signer {signer_idx} is not either announcement node key");
+        };
+
+        assert_eq!(
+            direction, expected_direction,
+            "seed {seed}: channel_update direction must select its signing node",
+        );
+        assert_eq!(
+            update.inputs[1], announcement.inputs[1],
+            "seed {seed}: channel_update chain hash must come from its announcement",
+        );
+        assert_eq!(
+            update.inputs[2], announcement.inputs[2],
+            "seed {seed}: channel_update short channel ID must come from its announcement",
+        );
+        assert_ne!(
+            update.inputs[1], unrelated_chain_hash,
+            "seed {seed}: channel_update must not use an unrelated chain hash",
+        );
+        assert_ne!(
+            update.inputs[2], unrelated_short_channel_id,
+            "seed {seed}: channel_update must not use an unrelated short channel ID",
+        );
+        assert!(
+            ![announcement.inputs[5], announcement.inputs[6]].contains(&signer_idx),
+            "seed {seed}: channel_update must not use an announcement Bitcoin key",
+        );
+        assert!(
+            !unrelated_keys.contains(&signer_idx),
+            "seed {seed}: channel_update must not use an unrelated private key",
+        );
+
+        observed_directions[usize::from(direction)] = true;
+    }
+
+    assert_eq!(
+        observed_directions, [true; 2],
+        "the generated updates should exercise both channel directions",
+    );
+}
+
+#[test]
+fn generated_channel_update_uses_latest_sent_announcement_context() {
+    let mut rng = SmallRng::seed_from_u64(42);
+    let mut builder = ProgramBuilder::new();
+
+    // Build two announcements with deliberately distinct channel identities
+    // and node keys. The update must refer to the second, most recently sent
+    // announcement rather than the first one.
+    let append_announcement =
+        |builder: &mut ProgramBuilder, scid: u64, key_start: u8| -> [usize; 4] {
+            let features = builder.append(Operation::LoadFeatures(vec![]), &[]);
+            let chain_hash = builder.append(Operation::LoadChainHashFromContext, &[]);
+            let short_channel_id = builder.append(Operation::LoadShortChannelId(scid), &[]);
+            let node_sk_1 = builder.append(Operation::LoadPrivateKey(key(key_start)), &[]);
+            let node_sk_2 = builder.append(Operation::LoadPrivateKey(key(key_start + 1)), &[]);
+            let bitcoin_sk_1 = builder.append(Operation::LoadPrivateKey(key(key_start + 2)), &[]);
+            let bitcoin_sk_2 = builder.append(Operation::LoadPrivateKey(key(key_start + 3)), &[]);
+            let announcement = builder.append(
+                Operation::BuildChannelAnnouncement,
+                &[
+                    features,
+                    chain_hash,
+                    short_channel_id,
+                    node_sk_1,
+                    node_sk_2,
+                    bitcoin_sk_1,
+                    bitcoin_sk_2,
+                ],
+            );
+            builder.append(Operation::SendMessage, &[announcement]);
+
+            [chain_hash, short_channel_id, node_sk_1, node_sk_2]
+        };
+
+    let first_announcement = append_announcement(&mut builder, 100, 1);
+    let latest_announcement = append_announcement(&mut builder, 200, 5);
+
+    // Add newer variables of the same types to ensure the generator uses the
+    // latest sent announcement as a unit, not the newest arbitrary candidates.
+    let unrelated_private_key = builder.generate_fresh(VariableType::PrivateKey, &mut rng);
+    let unrelated_chain_hash = builder.generate_fresh(VariableType::ChainHash, &mut rng);
+    let unrelated_short_channel_id = builder.generate_fresh(VariableType::ShortChannelId, &mut rng);
+
+    ChannelUpdateGenerator.generate(&mut builder, &mut rng);
+    let program = builder.build();
+
+    let update_idx = find_operation!(program, Operation::BuildChannelUpdate);
+    let update = &program.instructions[update_idx];
+    let signer_idx = update.inputs[0];
+
+    let expected_direction = if signer_idx == latest_announcement[2] {
+        0
+    } else if signer_idx == latest_announcement[3] {
+        1
+    } else {
+        panic!("channel_update signer must come from the latest announcement");
+    };
+
+    let direction = match &program.instructions[update.inputs[5]].operation {
+        Operation::LoadU8(flags) => *flags & 1,
+        op => panic!("expected channel_flags LoadU8, got {op:?}"),
+    };
+
+    assert_eq!(
+        direction, expected_direction,
+        "channel_update direction must match the latest announcement's signing node",
+    );
+    assert_eq!(
+        update.inputs[1], latest_announcement[0],
+        "channel_update must use the latest announcement's chain hash",
+    );
+    assert_eq!(
+        update.inputs[2], latest_announcement[1],
+        "channel_update must use the latest announcement's short channel ID",
+    );
+
+    assert_ne!(update.inputs[1], first_announcement[0]);
+    assert_ne!(update.inputs[2], first_announcement[1]);
+    assert!(
+        !first_announcement[2..].contains(&signer_idx),
+        "channel_update must not use a node key from the earlier announcement",
+    );
+    assert_ne!(
+        signer_idx, unrelated_private_key,
+        "channel_update must not use a newer unrelated private key",
+    );
+    assert_ne!(
+        update.inputs[1], unrelated_chain_hash,
+        "channel_update must not use a newer unrelated chain hash",
+    );
+    assert_ne!(
+        update.inputs[2], unrelated_short_channel_id,
+        "channel_update must not use a newer unrelated short channel ID",
+    );
+}
+
 fn generate_announcement_signatures_program(seed: u64) -> Program {
     let mut rng = SmallRng::seed_from_u64(seed);
     let mut builder = ProgramBuilder::new();

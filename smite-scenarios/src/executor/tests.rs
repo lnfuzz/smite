@@ -210,6 +210,88 @@ fn execute_build_channel_update() {
 }
 
 #[test]
+fn execute_build_channel_update_verifies_for_both_announcement_directions() {
+    let node_sk_1_bytes = [0x11; 32];
+    let node_sk_2_bytes = [0x22; 32];
+    let bitcoin_sk_1_bytes = [0x33; 32];
+    let bitcoin_sk_2_bytes = [0x44; 32];
+    let scid = ShortChannelId::new(538_532, 845, 1);
+
+    let mut b = ProgramBuilder::new();
+    let features = b.append(Operation::LoadFeatures(vec![]), &[]);
+    let chain_hash = b.append(Operation::LoadChainHashFromContext, &[]);
+    let short_channel_id = b.append(Operation::LoadShortChannelId(scid.as_u64()), &[]);
+    let node_sk_1 = b.append(Operation::LoadPrivateKey(node_sk_1_bytes), &[]);
+    let node_sk_2 = b.append(Operation::LoadPrivateKey(node_sk_2_bytes), &[]);
+    let bitcoin_sk_1 = b.append(Operation::LoadPrivateKey(bitcoin_sk_1_bytes), &[]);
+    let bitcoin_sk_2 = b.append(Operation::LoadPrivateKey(bitcoin_sk_2_bytes), &[]);
+    let announcement = b.append(
+        Operation::BuildChannelAnnouncement,
+        &[
+            features,
+            chain_hash,
+            short_channel_id,
+            node_sk_1,
+            node_sk_2,
+            bitcoin_sk_1,
+            bitcoin_sk_2,
+        ],
+    );
+    b.append(Operation::SendMessage, &[announcement]);
+
+    for direction in 0..=1_u8 {
+        let node_sk = if direction == 0 { node_sk_1 } else { node_sk_2 };
+        let timestamp = b.append(Operation::LoadTimestamp(1_715_000_000), &[]);
+        let message_flags = b.append(Operation::LoadU8(0x01), &[]);
+        let channel_flags = b.append(Operation::LoadU8(direction), &[]);
+        let cltv_expiry_delta = b.append(Operation::LoadU16(144), &[]);
+        let htlc_minimum_msat = b.append(Operation::LoadAmount(1_000), &[]);
+        let fee_base_msat = b.append(Operation::LoadForwardingFee(1_000), &[]);
+        let fee_proportional_millionths = b.append(Operation::LoadForwardingFee(100), &[]);
+        let htlc_maximum_msat = b.append(Operation::LoadAmount(99_000_000), &[]);
+        let update = b.append(
+            Operation::BuildChannelUpdate,
+            &[
+                node_sk,
+                chain_hash,
+                short_channel_id,
+                timestamp,
+                message_flags,
+                channel_flags,
+                cltv_expiry_delta,
+                htlc_minimum_msat,
+                fee_base_msat,
+                fee_proportional_millionths,
+                htlc_maximum_msat,
+            ],
+        );
+        b.append(Operation::SendMessage, &[update]);
+    }
+
+    let mut fx = Fixture::new();
+    fx.run(&b.build());
+
+    assert_eq!(fx.sent_len(), 3);
+    let ca: ChannelAnnouncement = fx.sent(0);
+    assert!(ca.verify());
+
+    for (message_index, direction) in [(1, 0_u8), (2, 1_u8)] {
+        let cu: ChannelUpdate = fx.sent(message_index);
+        assert_eq!(cu.channel_flags & 1, direction);
+
+        let expected_node_id = if direction == 0 {
+            &ca.node_id_1
+        } else {
+            &ca.node_id_2
+        };
+        assert!(
+            cu.verify(expected_node_id),
+            "channel_update for direction {direction} must verify against its announced node",
+        );
+    }
+}
+
+#[test]
 fn execute_build_announcement_signatures() {
     let node_sk_1_bytes = [0x11; 32];
     let node_sk_2_bytes = [0x22; 32];
