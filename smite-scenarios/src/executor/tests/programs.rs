@@ -388,13 +388,26 @@ pub fn recv_two_channel_ready_program() -> Program {
 /// Sends `update_add_htlc` on the `ChannelId` variable `channel_id`, with the
 /// HTLC fields of `add` and an onion that pays the target directly.
 pub fn send_update_add_htlc(b: &mut ProgramBuilder, channel_id: usize, add: &SampleUpdateAddHtlc) {
+    let payment_hash = b.append(Operation::LoadPaymentField(add.payment_hash), &[]);
+    let payment_secret = b.append(Operation::LoadPaymentField(add.payment_secret), &[]);
+    send_update_add_htlc_with(b, channel_id, add, payment_hash, payment_secret);
+}
+
+/// Sends `update_add_htlc` on the `ChannelId` variable `channel_id`, with the
+/// HTLC fields of `add` and the `PaymentField` variables `payment_hash` and
+/// `payment_secret`.
+pub fn send_update_add_htlc_with(
+    b: &mut ProgramBuilder,
+    channel_id: usize,
+    add: &SampleUpdateAddHtlc,
+    payment_hash: usize,
+    payment_secret: usize,
+) {
     let htlc_id = b.append(Operation::LoadHtlcId(add.id), &[]);
     let amount_msat = b.append(Operation::LoadAmount(add.amount_msat), &[]);
-    let payment_hash = b.append(Operation::LoadPaymentField(add.payment_hash), &[]);
     let cltv_expiry = b.append(Operation::LoadBlockHeight(add.cltv_expiry), &[]);
     let session_key = b.append(Operation::LoadPrivateKey(add.session_key), &[]);
     let node_id = b.append(Operation::LoadTargetPubkeyFromContext, &[]);
-    let payment_secret = b.append(Operation::LoadPaymentField(add.payment_secret), &[]);
     b.append(
         Operation::SendUpdateAddHtlc,
         &[

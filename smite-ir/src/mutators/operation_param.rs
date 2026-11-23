@@ -6,7 +6,7 @@ use rand::{Rng, RngExt};
 use smite::bolt::{ChannelTypeVariant, MAX_MESSAGE_SIZE, ShortChannelId};
 
 use super::Mutator;
-use crate::operation::{AcceptChannelField, ShutdownScriptVariant};
+use crate::operation::{ExtractField, ShutdownScriptVariant};
 use crate::{Operation, Program};
 
 /// Mutates the embedded parameter of a randomly chosen `is_param_mutable`
@@ -88,6 +88,7 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
             true
         }
         Operation::ExtractAcceptChannel(field) => mutate_extract_field(field, rng),
+        Operation::ExtractInvoice(field) => mutate_extract_field(field, rng),
         Operation::BuildNodeAnnouncement { rgb_color, alias } => {
             // Randomly mutate rgb_color or alias bytes in place; never change
             // their lengths (array types prevent it).
@@ -127,7 +128,8 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         | Operation::RecvFundingSigned
         | Operation::RecvChannelReady
         | Operation::BroadcastTransaction
-        | Operation::LookupShortChannelId => {
+        | Operation::LookupShortChannelId
+        | Operation::CreateInvoice => {
             unreachable!("is_param_mutable returned true for {op:?}")
         }
     }
@@ -437,10 +439,10 @@ fn mutate_shutdown_script_bytes(variant: &mut ShutdownScriptVariant, rng: &mut i
 
 /// Returns `true` if the field was swapped, `false` if no same-type alternative
 /// field exists.
-fn mutate_extract_field(field: &mut AcceptChannelField, rng: &mut impl Rng) -> bool {
+fn mutate_extract_field<F: ExtractField>(field: &mut F, rng: &mut impl Rng) -> bool {
     // Only swap to fields with the same output type to preserve program validity.
     let target_type = field.output_type();
-    let Some(new_field) = AcceptChannelField::ALL
+    let Some(new_field) = F::ALL
         .iter()
         .copied()
         .filter(|f| f.output_type() == target_type && f != field)

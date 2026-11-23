@@ -1,8 +1,10 @@
 //! Mocks and fixtures shared by the executor tests.
 
 use crate::executor::*;
+use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::{Amount, Transaction};
 use smite::bolt::{AcceptChannelTlvs, ChannelTypeVariant, FromMessage, REGTEST_CHAIN_HASH};
+use smite::onion::{OnionPacket, Peeled, peel};
 use std::collections::VecDeque;
 use std::str::FromStr;
 
@@ -133,9 +135,30 @@ impl BitcoinRpc for MockBitcoinCli {
 
 // Mocking TargetRpc via MockTargetRpc
 
+/// The any-amount regtest invoice [`MockTargetRpc`] creates.
+pub const SAMPLE_INVOICE: &str = "lnbcrt1p4sxgp6dqqpp5stgpvzv5nhf33wugs0nk06ft20a4zw7h8lddr4jzgs8rmgjkfmeqsp5pqa7cfdsru444xk2w2qq0c5swd0geqs50vj9lkuslsdrmx3a592s9qrsgqcqpjmm69pcemajx03wllsxtqu26cqeny63h6ehsn4gteaey54qg203jhge0w0klmyl99slhpf496aqv4apsxl9msuth2u75ax2hlxut7ceqpjj2upg";
+
+/// The payment hash of [`SAMPLE_INVOICE`].
+pub fn sample_invoice_payment_hash() -> [u8; 32] {
+    hex::decode("82d01609949dd318bb8883e767e92b53fb513bd73fdad1d642440e3da2564ef2")
+        .expect("valid payment hash hex")
+        .try_into()
+        .expect("32-byte payment hash")
+}
+
+/// The payment secret of [`SAMPLE_INVOICE`].
+pub fn sample_invoice_payment_secret() -> [u8; 32] {
+    hex::decode("083bec25b01f2b5a9aca728007e290735e8c82147b245fdb90fc1a3d9a3da155")
+        .expect("valid payment secret hex")
+        .try_into()
+        .expect("32-byte payment secret")
+}
+
 #[derive(Default)]
 pub struct MockTargetRpc {
     pub chain_syncs: usize,
+    /// Invoice `create_invoice` returns instead of [`SAMPLE_INVOICE`].
+    invoice: Option<&'static str>,
 }
 
 impl TargetRpc for MockTargetRpc {
@@ -144,7 +167,7 @@ impl TargetRpc for MockTargetRpc {
     }
 
     fn create_invoice(&mut self) -> Option<String> {
-        unimplemented!("no executor operation creates invoices yet")
+        Some(self.invoice.unwrap_or(SAMPLE_INVOICE).to_owned())
     }
 }
 
@@ -176,6 +199,13 @@ impl Fixture {
     /// Funds the wallet with `utxos` instead of the default [`sample_utxo`].
     pub fn with_utxos(mut self, utxos: Vec<Utxo>) -> Self {
         self.executor.bitcoin_cli.utxos = utxos;
+        self
+    }
+
+    /// Makes the target create `bolt11` instead of the default
+    /// [`SAMPLE_INVOICE`].
+    pub fn with_invoice(mut self, bolt11: &'static str) -> Self {
+        self.executor.rpc.invoice = Some(bolt11);
         self
     }
 
@@ -452,6 +482,34 @@ impl SampleUpdateAddHtlc {
             tlvs: UpdateAddHtlcTlvs::default(),
         }
     }
+
+    /// The payload the target must find as the final hop of the onion.
+    pub fn final_hop_payload(&self) -> HopPayload {
+        HopPayload::receive(
+            self.amount_msat,
+            self.cltv_expiry,
+            self.payment_secret,
+            self.amount_msat,
+        )
+    }
+}
+
+/// Peels the onion of `add` as the target, which must be the final hop.
+/// Returns the decoded payload and the shared secret the target derives.
+pub fn peel_as_target(add: &UpdateAddHtlc) -> (HopPayload, SharedSecret) {
+    let target_key = sample_secret_key(1);
+    let packet = OnionPacket::decode(&add.onion_routing_packet).expect("valid onion packet");
+    let Peeled::Final {
+        payload,
+        shared_secret,
+    } = peel(&packet, &target_key, &add.payment_hash, None).expect("target peels")
+    else {
+        panic!("target should be the final hop");
+    };
+    (
+        HopPayload::decode(&payload).expect("valid hop payload"),
+        shared_secret,
+    )
 }
 
 /// The `update_add_htlc` the HTLC tests send: the first HTLC of the channel,

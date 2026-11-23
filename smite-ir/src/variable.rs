@@ -6,6 +6,7 @@
 use bitcoin::secp256k1::PublicKey;
 use smite::bolt::{AcceptChannel, ChannelId, OpenChannel, ShortChannelId};
 use smite::channel_tx::FundingTransaction;
+use smite::invoice::Invoice;
 
 const CHAIN_HASH_SIZE: usize = 32;
 const PRIVATE_KEY_SIZE: usize = 32;
@@ -57,6 +58,8 @@ pub enum Variable {
     AcceptChannel(AcceptChannel),
     /// Constructed funding transaction with funding output index.
     FundingTransaction(FundingTransaction),
+    /// Decoded BOLT 11 invoice created by the target.
+    Invoice(Invoice),
 
     // Affine (single-use) variables
     /// `open_channel` has been sent, so `accept_channel` may now be received.
@@ -93,6 +96,7 @@ impl Variable {
             Self::OpenChannelMessage(_) => VariableType::OpenChannelMessage,
             Self::AcceptChannel(_) => VariableType::AcceptChannel,
             Self::FundingTransaction(_) => VariableType::FundingTransaction,
+            Self::Invoice(_) => VariableType::Invoice,
             Self::SentOpenChannel => VariableType::SentOpenChannel,
             Self::SentFundingCreated => VariableType::SentFundingCreated,
             Self::SentShutdown => VariableType::SentShutdown,
@@ -124,6 +128,7 @@ pub enum VariableType {
     OpenChannelMessage,
     AcceptChannel,
     FundingTransaction,
+    Invoice,
     SentOpenChannel,
     SentFundingCreated,
     SentShutdown,
@@ -154,7 +159,8 @@ impl VariableType {
             | Self::OpenChannelMessage
             | Self::AcceptChannel
             | Self::ShortChannelId
-            | Self::FundingTransaction => false,
+            | Self::FundingTransaction
+            | Self::Invoice => false,
         }
     }
 }

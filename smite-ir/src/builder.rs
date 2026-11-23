@@ -229,6 +229,9 @@ impl ProgramBuilder {
             VariableType::FundingTransaction => {
                 panic!("cannot generate fresh FundingTransaction: requires composed inputs")
             }
+            VariableType::Invoice => {
+                panic!("cannot generate fresh Invoice: requires target RPC")
+            }
             VariableType::SentOpenChannel => {
                 panic!("cannot generate fresh SentOpenChannel: affine type")
             }

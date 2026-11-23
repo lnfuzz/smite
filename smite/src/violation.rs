@@ -9,6 +9,7 @@
 //! mutator-produced invalid commitments, undecodable harness input).
 
 use crate::bolt::{ChannelId, TemporaryChannelId};
+use crate::invoice::InvoiceError;
 
 /// A detected misbehavior of the target under test.
 #[derive(Debug, thiserror::Error)]
@@ -63,4 +64,9 @@ pub enum Violation {
     /// - it reuses a per-commitment point from a previously revealed key.
     #[error("invalid channel_ready for channel_id {0}: {1}")]
     InvalidChannelReady(ChannelId, String),
+
+    /// The target's invoice is not a valid any-amount regtest BOLT 11 invoice,
+    /// as judged by [`crate::invoice::Invoice::decode`].
+    #[error("invalid invoice {0}: {1}")]
+    InvalidInvoice(String, InvoiceError),
 }
