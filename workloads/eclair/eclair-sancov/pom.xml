@@ -16,32 +16,22 @@
   </properties>
 
   <dependencies>
-    <!-- Bytecode manipulation library used by EclairTransformer to rewrite class files -->
+    <!-- Bytecode manipulation library used by EclairInstrumenter to rewrite class files -->
     <dependency>
       <groupId>org.ow2.asm</groupId>
       <artifactId>asm</artifactId>
+      <version>9.7</version>
+    </dependency>
+    <dependency>
+      <groupId>org.ow2.asm</groupId>
+      <artifactId>asm-tree</artifactId>
       <version>9.7</version>
     </dependency>
   </dependencies>
 
   <build>
     <plugins>
-      <!-- Set Java agent manifest attributes -->
-      <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-jar-plugin</artifactId>
-        <version>3.3.0</version>
-        <configuration>
-          <archive>
-            <manifestEntries>
-              <!-- Tells JVM which class has premain() when -javaagent: is used -->
-              <Premain-Class>EclairSanCov</Premain-Class>
-              <Can-Retransform-Classes>true</Can-Retransform-Classes>
-            </manifestEntries>
-          </archive>
-        </configuration>
-      </plugin>
-      <!-- Bundle ASM into a fat JAR so no classpath setup is needed at runtime -->
+      <!-- Bundle ASM into a fat JAR so EclairInstrumenter runs with a single -cp entry -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-shade-plugin</artifactId>
@@ -54,29 +44,6 @@
             </goals>
             <configuration>
               <shadedArtifactAttached>false</shadedArtifactAttached>
-              <!--
-                Relocate ASM to avoid classpath conflicts with Eclair's bundled ASM jar.
-                Java agents are appended to the system classpath after the application, so without
-                relocation the JVM would load Eclair's ASM first, causing ClassReader to fail
-                on class files compiled beyond Java 8 (the max supported by Eclair's ASM 5.x).
-                Relocation rewrites all bytecode references in our compiled classes so they use
-                this private copy of ASM regardless of what version Eclair ships.
-              -->
-              <relocations>
-                <relocation>
-                  <pattern>org.objectweb.asm</pattern>
-                  <shadedPattern>eclair.sancov.asm</shadedPattern>
-                </relocation>
-              </relocations>
-              <!-- Re-apply agent manifest entries after shading replaces the JAR -->
-              <transformers>
-                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                  <manifestEntries>
-                    <Premain-Class>EclairSanCov</Premain-Class>
-                    <Can-Retransform-Classes>true</Can-Retransform-Classes>
-                  </manifestEntries>
-                </transformer>
-              </transformers>
             </configuration>
           </execution>
         </executions>
