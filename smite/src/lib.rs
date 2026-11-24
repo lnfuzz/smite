@@ -15,6 +15,7 @@
 //! - [`oracles`] - Protocol invariant checks.
 //! - [`pending_channel`] - BOLT 2 channel negotiation state.
 //! - [`process`] - Managed subprocess utilities.
+//! - [`rpc`] - Client for target node JSON-RPC over a Unix socket.
 //! - [`runners`] - Fuzz input delivery (Nyx and local modes).
 //! - [`scenarios`] - Scenario trait and the [`scenarios::smite_run`] entry point.
 //! - [`violation`] - Target-misbehavior findings that make a test case fail.
@@ -30,6 +31,7 @@ pub mod onion;
 pub mod oracles;
 pub mod pending_channel;
 pub mod process;
+pub mod rpc;
 pub mod runners;
 pub mod scenarios;
 pub mod violation;

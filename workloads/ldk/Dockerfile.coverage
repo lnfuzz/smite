@@ -69,7 +69,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libstdc++6 \
     libgcc-s1 \
     ca-certificates \
-    procps \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy LLVM tools and shared library for coverage report generation

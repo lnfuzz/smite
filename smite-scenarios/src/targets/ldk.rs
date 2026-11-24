@@ -4,14 +4,16 @@
 //! memory.
 
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{self, BufRead, BufReader};
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use bitcoin::secp256k1;
 use smite::bitcoin::BitcoinCli;
-use smite::process::{ManagedProcess, send_sigusr1};
+use smite::process::ManagedProcess;
+use smite::rpc::unix_rpc;
 
 use super::bitcoind;
 use super::{Target, TargetError, TargetRpc, check_crash_log};
@@ -48,32 +50,37 @@ impl LdkConfig {
 
 /// RPC handle for interacting with LDK node target.
 ///
-/// LDK currently has no RPC socket, so commands are delivered through signals
-/// that invoke the corresponding APIs directly.
+/// ldk-node has no RPC server, so the wrapper exposes its APIs as JSON-RPC
+/// over a Unix socket. The wrapper serves one connection at a time with no
+/// read timeout, which is safe because each call sends its request right
+/// after connecting.
 #[derive(Debug, Clone)]
 pub struct LdkRpc {
-    /// PID of the LDK node's wrapper process, which receives the signals.
-    pid: u32,
+    /// Path to the wrapper's Unix RPC socket.
+    rpc_socket: PathBuf,
+}
+
+impl LdkRpc {
+    /// Calls a wrapper JSON-RPC method over its Unix socket.
+    fn run(&self, method: &str, params: impl serde::Serialize) -> io::Result<serde_json::Value> {
+        unix_rpc(&self.rpc_socket, method, params)
+    }
 }
 
 impl TargetRpc for LdkRpc {
-    /// Signals the wrapper (SIGUSR1) to sync on new blocks immediately instead
-    /// of waiting for its regular poll interval, allowing it to sync faster.
+    /// RPC to make LDK sync its wallets with the chain immediately instead of
+    /// waiting for its regular poll interval, allowing it to sync faster.
     ///
     /// # Panics
     ///
-    /// Panics if the signal cannot be sent, which means the call itself is at
-    /// fault rather than the target having crashed or hung.
+    /// - If the wrapper answers with an error, which means the call itself is
+    ///   at fault rather than the target having crashed/hanged.
     fn chain_sync(&mut self) {
-        // A crashed wrapper remains an unreaped zombie, so the signal is sent
-        // but discarded. A hung wrapper is still alive, so the signal stays
-        // pending until it resumes. check_alive/ping-pong reports the
-        // crash/hang at the end.
-        if let Err(e) = send_sigusr1(self.pid) {
-            panic!(
-                "failed to send SIGUSR1 to ldk-node-wrapper (pid {}): {e}",
-                self.pid
-            );
+        if let Err(e) = self.run("sync_wallets", serde_json::json!({})) {
+            // The wrapper is unreachable, indicating that LDK has already
+            // crashed/hanged, check_alive/ping-pong will report the crash/hang
+            // at the end.
+            log::warn!("sync_wallets could not reach ldk: {e}");
         }
     }
 }
@@ -89,6 +96,7 @@ pub struct LdkTarget {
     pubkey: secp256k1::PublicKey,
     addr: SocketAddr,
     bitcoin_cli: BitcoinCli,
+    rpc_socket: PathBuf,
     #[allow(dead_code)] // TempDir auto-cleans on drop
     temp_dir: Option<tempfile::TempDir>,
 }
@@ -98,19 +106,20 @@ impl LdkTarget {
     /// be ready. Returns the process and LDK's identity pubkey.
     fn start_ldk(
         config: &LdkConfig,
-        data_dir: &Path,
+        ldk_dir: &Path,
+        rpc_socket: &Path,
         bitcoin_cli: &BitcoinCli,
     ) -> Result<(ManagedProcess, secp256k1::PublicKey), TargetError> {
         log::info!("Starting ldk-node-wrapper...");
 
-        let ldk_dir = data_dir.join("ldk");
-        fs::create_dir_all(&ldk_dir)?;
+        fs::create_dir_all(ldk_dir)?;
 
         let mut cmd = Command::new("ldk-node-wrapper");
         cmd.arg(ldk_dir.to_str().expect("valid UTF-8 path"))
             .arg(config.ldk_p2p_port.to_string())
             .arg(config.bitcoind_rpc_port.to_string())
             .arg(bitcoind::INITIAL_BLOCKS.to_string())
+            .arg(rpc_socket.to_str().expect("valid UTF-8 path"))
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
 
@@ -160,6 +169,36 @@ impl LdkTarget {
     }
 }
 
+impl Drop for LdkTarget {
+    fn drop(&mut self) {
+        // Use the `stop` RPC for graceful shutdown instead of SIGTERM. The
+        // wrapper doesn't handle SIGTERM, so SIGTERM ends it without running
+        // `node.stop()` or the exit-time hook that writes LLVM coverage profraw
+        // data. The `stop` RPC makes the wrapper stop the node and return from
+        // main(), so the profraw data is written.
+        log::debug!("ldk-node-wrapper: requesting graceful shutdown via stop RPC");
+        match self.rpc().run("stop", serde_json::json!({})) {
+            Ok(_) => {
+                // Wait for the wrapper to fully exit with a timeout. The RPC
+                // response is sent before `node.stop()` runs, so the wrapper is
+                // still shutting down when the RPC returns.
+                log::debug!("ldk-node-wrapper: waiting for process to exit");
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while !self.ldk.has_exited() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+            Err(e) => {
+                log::debug!("ldk-node-wrapper: stop RPC failed ({e}), falling back to SIGTERM");
+            }
+        }
+        // ManagedProcess::drop handles cleanup. If the wrapper already exited,
+        // has_exited() returns true and no signal is sent. If the stop RPC
+        // failed or the timeout expired, ManagedProcess sends SIGTERM as a
+        // fallback, which kills the wrapper.
+    }
+}
+
 impl Target for LdkTarget {
     type Config = LdkConfig;
     type Rpc = LdkRpc;
@@ -168,7 +207,9 @@ impl Target for LdkTarget {
         let (data_path, temp_dir) = bitcoind::resolve_data_dir()?;
 
         let (bitcoind, bitcoin_cli) = bitcoind::start(&config.bitcoind_config(), &data_path)?;
-        let (ldk, pubkey) = Self::start_ldk(&config, &data_path, &bitcoin_cli)?;
+        let ldk_dir = data_path.join("ldk");
+        let rpc_socket = ldk_dir.join("smite-ldk-rpc.sock");
+        let (ldk, pubkey) = Self::start_ldk(&config, &ldk_dir, &rpc_socket, &bitcoin_cli)?;
         let addr = SocketAddr::from(([127, 0, 0, 1], config.ldk_p2p_port));
 
         log::info!("Both daemons are running, ready to fuzz");
@@ -179,6 +220,7 @@ impl Target for LdkTarget {
             pubkey,
             addr,
             bitcoin_cli,
+            rpc_socket,
             temp_dir,
         })
     }
@@ -193,7 +235,7 @@ impl Target for LdkTarget {
 
     fn rpc(&self) -> Self::Rpc {
         LdkRpc {
-            pid: self.ldk.pid(),
+            rpc_socket: self.rpc_socket.clone(),
         }
     }
 
