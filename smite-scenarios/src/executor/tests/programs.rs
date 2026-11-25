@@ -345,22 +345,16 @@ pub fn recv_channel_ready_program(confirmations: u8) -> Program {
     b.build()
 }
 
-/// A program that negotiates [`funded_open_channel`] and
-/// [`second_funded_open_channel`], funds both, mines to their `minimum_depth`,
-/// and receives a `channel_ready` for each.
-pub fn recv_two_channel_ready_program() -> Program {
+/// Negotiates [`funded_open_channel`] and [`second_funded_open_channel`], funds
+/// both, mines to their `minimum_depth`, and receives a `channel_ready` for each.
+pub fn establish_two_channels(b: &mut ProgramBuilder) {
     let second = second_funded_open_channel();
 
-    let mut b = ProgramBuilder::new();
-    negotiate_channel(&mut b, &funded_open_channel());
-    negotiate_channel(&mut b, &second);
-    let first_funding_created = send_funding_created(&mut b);
+    negotiate_channel(b, &funded_open_channel());
+    negotiate_channel(b, &second);
+    let first_funding_created = send_funding_created(b);
     b.append(Operation::RecvFundingSigned, &[first_funding_created.sent]);
-    let tx = create_funding_tx_with(
-        &mut b,
-        second.message.funding_satoshis,
-        FUNDING_FEERATE_PER_KW,
-    );
+    let tx = create_funding_tx_with(b, second.message.funding_satoshis, FUNDING_FEERATE_PER_KW);
     b.append(Operation::BroadcastTransaction, &[tx.tx]);
     let temporary_channel_id = b.append(
         Operation::LoadChannelId(second.message.temporary_channel_id.0),
@@ -379,6 +373,12 @@ pub fn recv_two_channel_ready_program() -> Program {
     b.append(Operation::MineBlocks(6), &[]);
     b.append(Operation::RecvChannelReady, &[]);
     b.append(Operation::RecvChannelReady, &[]);
+}
+
+/// A program that runs [`establish_two_channels`].
+pub fn recv_two_channel_ready_program() -> Program {
+    let mut b = ProgramBuilder::new();
+    establish_two_channels(&mut b);
 
     b.build()
 }
