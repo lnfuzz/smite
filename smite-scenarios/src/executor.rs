@@ -550,7 +550,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         encoded.len()
                     );
                     self.conn.send_message(&encoded)?;
-                    Some(Variable::SentShutdown)
+                    None
                 }
 
                 Operation::RecvAcceptChannel => {
