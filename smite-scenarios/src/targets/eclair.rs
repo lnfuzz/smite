@@ -5,6 +5,7 @@
 //! JNI.
 
 use std::fs;
+use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -14,12 +15,17 @@ use bitcoin::secp256k1;
 use serde::Deserialize;
 use smite::bitcoin::BitcoinCli;
 use smite::process::ManagedProcess;
+use smite::rpc::http_post;
 
 use super::bitcoind;
 use super::{Target, TargetError, TargetRpc, check_crash_log};
 
 /// API password for Eclair's REST API.
 const API_PASSWORD: &str = "fuzzpass";
+
+/// Basic auth header for Eclair's REST API, encoding an empty user and
+/// [`API_PASSWORD`].
+const API_AUTHORIZATION: &str = "Basic OmZ1enpwYXNz";
 
 /// bitcoind wallet Eclair spends from, kept apart from the fuzzer's wallet.
 const ECLAIR_WALLET: &str = "eclair";
@@ -69,12 +75,47 @@ impl EclairConfig {
 
 /// RPC handle for interacting with eclair node target.
 #[derive(Debug, Clone)]
-pub struct EclairRpc;
+pub struct EclairRpc {
+    /// Eclair REST API port.
+    api_port: u16,
+}
+
+impl EclairRpc {
+    /// Calls an Eclair REST method with a form-encoded body.
+    fn run(&self, method: &str, form: &str) -> io::Result<serde_json::Value> {
+        let headers = [
+            ("Authorization", API_AUTHORIZATION),
+            ("Content-Type", "application/x-www-form-urlencoded"),
+        ];
+        http_post(self.api_port, &format!("/{method}"), &headers, form)
+    }
+}
 
 impl TargetRpc for EclairRpc {
     /// Eclair receives new blocks directly from bitcoind over ZMQ, so no manual
     /// chain synchronization is required.
     fn chain_sync(&mut self) {}
+
+    /// RPC to register an any-amount invoice on Eclair.
+    ///
+    /// # Panics
+    ///
+    /// - If Eclair answers with an error, which means the call itself is at
+    ///   fault rather than the target having crashed/hanged.
+    fn create_invoice(&mut self) -> Option<String> {
+        // Eclair requires a description, and omitting amountMsat makes the
+        // invoice any-amount.
+        let result = self
+            .run("createinvoice", "description=smite")
+            .inspect_err(|e| log::warn!("createinvoice could not reach eclair: {e}"))
+            .ok()?;
+        Some(
+            result["serialized"]
+                .as_str()
+                .expect("valid bolt11 invoice")
+                .to_owned(),
+        )
+    }
 }
 
 /// Eclair Lightning node target.
@@ -88,6 +129,7 @@ pub struct EclairTarget {
     pubkey: secp256k1::PublicKey,
     addr: SocketAddr,
     bitcoin_cli: BitcoinCli,
+    api_port: u16,
     #[allow(dead_code)] // TempDir auto-cleans on drop
     temp_dir: Option<tempfile::TempDir>,
 }
@@ -241,6 +283,7 @@ impl Target for EclairTarget {
             pubkey,
             addr,
             bitcoin_cli,
+            api_port: config.eclair_api_port,
             temp_dir,
         })
     }
@@ -254,7 +297,9 @@ impl Target for EclairTarget {
     }
 
     fn rpc(&self) -> Self::Rpc {
-        EclairRpc
+        EclairRpc {
+            api_port: self.api_port,
+        }
     }
 
     fn bitcoin_cli(&self) -> &BitcoinCli {

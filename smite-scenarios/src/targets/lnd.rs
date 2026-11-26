@@ -1,6 +1,7 @@
 //! LND target implementation.
 
 use std::fs;
+use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -11,6 +12,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use smite::bitcoin::BitcoinCli;
 use smite::process::ManagedProcess;
+use smite::rpc::http_post;
 
 use super::bitcoind;
 use super::{Target, TargetError, TargetRpc, check_crash_log};
@@ -25,6 +27,8 @@ pub struct LndConfig {
     pub lnd_p2p_port: u16,
     /// LND RPC port (default: 10009).
     pub lnd_rpc_port: u16,
+    /// LND REST port (default: 8080).
+    pub lnd_rest_port: u16,
     /// ZMQ block notification port (default: 28332).
     pub zmq_block_port: u16,
     /// ZMQ transaction notification port (default: 28333).
@@ -38,6 +42,7 @@ impl Default for LndConfig {
             bitcoind_p2p_port: 18444,
             lnd_p2p_port: 9735,
             lnd_rpc_port: 10009,
+            lnd_rest_port: 8080,
             zmq_block_port: 28332,
             zmq_tx_port: 28333,
         }
@@ -58,12 +63,47 @@ impl LndConfig {
 
 /// RPC handle for interacting with LND node target.
 #[derive(Debug, Clone)]
-pub struct LndRpc;
+pub struct LndRpc {
+    /// LND REST port, served over plain HTTP.
+    rest_port: u16,
+    /// Hex-encoded invoice macaroon authorizing REST calls.
+    macaroon: String,
+}
+
+impl LndRpc {
+    /// Calls an LND REST method with a JSON body, authorized by the invoice
+    /// macaroon.
+    fn run(&self, method: &str, body: &str) -> io::Result<serde_json::Value> {
+        let headers = [("Grpc-Metadata-macaroon", self.macaroon.as_str())];
+        http_post(self.rest_port, &format!("/v1/{method}"), &headers, body)
+    }
+}
 
 impl TargetRpc for LndRpc {
     /// LND receives new blocks directly from bitcoind over ZMQ, so no manual
     /// chain synchronization is required.
     fn chain_sync(&mut self) {}
+
+    /// RPC to register an any-amount invoice on LND.
+    ///
+    /// # Panics
+    ///
+    /// - If LND answers with an error, which means the call itself is at fault
+    ///   rather than the target having crashed/hanged.
+    fn create_invoice(&mut self) -> Option<String> {
+        // LND accepts an empty request, and omitting value makes the invoice
+        // any-amount.
+        let result = self
+            .run("invoices", "{}")
+            .inspect_err(|e| log::warn!("invoices could not reach lnd: {e}"))
+            .ok()?;
+        Some(
+            result["payment_request"]
+                .as_str()
+                .expect("valid bolt11 invoice")
+                .to_owned(),
+        )
+    }
 }
 
 /// LND Lightning node target.
@@ -77,6 +117,8 @@ pub struct LndTarget {
     pubkey: secp256k1::PublicKey,
     addr: SocketAddr,
     bitcoin_cli: BitcoinCli,
+    rest_port: u16,
+    macaroon: String,
     #[allow(dead_code)] // TempDir auto-cleans on drop
     temp_dir: Option<tempfile::TempDir>,
 }
@@ -115,7 +157,9 @@ impl LndTarget {
             .arg(format!("--lnddir={}", lnd_dir.display()))
             .arg(format!("--listen=127.0.0.1:{}", config.lnd_p2p_port))
             .arg(format!("--rpclisten=127.0.0.1:{}", config.lnd_rpc_port))
-            .arg("--restlisten=127.0.0.1:8080")
+            .arg(format!("--restlisten=127.0.0.1:{}", config.lnd_rest_port))
+            // Serve REST over plain HTTP so the RPC handle needs no TLS client.
+            .arg("--no-rest-tls")
             .arg("--tlsextradomain=127.0.0.1")
             // LND only advertises `option_scid_alias` when asked to. Without
             // it LND ignores the aliases we send in `channel_ready`.
@@ -258,6 +302,9 @@ impl Target for LndTarget {
         let lnd_dir = data_path.join("lnd");
         let (lnd, pubkey) = Self::start_lnd(&config, &lnd_dir)?;
         Self::fund_wallet(&config, &lnd_dir, &bitcoin_cli)?;
+        let macaroon = hex::encode(fs::read(
+            lnd_dir.join("data/chain/bitcoin/regtest/invoice.macaroon"),
+        )?);
         let addr = SocketAddr::from(([127, 0, 0, 1], config.lnd_p2p_port));
 
         log::info!("Both daemons are running, ready to fuzz");
@@ -268,6 +315,8 @@ impl Target for LndTarget {
             pubkey,
             addr,
             bitcoin_cli,
+            rest_port: config.lnd_rest_port,
+            macaroon,
             temp_dir,
         })
     }
@@ -281,7 +330,10 @@ impl Target for LndTarget {
     }
 
     fn rpc(&self) -> Self::Rpc {
-        LndRpc
+        LndRpc {
+            rest_port: self.rest_port,
+            macaroon: self.macaroon.clone(),
+        }
     }
 
     fn bitcoin_cli(&self) -> &BitcoinCli {

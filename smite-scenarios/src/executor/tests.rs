@@ -11,7 +11,7 @@ use smite::bolt::{
     AcceptChannelTlvs, ChannelReadyTlvs, GossipTimestampFilter, Init, Ping, QueryShortChannelIds,
     QueryShortChannelIdsTlvs, ReplyShortChannelIdsEnd,
 };
-use smite::onion::{OnionPacket, Peeled, peel};
+use smite::invoice::InvoiceError;
 use smite_ir::Instruction;
 use smite_ir::builder::ProgramBuilder;
 use smite_ir::operation::ShutdownScriptVariant;
@@ -1365,24 +1365,8 @@ fn execute_send_update_add_htlc() {
 
     // The target peels the onion as the final hop and finds the HTLC's amount
     // and expiry with the loaded payment secret.
-    let target_key = sample_secret_key(1);
-    let packet = OnionPacket::decode(&add.onion_routing_packet).expect("valid onion packet");
-    let Peeled::Final {
-        payload,
-        shared_secret,
-    } = peel(&packet, &target_key, &add.payment_hash, None).expect("target peels")
-    else {
-        panic!("target should be the final hop");
-    };
-    assert_eq!(
-        HopPayload::decode(&payload).expect("valid hop payload"),
-        HopPayload::receive(
-            add.amount_msat,
-            add.cltv_expiry,
-            htlc_vars.payment_secret,
-            add.amount_msat
-        )
-    );
+    let (payload, shared_secret) = peel_as_target(&add);
+    assert_eq!(payload, htlc_vars.final_hop_payload());
 
     // The target derives the same shared secret as the loaded session key.
     let session_key = SecretKey::from_slice(&htlc_vars.session_key).expect("valid secret key");
@@ -1432,6 +1416,68 @@ fn execute_send_update_add_htlc_unknown_channel() {
         htlc_vars.message(channel_id, &add.onion_routing_packet)
     );
     assert!(fx.channel_states().is_empty());
+}
+
+#[test]
+fn execute_send_update_add_htlc_pays_invoice() {
+    let channel_id = funding_channel_id();
+    // The HTLC carries the invoice's payment hash, and its onion the invoice's
+    // payment secret.
+    let htlc_vars = SampleUpdateAddHtlc {
+        payment_hash: sample_invoice_payment_hash(),
+        payment_secret: sample_invoice_payment_secret(),
+        ..sample_update_add_htlc()
+    };
+    let mut b = ProgramBuilder::new();
+    let funded = fund_channel(&mut b);
+    let created = b.append(Operation::CreateInvoice, &[]);
+    let payment_hash = b.append(
+        Operation::ExtractInvoice(InvoiceField::PaymentHash),
+        &[created],
+    );
+    let payment_secret = b.append(
+        Operation::ExtractInvoice(InvoiceField::PaymentSecret),
+        &[created],
+    );
+    send_update_add_htlc_with(
+        &mut b,
+        funded.channel_id,
+        &htlc_vars,
+        payment_hash,
+        payment_secret,
+    );
+
+    let mut fx = recv_funding_signed_fixture();
+    fx.run(&b.build());
+
+    // The instructions send 1 `open_channel`, 1 `funding_created` and 1
+    // `update_add_htlc` message.
+    assert_eq!(fx.sent_len(), 3);
+    let add: UpdateAddHtlc = fx.sent(2);
+    assert_eq!(
+        add,
+        htlc_vars.message(channel_id, &add.onion_routing_packet)
+    );
+
+    // The target peels the onion as the final hop and finds the HTLC's amount
+    // and expiry with the invoice's payment secret.
+    assert_eq!(peel_as_target(&add).0, htlc_vars.final_hop_payload());
+}
+
+#[test]
+fn execute_create_invoice_rejects_invalid_invoice() {
+    let mut b = ProgramBuilder::new();
+    b.append(Operation::CreateInvoice, &[]);
+
+    // The target was asked for an any-amount invoice but returns one with an
+    // amount.
+    let bolt11 = "lnbcrt10n1p4sxgp6dqqpp5stgpvzv5nhf33wugs0nk06ft20a4zw7h8lddr4jzgs8rmgjkfmeqsp5pqa7cfdsru444xk2w2qq0c5swd0geqs50vj9lkuslsdrmx3a592s9qrsgqcqpjnr4rqnvjfylcjyaklhzls93pcekre06mc3e0fthg2tslymx5fceqsrcy9gupmztlgk9yncl8gk0a8qcxlzerwyq48ddn9jrcxlpd4qgq4c934z";
+    let err = Fixture::new().with_invoice(bolt11).run_err(&b.build());
+    assert!(matches!(
+        err,
+        ExecuteError::Violation(Violation::InvalidInvoice(invoice, InvoiceError::UnexpectedHrp(_)))
+            if invoice == bolt11
+    ));
 }
 
 #[test]
@@ -1974,44 +2020,44 @@ fn execute_recv_channel_ready_rejects_reused_our_channel_ready_pubkey() {
     )));
 }
 
-// -- extract_field tests --
+// -- extract_accept_channel_field tests --
 
 // TODO: Once we can actually construct and send accept_channel messages, it
 // would be better to test field extraction through an IR program that
 // receives an accept_channel, extracts all fields, constructs a new
 // accept_channel from those fields, and sends the new accept_channel. Then
-// we'll have a full roundtrip test instead of testing the extract_field
-// helper function in isolation.
+// we'll have a full roundtrip test instead of testing the
+// extract_accept_channel_field helper function in isolation.
 
 #[test]
 fn extract_scalar_fields() {
     let ac = sample_accept_channel();
     assert_eq!(
-        extract_field(&ac, AcceptChannelField::DustLimitSatoshis),
+        extract_accept_channel_field(&ac, AcceptChannelField::DustLimitSatoshis),
         Variable::Amount(546)
     );
     assert_eq!(
-        extract_field(&ac, AcceptChannelField::MaxHtlcValueInFlightMsat),
+        extract_accept_channel_field(&ac, AcceptChannelField::MaxHtlcValueInFlightMsat),
         Variable::Amount(100_000_000)
     );
     assert_eq!(
-        extract_field(&ac, AcceptChannelField::ChannelReserveSatoshis),
+        extract_accept_channel_field(&ac, AcceptChannelField::ChannelReserveSatoshis),
         Variable::Amount(10_000)
     );
     assert_eq!(
-        extract_field(&ac, AcceptChannelField::HtlcMinimumMsat),
+        extract_accept_channel_field(&ac, AcceptChannelField::HtlcMinimumMsat),
         Variable::Amount(1_000)
     );
     assert_eq!(
-        extract_field(&ac, AcceptChannelField::MinimumDepth),
+        extract_accept_channel_field(&ac, AcceptChannelField::MinimumDepth),
         Variable::BlockHeight(6)
     );
     assert_eq!(
-        extract_field(&ac, AcceptChannelField::ToSelfDelay),
+        extract_accept_channel_field(&ac, AcceptChannelField::ToSelfDelay),
         Variable::U16(144)
     );
     assert_eq!(
-        extract_field(&ac, AcceptChannelField::MaxAcceptedHtlcs),
+        extract_accept_channel_field(&ac, AcceptChannelField::MaxAcceptedHtlcs),
         Variable::U16(483)
     );
 }
@@ -2020,7 +2066,7 @@ fn extract_scalar_fields() {
 fn extract_channel_id() {
     let ac = sample_accept_channel();
     assert_eq!(
-        extract_field(&ac, AcceptChannelField::TemporaryChannelId),
+        extract_accept_channel_field(&ac, AcceptChannelField::TemporaryChannelId),
         Variable::ChannelId(TEMPORARY_CHANNEL_ID)
     );
 }
@@ -2029,27 +2075,27 @@ fn extract_channel_id() {
 fn extract_pubkeys() {
     let ac = sample_accept_channel();
     assert_eq!(
-        extract_field(&ac, AcceptChannelField::FundingPubkey),
+        extract_accept_channel_field(&ac, AcceptChannelField::FundingPubkey),
         Variable::Point(sample_pubkey(1))
     );
     assert_eq!(
-        extract_field(&ac, AcceptChannelField::RevocationBasepoint),
+        extract_accept_channel_field(&ac, AcceptChannelField::RevocationBasepoint),
         Variable::Point(sample_pubkey(2))
     );
     assert_eq!(
-        extract_field(&ac, AcceptChannelField::PaymentBasepoint),
+        extract_accept_channel_field(&ac, AcceptChannelField::PaymentBasepoint),
         Variable::Point(sample_pubkey(3))
     );
     assert_eq!(
-        extract_field(&ac, AcceptChannelField::DelayedPaymentBasepoint),
+        extract_accept_channel_field(&ac, AcceptChannelField::DelayedPaymentBasepoint),
         Variable::Point(sample_pubkey(4))
     );
     assert_eq!(
-        extract_field(&ac, AcceptChannelField::HtlcBasepoint),
+        extract_accept_channel_field(&ac, AcceptChannelField::HtlcBasepoint),
         Variable::Point(sample_pubkey(5))
     );
     assert_eq!(
-        extract_field(&ac, AcceptChannelField::FirstPerCommitmentPoint),
+        extract_accept_channel_field(&ac, AcceptChannelField::FirstPerCommitmentPoint),
         Variable::Point(sample_pubkey(6))
     );
 }
@@ -2058,11 +2104,11 @@ fn extract_pubkeys() {
 fn extract_tlvs_present() {
     let ac = sample_accept_channel();
     assert_eq!(
-        extract_field(&ac, AcceptChannelField::UpfrontShutdownScript),
+        extract_accept_channel_field(&ac, AcceptChannelField::UpfrontShutdownScript),
         Variable::Bytes(vec![0xde, 0xad])
     );
     assert_eq!(
-        extract_field(&ac, AcceptChannelField::ChannelType),
+        extract_accept_channel_field(&ac, AcceptChannelField::ChannelType),
         Variable::Features(vec![0x40, 0x10, 0x00])
     );
 }
@@ -2074,11 +2120,11 @@ fn extract_tlvs_absent() {
         ..sample_accept_channel()
     };
     assert_eq!(
-        extract_field(&ac, AcceptChannelField::UpfrontShutdownScript),
+        extract_accept_channel_field(&ac, AcceptChannelField::UpfrontShutdownScript),
         Variable::Bytes(vec![])
     );
     assert_eq!(
-        extract_field(&ac, AcceptChannelField::ChannelType),
+        extract_accept_channel_field(&ac, AcceptChannelField::ChannelType),
         Variable::Features(vec![])
     );
 }

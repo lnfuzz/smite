@@ -17,7 +17,7 @@ use mutators::{
     GeneratorInsertionMutator, InputSwapMutator, InstructionDeleteMutator,
     InstructionReorderMutator, OperationParamMutator,
 };
-use operation::{AcceptChannelField, ShutdownScriptVariant};
+use operation::{AcceptChannelField, ExtractField, InvoiceField, ShutdownScriptVariant};
 
 /// Helper to build a private key with a single distinguishing byte.
 fn key(byte: u8) -> [u8; 32] {
@@ -611,6 +611,22 @@ fn display_send_update_add_htlc_program() {
             operation: Operation::SendUpdateAddHtlc,
             inputs: vec![0, 1, 2, 3, 4, 5, 6, 7],
         },
+        Instruction {
+            operation: Operation::CreateInvoice,
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::ExtractInvoice(InvoiceField::PaymentHash),
+            inputs: vec![9],
+        },
+        Instruction {
+            operation: Operation::ExtractInvoice(InvoiceField::PaymentSecret),
+            inputs: vec![9],
+        },
+        Instruction {
+            operation: Operation::SendUpdateAddHtlc,
+            inputs: vec![0, 1, 2, 10, 4, 5, 6, 11],
+        },
     ];
 
     let program = Program { instructions };
@@ -632,6 +648,10 @@ fn display_send_update_add_htlc_program() {
         "v6 = LoadTargetPubkeyFromContext()".into(),
         format!("v7 = LoadPaymentField(0x{secret_hex})"),
         "SendUpdateAddHtlc(v0, v1, v2, v3, v4, v5, v6, v7)".into(),
+        "v9 = CreateInvoice()".into(),
+        "v10 = ExtractPaymentHash(v9)".into(),
+        "v11 = ExtractPaymentSecret(v9)".into(),
+        "SendUpdateAddHtlc(v0, v1, v2, v10, v4, v5, v6, v11)".into(),
     ];
     assert_eq!(lines.len(), expected.len(), "line count mismatch");
     for (i, (got, want)) in lines.iter().zip(expected.iter()).enumerate() {
@@ -803,6 +823,34 @@ fn lookup_short_channel_id_operation() {
     assert!(!op.depends_only_on_inputs());
     assert!(!op.is_pure());
     assert_eq!(op.to_string(), "LookupShortChannelId");
+}
+
+#[test]
+fn create_invoice_operation() {
+    let op = Operation::CreateInvoice;
+    assert_eq!(op.input_types(), vec![]);
+    assert_eq!(op.output_type(), Some(VariableType::Invoice));
+    assert!(!op.is_param_mutable());
+    // Nothing observable changes when its invoice goes unused, so DCE may drop
+    // it.
+    assert!(!op.has_side_effects());
+    // Every call returns a fresh invoice, so it must not be deduplicated by CSE.
+    assert!(!op.depends_only_on_inputs());
+    assert!(!op.is_pure());
+    assert_eq!(
+        op.extractable_fields(),
+        vec![
+            (
+                Operation::ExtractInvoice(InvoiceField::PaymentHash),
+                VariableType::PaymentField,
+            ),
+            (
+                Operation::ExtractInvoice(InvoiceField::PaymentSecret),
+                VariableType::PaymentField,
+            ),
+        ],
+    );
+    assert_eq!(op.to_string(), "CreateInvoice()");
 }
 
 #[test]
@@ -994,6 +1042,17 @@ fn accept_channel_field_all_is_complete() {
         AcceptChannelField::ALL.len(),
         variant_count(AcceptChannelField::ALL[0]),
     );
+}
+
+// Ensure InvoiceField and InvoiceField::ALL stay in sync.
+#[test]
+fn invoice_field_all_is_complete() {
+    let variant_count = |f: InvoiceField| -> usize {
+        match f {
+            InvoiceField::PaymentHash | InvoiceField::PaymentSecret => 2,
+        }
+    };
+    assert_eq!(InvoiceField::ALL.len(), variant_count(InvoiceField::ALL[0]));
 }
 
 // Ensure AnyGenerator and AnyGenerator::ALL stay in sync. The exhaustive
@@ -2122,6 +2181,14 @@ fn generate_fresh_funding_transaction_panics() {
 }
 
 #[test]
+#[should_panic(expected = "cannot generate fresh Invoice")]
+fn generate_fresh_invoice_panics() {
+    let mut rng = SmallRng::seed_from_u64(0);
+    let mut builder = ProgramBuilder::new();
+    builder.generate_fresh(VariableType::Invoice, &mut rng);
+}
+
+#[test]
 #[should_panic(expected = "cannot generate fresh SentOpenChannel: affine type")]
 fn generate_fresh_sent_open_channel_panics() {
     let mut rng = SmallRng::seed_from_u64(0);
@@ -2340,6 +2407,38 @@ fn param_mutator_returns_false_for_singleton_extract_field() {
     let mutator = OperationParamMutator;
     let mut rng = SmallRng::seed_from_u64(0);
     assert!(!mutator.mutate(&mut program, &mut rng));
+}
+
+#[test]
+fn param_mutator_swaps_invoice_field() {
+    // PaymentHash and PaymentSecret share the PaymentField output type, so
+    // each mutation swaps one for the other.
+    let mut program = Program {
+        instructions: vec![
+            Instruction {
+                operation: Operation::CreateInvoice,
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::ExtractInvoice(InvoiceField::PaymentHash),
+                inputs: vec![0],
+            },
+        ],
+    };
+    let mutator = OperationParamMutator;
+    let mut rng = SmallRng::seed_from_u64(0);
+
+    assert!(mutator.mutate(&mut program, &mut rng));
+    assert_eq!(
+        program.instructions[1].operation,
+        Operation::ExtractInvoice(InvoiceField::PaymentSecret),
+    );
+    assert!(mutator.mutate(&mut program, &mut rng));
+    assert_eq!(
+        program.instructions[1].operation,
+        Operation::ExtractInvoice(InvoiceField::PaymentHash),
+    );
+    assert_well_formed(&program);
 }
 
 #[test]
@@ -3377,6 +3476,83 @@ fn dead_code_keeps_referenced_lookup_short_channel_id() {
     assert_well_formed(&program);
 }
 
+// A `CreateInvoice` whose invoice nothing extracts from can be dropped.
+#[test]
+fn dead_code_drops_unused_create_invoice() {
+    let mut program = Program {
+        instructions: vec![Instruction {
+            operation: Operation::CreateInvoice,
+            inputs: vec![],
+        }],
+    };
+
+    assert!(DeadCodeEliminator.minimize(&mut program));
+    assert!(
+        program.instructions.is_empty(),
+        "DCE must drop a CreateInvoice whose result is unused",
+    );
+    assert_well_formed(&program);
+}
+
+// An invoice whose fields are consumed must not be removed.
+#[test]
+fn dead_code_keeps_referenced_create_invoice() {
+    let mut program = Program {
+        instructions: vec![
+            Instruction {
+                operation: Operation::CreateInvoice,
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::ExtractInvoice(InvoiceField::PaymentHash),
+                inputs: vec![0],
+            },
+            Instruction {
+                operation: Operation::ExtractInvoice(InvoiceField::PaymentSecret),
+                inputs: vec![0],
+            },
+            Instruction {
+                operation: Operation::LoadChannelId([0xcd; 32]),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::LoadHtlcId(7),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::LoadAmount(50_000_000),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::LoadBlockHeight(800_144),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::LoadPrivateKey(key(1)),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::LoadTargetPubkeyFromContext,
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::SendUpdateAddHtlc,
+                inputs: vec![3, 4, 5, 1, 6, 7, 8, 2],
+            },
+        ],
+    };
+
+    DeadCodeEliminator.minimize(&mut program);
+    assert!(
+        program
+            .instructions
+            .iter()
+            .any(|i| matches!(i.operation, Operation::CreateInvoice)),
+        "DeadCodeEliminator must not remove a referenced CreateInvoice",
+    );
+    assert_well_formed(&program);
+}
+
 // -- CommonSubexpressionEliminator tests --
 
 #[test]
@@ -3459,6 +3635,37 @@ fn cse_does_not_merge_lookup_short_channel_id() {
         2,
         "CSE must not merge lookups separated by MineBlocks",
     );
+    assert_well_formed(&program);
+}
+
+// Each `CreateInvoice` returns a different invoice, so CSE must not merge them
+// even though it has no inputs and no side effects.
+#[test]
+fn cse_does_not_merge_create_invoice() {
+    let mut program = Program {
+        instructions: vec![
+            Instruction {
+                operation: Operation::CreateInvoice,
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::CreateInvoice,
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::ExtractInvoice(InvoiceField::PaymentHash),
+                inputs: vec![0],
+            },
+            Instruction {
+                operation: Operation::ExtractInvoice(InvoiceField::PaymentSecret),
+                inputs: vec![1],
+            },
+        ],
+    };
+    let original = program.clone();
+
+    assert!(!CommonSubexpressionEliminator.minimize(&mut program));
+    assert_eq!(program, original, "CSE must not merge CreateInvoice");
     assert_well_formed(&program);
 }
 

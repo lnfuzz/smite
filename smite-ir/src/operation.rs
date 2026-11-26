@@ -81,6 +81,9 @@ pub enum Operation {
     /// Extract a field from a parsed `accept_channel` response.
     /// Input: `AcceptChannel`.
     ExtractAcceptChannel(AcceptChannelField),
+    /// Extract a field from an invoice created by `CreateInvoice`.
+    /// Input: `Invoice`.
+    ExtractInvoice(InvoiceField),
     /// Create a BOLT 3 funding transaction for the channel funding flow.
     ///
     /// Inputs (4):
@@ -293,6 +296,9 @@ pub enum Operation {
     ///
     /// Input: `FundingTransaction`.
     LookupShortChannelId,
+    /// Create an any-amount BOLT 11 invoice on the target via RPC.
+    /// Produces an `Invoice` compound variable.
+    CreateInvoice,
 }
 
 /// A BOLT 2 compliant `upfront_shutdown_script` template.
@@ -456,6 +462,16 @@ impl fmt::Display for ShutdownScriptVariant {
     }
 }
 
+/// A field that can be extracted from a compound variable.
+pub trait ExtractField: Copy + PartialEq + 'static {
+    /// All variants. Keep in sync with the enum definition.
+    const ALL: &'static [Self];
+
+    /// Returns the variable type produced by extracting this field.
+    #[must_use]
+    fn output_type(self) -> VariableType;
+}
+
 /// Fields that can be extracted from an `AcceptChannel` compound variable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AcceptChannelField {
@@ -483,9 +499,8 @@ impl fmt::Display for AcceptChannelField {
     }
 }
 
-impl AcceptChannelField {
-    /// All variants. Keep in sync with the enum definition.
-    pub const ALL: &[Self] = &[
+impl ExtractField for AcceptChannelField {
+    const ALL: &'static [Self] = &[
         Self::TemporaryChannelId,
         Self::DustLimitSatoshis,
         Self::MaxHtlcValueInFlightMsat,
@@ -504,9 +519,7 @@ impl AcceptChannelField {
         Self::ChannelType,
     ];
 
-    /// Returns the variable type produced by extracting this field.
-    #[must_use]
-    pub fn output_type(self) -> VariableType {
+    fn output_type(self) -> VariableType {
         match self {
             Self::TemporaryChannelId => VariableType::ChannelId,
             Self::DustLimitSatoshis
@@ -523,6 +536,29 @@ impl AcceptChannelField {
             | Self::FirstPerCommitmentPoint => VariableType::Point,
             Self::UpfrontShutdownScript => VariableType::Bytes,
             Self::ChannelType => VariableType::Features,
+        }
+    }
+}
+
+/// Fields that can be extracted from an `Invoice` compound variable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum InvoiceField {
+    PaymentHash,
+    PaymentSecret,
+}
+
+impl fmt::Display for InvoiceField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl ExtractField for InvoiceField {
+    const ALL: &'static [Self] = &[Self::PaymentHash, Self::PaymentSecret];
+
+    fn output_type(self) -> VariableType {
+        match self {
+            Self::PaymentHash | Self::PaymentSecret => VariableType::PaymentField,
         }
     }
 }
@@ -573,6 +609,7 @@ impl fmt::Display for Operation {
             // Operations with inputs: parens added by Program::Display.
             Self::DerivePoint => write!(f, "DerivePoint"),
             Self::ExtractAcceptChannel(field) => write!(f, "Extract{field}"),
+            Self::ExtractInvoice(field) => write!(f, "Extract{field}"),
             Self::CreateFundingTransaction => write!(f, "CreateFundingTransaction"),
             Self::DeriveTemporaryChannelIdV2 => write!(f, "DeriveTemporaryChannelIdV2"),
             Self::DeriveChannelIdV2 => write!(f, "DeriveChannelIdV2"),
@@ -600,6 +637,7 @@ impl fmt::Display for Operation {
             Self::MineBlocks(v) => write!(f, "MineBlocks({v})"),
             Self::BroadcastTransaction => write!(f, "BroadcastTransaction"),
             Self::LookupShortChannelId => write!(f, "LookupShortChannelId"),
+            Self::CreateInvoice => write!(f, "CreateInvoice()"),
         }
     }
 }
@@ -634,6 +672,7 @@ impl Operation {
             Self::LoadTargetPubkeyFromContext | Self::DerivePoint => Some(VariableType::Point),
             Self::LoadChainHashFromContext => Some(VariableType::ChainHash),
             Self::ExtractAcceptChannel(field) => Some(field.output_type()),
+            Self::ExtractInvoice(field) => Some(field.output_type()),
             Self::CreateFundingTransaction => Some(VariableType::FundingTransaction),
             Self::BuildOpenChannel => Some(VariableType::OpenChannelMessage),
             Self::BuildChannelAnnouncement
@@ -650,6 +689,7 @@ impl Operation {
             Self::SendFundingCreated => Some(VariableType::SentFundingCreated),
             Self::SendShutdown => Some(VariableType::SentShutdown),
             Self::RecvAcceptChannel => Some(VariableType::AcceptChannel),
+            Self::CreateInvoice => Some(VariableType::Invoice),
         }
     }
 
@@ -678,10 +718,12 @@ impl Operation {
             | Self::LoadChainHashFromContext
             | Self::LoadLocalNodeSecretFromContext
             | Self::RecvChannelReady
-            | Self::MineBlocks(_) => vec![],
+            | Self::MineBlocks(_)
+            | Self::CreateInvoice => vec![],
 
             Self::DerivePoint => vec![VariableType::PrivateKey],
             Self::ExtractAcceptChannel(_) => vec![VariableType::AcceptChannel],
+            Self::ExtractInvoice(_) => vec![VariableType::Invoice],
             Self::CreateFundingTransaction => vec![
                 VariableType::Point,        // opener_funding_pubkey
                 VariableType::Point,        // acceptor_funding_pubkey
@@ -821,6 +863,7 @@ impl Operation {
             | Self::LoadLocalNodeSecretFromContext
             | Self::DerivePoint
             | Self::ExtractAcceptChannel(_)
+            | Self::ExtractInvoice(_)
             | Self::CreateFundingTransaction
             | Self::DeriveTemporaryChannelIdV2
             | Self::DeriveChannelIdV2
@@ -844,6 +887,10 @@ impl Operation {
             Self::RecvAcceptChannel => AcceptChannelField::ALL
                 .iter()
                 .map(|&f| (Self::ExtractAcceptChannel(f), f.output_type()))
+                .collect(),
+            Self::CreateInvoice => InvoiceField::ALL
+                .iter()
+                .map(|&f| (Self::ExtractInvoice(f), f.output_type()))
                 .collect(),
         }
     }
@@ -874,6 +921,7 @@ impl Operation {
             | Self::LoadLocalNodeSecretFromContext
             | Self::DerivePoint
             | Self::ExtractAcceptChannel(_)
+            | Self::ExtractInvoice(_)
             | Self::DeriveTemporaryChannelIdV2
             | Self::DeriveChannelIdV2
             | Self::BuildOpenChannel
@@ -881,7 +929,8 @@ impl Operation {
             | Self::BuildNodeAnnouncement { .. }
             | Self::BuildChannelUpdate
             | Self::BuildAnnouncementSignatures
-            | Self::LookupShortChannelId => false,
+            | Self::LookupShortChannelId
+            | Self::CreateInvoice => false,
             Self::CreateFundingTransaction
             | Self::SendMessage
             | Self::SendOpenChannel
@@ -928,6 +977,7 @@ impl Operation {
             | Self::LoadLocalNodeSecretFromContext
             | Self::DerivePoint
             | Self::ExtractAcceptChannel(_)
+            | Self::ExtractInvoice(_)
             | Self::DeriveTemporaryChannelIdV2
             | Self::DeriveChannelIdV2
             | Self::BuildOpenChannel
@@ -946,7 +996,8 @@ impl Operation {
             // negotiation and channel state. The `Recv` operations read
             // whatever the target sends us. `MineBlocks` also mines whatever
             // the private mempool holds, `BroadcastTransaction` dedups against
-            // it, and `LookupShortChannelId` reads chain state.
+            // it, `LookupShortChannelId` reads chain state, and `CreateInvoice`
+            // reads whatever new invoice the target creates.
             Self::CreateFundingTransaction
             | Self::SendFundingCreated
             | Self::RecvAcceptChannel
@@ -954,7 +1005,8 @@ impl Operation {
             | Self::RecvChannelReady
             | Self::MineBlocks(_)
             | Self::BroadcastTransaction
-            | Self::LookupShortChannelId => false,
+            | Self::LookupShortChannelId
+            | Self::CreateInvoice => false,
         }
     }
 
@@ -988,6 +1040,7 @@ impl Operation {
             | Self::LoadShutdownScript(_)
             | Self::LoadChannelType(_)
             | Self::ExtractAcceptChannel(_)
+            | Self::ExtractInvoice(_)
             | Self::BuildNodeAnnouncement { .. }
             | Self::SendChannelReady { .. }
             | Self::MineBlocks(_) => true,
@@ -1012,7 +1065,8 @@ impl Operation {
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
             | Self::BroadcastTransaction
-            | Self::LookupShortChannelId => false,
+            | Self::LookupShortChannelId
+            | Self::CreateInvoice => false,
         }
     }
 }

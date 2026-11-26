@@ -17,6 +17,7 @@ use smite::channel_state::{ChannelState, CommitmentUpdate};
 use smite::channel_tx::{
     ChannelConfig, FundingTransaction, HolderIdentity, Htlc, Side, build_funding_transaction,
 };
+use smite::invoice::Invoice;
 use smite::noise::{ConnectionError, NoiseConnection};
 use smite::onion::{HopPayload, OnionBuilder};
 use smite::oracles::{
@@ -27,7 +28,7 @@ use smite::pending_channel::{KeyOrigin, PendingChannel};
 use smite::violation::Violation;
 
 use super::targets::TargetRpc;
-use smite_ir::operation::AcceptChannelField;
+use smite_ir::operation::{AcceptChannelField, InvoiceField};
 use smite_ir::{Operation, Program, Variable, VariableType};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -319,9 +320,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
     /// - the target sends an unexpected message type
     /// - wallet funds are insufficient to perform a channel operation
     /// - the initial commitment transaction cannot be constructed
-    /// - the target commits a [`Violation`] (unknown channel, temporary
-    ///   channel id reuse, opener cannot afford the commitment feerate, or
-    ///   invalid counterparty signature)
+    /// - the target commits a [`Violation`]
     ///
     /// # Panics
     ///
@@ -398,7 +397,12 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
 
                 Operation::ExtractAcceptChannel(field) => {
                     let ac = resolve_accept_channel(&variables, instr.inputs[0]);
-                    Some(extract_field(ac, *field))
+                    Some(extract_accept_channel_field(ac, *field))
+                }
+
+                Operation::ExtractInvoice(field) => {
+                    let invoice = resolve_invoice(&variables, instr.inputs[0]);
+                    Some(extract_invoice_field(invoice, *field))
                 }
 
                 Operation::CreateFundingTransaction => {
@@ -661,6 +665,18 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     );
                     Some(Variable::ShortChannelId(scid))
                 }
+
+                Operation::CreateInvoice => {
+                    // An unreachable target has already crashed/hanged, which
+                    // check_alive/ping-pong reports at the end.
+                    let bolt11 = self.rpc.create_invoice().ok_or_else(|| {
+                        ConnectionError::Io(std::io::ErrorKind::NotConnected.into())
+                    })?;
+                    log::debug!("[{:?}] CreateInvoice: bolt11={}", start.elapsed(), bolt11);
+                    let invoice = Invoice::decode(&bolt11)
+                        .map_err(|e| Violation::InvalidInvoice(bolt11, e))?;
+                    Some(Variable::Invoice(invoice))
+                }
             };
 
             variables.push(result);
@@ -818,6 +834,7 @@ define_resolver!(
     FundingTransaction,
     &FundingTransaction
 );
+define_resolver!(resolve_invoice, Invoice, &Invoice);
 
 /// Consumes an affine variable, leaving its slot void so it cannot be used
 /// again.
@@ -1562,7 +1579,7 @@ fn record_recv_channel_ready(
 }
 
 /// Extracts a field from a parsed `accept_channel` message.
-fn extract_field(ac: &AcceptChannel, field: AcceptChannelField) -> Variable {
+fn extract_accept_channel_field(ac: &AcceptChannel, field: AcceptChannelField) -> Variable {
     match field {
         AcceptChannelField::TemporaryChannelId => Variable::ChannelId(ac.temporary_channel_id),
         AcceptChannelField::DustLimitSatoshis => Variable::Amount(ac.dust_limit_satoshis),
@@ -1590,6 +1607,14 @@ fn extract_field(ac: &AcceptChannel, field: AcceptChannelField) -> Variable {
         AcceptChannelField::ChannelType => {
             Variable::Features(ac.tlvs.channel_type.clone().unwrap_or_default())
         }
+    }
+}
+
+/// Extracts a field from a decoded invoice.
+fn extract_invoice_field(invoice: &Invoice, field: InvoiceField) -> Variable {
+    match field {
+        InvoiceField::PaymentHash => Variable::PaymentField(invoice.payment_hash),
+        InvoiceField::PaymentSecret => Variable::PaymentField(invoice.payment_secret),
     }
 }
 

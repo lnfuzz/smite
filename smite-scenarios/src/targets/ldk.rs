@@ -83,6 +83,25 @@ impl TargetRpc for LdkRpc {
             log::warn!("sync_wallets could not reach ldk: {e}");
         }
     }
+
+    /// RPC to register an any-amount invoice on LDK.
+    ///
+    /// # Panics
+    ///
+    /// - If the wrapper answers with an error, which means the call itself is
+    ///   at fault rather than the target having crashed/hanged.
+    fn create_invoice(&mut self) -> Option<String> {
+        let result = self
+            .run("receive_variable_amount", serde_json::json!({}))
+            .inspect_err(|e| log::warn!("receive_variable_amount could not reach ldk: {e}"))
+            .ok()?;
+        Some(
+            result["bolt11"]
+                .as_str()
+                .expect("valid bolt11 invoice")
+                .to_owned(),
+        )
+    }
 }
 
 /// LDK Lightning node target.
