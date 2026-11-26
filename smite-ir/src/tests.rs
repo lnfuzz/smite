@@ -1,6 +1,6 @@
 //! Tests for IR types.
 
-use bitcoin::secp256k1::SecretKey;
+use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use rand::{Rng, RngExt};
@@ -1602,6 +1602,56 @@ fn generated_channel_announcement_program_structure() {
     assert!(
         create < broadcast && broadcast < mine && mine < lookup,
         "expected Create < Broadcast < Mine < Lookup, got {create} {broadcast} {mine} {lookup}",
+    );
+}
+
+#[test]
+fn generated_channel_announcement_orders_node_ids_and_preserves_key_pairs() {
+    let secp = Secp256k1::signing_only();
+    let mut saw_ordered = false;
+    let mut saw_reversed = false;
+    for seed in 0..100 {
+        let program = generate_channel_announcement_program(seed);
+        let build_idx = find_operation!(program, Operation::BuildChannelAnnouncement);
+        let build = &program.instructions[build_idx];
+        // The generator creates two node keys followed by their two bitcoin keys.
+        let private_keys: Vec<_> = program
+            .instructions
+            .iter()
+            .enumerate()
+            .filter_map(|(index, instr)| {
+                if matches!(instr.operation, Operation::LoadPrivateKey(_)) {
+                    Some(index)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let [node_1, node_2, bitcoin_1, bitcoin_2]: [usize; 4] =
+            private_keys.try_into().expect("four fresh private keys");
+        let node_id = |index: usize| {
+            let Operation::LoadPrivateKey(bytes) = program.instructions[index].operation else {
+                unreachable!("private key load");
+            };
+            PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&bytes).unwrap()).serialize()
+        };
+        let expected = if node_id(node_1) < node_id(node_2) {
+            saw_ordered = true;
+            [node_1, node_2, bitcoin_1, bitcoin_2]
+        } else {
+            saw_reversed = true;
+            [node_2, node_1, bitcoin_2, bitcoin_1]
+        };
+        assert_eq!(
+            build.inputs[3..],
+            expected,
+            "seed {seed}: node and bitcoin key order"
+        );
+        assert_well_formed(&program);
+    }
+    assert!(
+        saw_ordered && saw_reversed,
+        "exercise both original key orders"
     );
 }
 
