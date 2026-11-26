@@ -13,7 +13,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::secp256k1;
 use serde::Deserialize;
@@ -90,6 +90,35 @@ impl TargetRpc for ClnRpc {
             // at the end.
             log::warn!("syncblocks could not reach lightningd: {e}");
         }
+    }
+
+    /// RPC to register an any-amount invoice on CLN.
+    ///
+    /// # Panics
+    ///
+    /// - If lightningd answers with an error, which means the call itself is at
+    ///   fault rather than the target having crashed/hanged.
+    fn create_invoice(&mut self) -> Option<String> {
+        // lightningd rejects duplicate labels, so label each invoice with a
+        // nanosecond timestamp, which never repeats across sequential calls.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("valid system time");
+        let params = serde_json::json!({
+            "amount_msat": "any",
+            "label": now.as_nanos(),
+            "description": "smite",
+        });
+        let result = self
+            .run("invoice", params)
+            .inspect_err(|e| log::warn!("invoice could not reach lightningd: {e}"))
+            .ok()?;
+        Some(
+            result["bolt11"]
+                .as_str()
+                .expect("valid bolt11 invoice")
+                .to_owned(),
+        )
     }
 }
 

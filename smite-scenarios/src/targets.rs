@@ -45,6 +45,10 @@ pub fn check_crash_log() -> Result<(), TargetError> {
 pub trait TargetRpc {
     /// Notifies the target of newly mined blocks so it updates its chain view.
     fn chain_sync(&mut self);
+
+    /// Creates an any-amount BOLT 11 invoice and returns its encoded string, or
+    /// `None` if the target is unreachable.
+    fn create_invoice(&mut self) -> Option<String>;
 }
 
 /// A Lightning implementation that can be fuzzed.

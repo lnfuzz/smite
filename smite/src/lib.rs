@@ -15,7 +15,7 @@
 //! - [`oracles`] - Protocol invariant checks.
 //! - [`pending_channel`] - BOLT 2 channel negotiation state.
 //! - [`process`] - Managed subprocess utilities.
-//! - [`rpc`] - Client for target node JSON-RPC over a Unix socket.
+//! - [`rpc`] - Clients for target node RPC (JSON-RPC over Unix socket, JSON over HTTP).
 //! - [`runners`] - Fuzz input delivery (Nyx and local modes).
 //! - [`scenarios`] - Scenario trait and the [`scenarios::smite_run`] entry point.
 //! - [`violation`] - Target-misbehavior findings that make a test case fail.

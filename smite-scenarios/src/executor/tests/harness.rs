@@ -142,6 +142,10 @@ impl TargetRpc for MockTargetRpc {
     fn chain_sync(&mut self) {
         self.chain_syncs += 1;
     }
+
+    fn create_invoice(&mut self) -> Option<String> {
+        unimplemented!("no executor operation creates invoices yet")
+    }
 }
 
 // -- Fixture --

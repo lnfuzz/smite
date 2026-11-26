@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use ldk_node::Builder;
 use ldk_node::bitcoin::Network;
+use ldk_node::lightning_invoice::{Bolt11InvoiceDescription, Description};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -39,6 +40,7 @@ fn install_panic_hook() {
 #[serde(rename_all = "snake_case")]
 enum Method {
     SyncWallets,
+    ReceiveVariableAmount,
     Stop,
 }
 
@@ -162,6 +164,18 @@ fn main() {
                     eprintln!("sync_wallets failed: {e}");
                 }
                 respond(&mut stream, &request.id, Ok(json!({})));
+            }
+            // Creates an any-amount invoice valid for an hour.
+            Method::ReceiveVariableAmount => {
+                let result = node
+                    .bolt11_payment()
+                    .receive_variable_amount(
+                        &Bolt11InvoiceDescription::Direct(Description::empty()),
+                        3600,
+                    )
+                    .map(|invoice| json!({ "bolt11": invoice.to_string() }))
+                    .map_err(|e| e.to_string());
+                respond(&mut stream, &request.id, result);
             }
             // Shut down on request. Reply first, then stop serving so the node
             // is stopped below.
