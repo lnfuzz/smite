@@ -9,11 +9,12 @@
 
 use super::harness::{
     PointSource, SampleOpenChannel, SampleUpdateAddHtlc, TEMPORARY_CHANNEL_ID, acceptor_funding_sk,
-    funded_open_channel, opener_funding_sk, second_funded_open_channel,
+    funded_open_channel, funding_channel_id, opener_funding_sk, second_funded_open_channel,
 };
 use crate::executor::*;
 use smite_ir::Instruction;
 use smite_ir::builder::ProgramBuilder;
+use smite_ir::operation::ShutdownScriptVariant;
 
 // -- open_channel --
 
@@ -334,33 +335,77 @@ pub fn fund_channel_program() -> Program {
     b.build()
 }
 
-/// A program that funds a channel, mines `confirmations` blocks, and receives
-/// the target's `channel_ready`.
-pub fn recv_channel_ready_program(confirmations: u8) -> Program {
-    let mut b = ProgramBuilder::new();
-    fund_channel(&mut b);
+/// Funds a channel, mines `confirmations` blocks, and receives the target's
+/// `channel_ready`.
+pub fn establish_channel(b: &mut ProgramBuilder, confirmations: u8) -> FundedChannel {
+    let funded = fund_channel(b);
     b.append(Operation::MineBlocks(confirmations), &[]);
     b.append(Operation::RecvChannelReady, &[]);
+
+    funded
+}
+
+/// A program that runs [`establish_channel`].
+pub fn recv_channel_ready_program(confirmations: u8) -> Program {
+    let mut b = ProgramBuilder::new();
+    establish_channel(&mut b, confirmations);
 
     b.build()
 }
 
-/// A program that negotiates [`funded_open_channel`] and
-/// [`second_funded_open_channel`], funds both, mines to their `minimum_depth`,
-/// and receives a `channel_ready` for each.
-pub fn recv_two_channel_ready_program() -> Program {
+/// Sends a `channel_ready` for `channel_id` without an alias.
+pub fn send_channel_ready(b: &mut ProgramBuilder, channel_id: ChannelId) {
+    let channel_id_var = b.append(Operation::LoadChannelId(channel_id.0), &[]);
+    let privkey = b.append(Operation::LoadPrivateKey([0x07; 32]), &[]);
+    let point = b.append(Operation::DerivePoint, &[privkey]);
+    let alias = b.append(Operation::LoadShortChannelId(0), &[]);
+    b.append(
+        Operation::SendChannelReady {
+            include_alias: false,
+        },
+        &[channel_id_var, point, alias],
+    );
+}
+
+// -- shutdown --
+
+/// Sends a `shutdown` for `channel_id` carrying `script`, returning the
+/// `channel_id` variable.
+pub fn send_shutdown(
+    b: &mut ProgramBuilder,
+    channel_id: ChannelId,
+    script: ShutdownScriptVariant,
+) -> usize {
+    let channel_id_var = b.append(Operation::LoadChannelId(channel_id.0), &[]);
+    let scriptpubkey = b.append(Operation::LoadShutdownScript(script), &[]);
+    b.append(Operation::SendShutdown, &[channel_id_var, scriptpubkey]);
+
+    channel_id_var
+}
+
+/// A program that establishes the funding flow's channel, sends our
+/// `channel_ready` and a `shutdown` for `channel_id` carrying `script`, and
+/// receives the target's `shutdown`.
+pub fn recv_shutdown_program(channel_id: ChannelId, script: ShutdownScriptVariant) -> Program {
+    let mut b = ProgramBuilder::new();
+    establish_channel(&mut b, 6);
+    send_channel_ready(&mut b, funding_channel_id());
+    send_shutdown(&mut b, channel_id, script);
+    b.append(Operation::RecvShutdown, &[]);
+
+    b.build()
+}
+
+/// Negotiates [`funded_open_channel`] and [`second_funded_open_channel`], funds
+/// both, mines to their `minimum_depth`, and receives a `channel_ready` for each.
+pub fn establish_two_channels(b: &mut ProgramBuilder) {
     let second = second_funded_open_channel();
 
-    let mut b = ProgramBuilder::new();
-    negotiate_channel(&mut b, &funded_open_channel());
-    negotiate_channel(&mut b, &second);
-    let first_funding_created = send_funding_created(&mut b);
+    negotiate_channel(b, &funded_open_channel());
+    negotiate_channel(b, &second);
+    let first_funding_created = send_funding_created(b);
     b.append(Operation::RecvFundingSigned, &[first_funding_created.sent]);
-    let tx = create_funding_tx_with(
-        &mut b,
-        second.message.funding_satoshis,
-        FUNDING_FEERATE_PER_KW,
-    );
+    let tx = create_funding_tx_with(b, second.message.funding_satoshis, FUNDING_FEERATE_PER_KW);
     b.append(Operation::BroadcastTransaction, &[tx.tx]);
     let temporary_channel_id = b.append(
         Operation::LoadChannelId(second.message.temporary_channel_id.0),
@@ -379,6 +424,12 @@ pub fn recv_two_channel_ready_program() -> Program {
     b.append(Operation::MineBlocks(6), &[]);
     b.append(Operation::RecvChannelReady, &[]);
     b.append(Operation::RecvChannelReady, &[]);
+}
+
+/// A program that runs [`establish_two_channels`].
+pub fn recv_two_channel_ready_program() -> Program {
+    let mut b = ProgramBuilder::new();
+    establish_two_channels(&mut b);
 
     b.build()
 }
